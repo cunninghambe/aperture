@@ -6,6 +6,9 @@ import { registerIpc } from './ipc.js';
 import { installBlocker } from '@privacy/blocker';
 import { containers } from '@privacy/containers';
 import { startMcpServer } from '@mcp/server';
+import { profiles } from '@vault/profileStore';
+import { invalidate } from '@core/snapshot/engine';
+import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
 
 /** Chromium switches applied before app-ready. */
 function applyCommandLineSwitches(): void {
@@ -19,6 +22,8 @@ function applyCommandLineSwitches(): void {
     'InterestFeedContentSuggestions',
   ].join(','));
   app.commandLine.appendSwitch('disable-domain-reliability');
+  // Must happen before app-ready: force-dark is a Blink setting.
+  enableForceDark();
   app.commandLine.appendSwitch('no-pings');
   // WebRTC leaks the real local IP even behind a proxy unless this is set.
   app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default_public_interface_only');
@@ -61,6 +66,10 @@ async function createWindow(): Promise<void> {
 
   tabs = new TabManager(win);
 
+  // A navigation invalidates every ref and clears any taint, so the next
+  // observation must be a full snapshot.
+  tabs.on('navigated', (tabId: string) => invalidate(tabId));
+
   // Push tab state to the chrome UI whenever it changes.
   tabs.on('changed', (list, activeId) => {
     chrome?.webContents.send('tabs:changed', { tabs: list, activeId });
@@ -97,12 +106,36 @@ applyCommandLineSwitches();
 app.whenReady().then(async () => {
   // Blocking must be installed on the default container's session before the
   // first request goes out.
+  applyDarkMode('dark');
   await installBlocker(containers.sessionFor(containers.defaultId()));
 
   await createWindow();
 
   const mcp = await startMcpServer(() => tabs);
   await publishMcpConfig(mcp);
+
+  // Dev-only: seed a demo identity profile so the autofill path can be
+  // exercised end to end. Not an agent-reachable write path — it requires an
+  // explicit command-line flag on the browser itself.
+  if (process.argv.includes('--seed-profile')) {
+    await profiles.load();
+    await profiles.upsert(
+      {
+        id: 'demo',
+        label: 'Demo',
+        values: {
+          givenName: 'Brad', familyName: 'Cunningham',
+          fullName: 'Brad Cunningham', email: 'brad@example.com',
+          phone: '+61 400 000 000', addressLine1: '1 Example Street',
+          city: 'Melbourne', region: 'VIC', postalCode: '3000',
+          organization: 'PlusLife', jobTitle: 'Director',
+          linkedin: 'linkedin.com/in/example', dateOfBirth: '1980-01-01',
+        },
+      },
+      true,
+    );
+    console.log('[aperture] seeded demo profile');
+  }
 
   app.on('activate', () => {
     if (!win) void createWindow();

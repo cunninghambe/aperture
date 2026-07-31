@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Senior Engineer — Application</title>
+  </head>
+  <body>
+    <header><h1>Apply: Senior Engineer</h1></header>
+    <main>
+      <form id="app">
+        <h2>About you</h2>
+        <label for="fn">First name</label>
+        <input id="fn" name="first_name" autocomplete="given-name" required />
+
+        <label for="ln">Last name</label>
+        <input id="ln" name="last_name" autocomplete="family-name" required />
+
+        <label for="em">Email address</label>
+        <input id="em" name="email" type="email" required />
+
+        <label for="ph">Mobile number</label>
+        <input id="ph" name="phone" type="tel" />
+
+        <h2>Where you live</h2>
+        <label for="a1">Street address</label>
+        <input id="a1" name="address1" autocomplete="address-line1" />
+
+        <label for="a2">Apartment, suite, etc.</label>
+        <input id="a2" name="address2" />
+
+        <label for="ct">Town / City</label>
+        <input id="ct" name="city" autocomplete="address-level2" />
+
+        <label for="pc">Postcode</label>
+        <input id="pc" name="postcode" autocomplete="postal-code" />
+
+        <h2>Work</h2>
+        <label for="co">Current company</label>
+        <input id="co" name="company" />
+
+        <label for="ti">Job title</label>
+        <input id="ti" name="title" />
+
+        <label for="li">LinkedIn profile</label>
+        <input id="li" name="linkedin" />
+
+        <h2>Questions</h2>
+        <label for="wy">Why do you want this role?</label>
+        <textarea id="wy" name="why" rows="4"></textarea>
+
+        <label for="hr">How did you hear about us?</label>
+        <input id="hr" name="heard" />
+
+        <label for="dob">Date of birth</label>
+        <input id="dob" name="dob" />
+
+        <button type="submit">Submit application</button>
+      </form>
+    </main>
+  </body>
+</html>

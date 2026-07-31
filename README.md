@@ -70,6 +70,65 @@ anything. playwright-mcp (~50 tools) and chrome-devtools-mcp (51) levy a ~50k
 token tax on every session. Aperture ships 8 tools behind `action`
 discriminators.
 
+## Autofill: the thing that makes this useful daily
+
+A job application asks for the same twelve facts the last one did. Aperture
+stores them once, and the agent proposes filling them:
+
+```
+profile "Demo" · 11 of 12 fields ready
+
+e3  "First name"             → givenName: Brad
+e5  "Email address"          → email ~85%: brad@example.com
+e8  "Apartment, suite, etc." → addressLine2: —  SKIP: no-value
+e16 "Date of birth"          → dateOfBirth ~85%: (from profile — value not shown)
+```
+
+The human says "yes, use my defaults"; the browser fills. Note what is *not*
+in that list: "Why do you want this role?" is a prose question, not an identity
+field, and matching a stray keyword inside one is how you end up submitting
+"Director" as an essay answer. Free-text prompts are excluded by shape.
+
+Matching uses the HTML `autocomplete` attribute first — it is a standardized
+declaration of exactly what a field wants, and a surprising share of real forms
+set it correctly — then label heuristics. Low-confidence matches are **reported
+but not filled**: silently putting a wrong value in a field the human then
+submits is worse than leaving it blank.
+
+**Attachments** (CV, cover letter, portfolio) work the same way, with one hard
+constraint: the agent picks files **by id from a library the human curated**, and
+cannot pass a path. "Attach my CV" and "read any file on this machine and upload
+it somewhere" are the same primitive if the agent controls the path — so it
+doesn't.
+
+This is also the honest answer to CAPTCHAs (see below): the human proves they're
+human, the agent does the typing. No evasion involved, which is exactly why it
+keeps working.
+
+## Dark mode
+
+Three layers, because no single one covers every case:
+
+1. **Tell the site the truth** — `prefers-color-scheme` reports the real
+   preference, so sites shipping their own dark theme use it. Always better than
+   anything synthesized.
+2. **Chromium force-dark** for sites without one. It works on the rendered
+   layout tree and runs in the compositor, so it costs nothing per frame.
+   Applied per-tab via CDP `Emulation.setAutoDarkModeOverride` — **verified
+   working on Electron 43**, which is what makes per-site control possible at
+   all (the Blink setting alone is process-wide).
+3. **Filter inversion** as fallback and for brightness/contrast, which
+   force-dark doesn't expose at runtime.
+
+Per-site policy is Auto / On / Off, where Auto measures the page's background
+luminance and skips sites that are already dark.
+
+The filter fallback and the control model are adapted from
+[Nightfall](https://github.com/cunninghambe/nightfall) — specifically its
+counter-inversion set with the nesting guard, which stops a photo inside an
+already-counter-inverted container coming out net-inverted. An extension can't
+reach layer 2; owning the browser is the only way to get it.
+
 ## Privacy
 
 - **Identity containers** — isolated cookie jar, cache, and storage per
@@ -177,12 +236,25 @@ direction.
 | MCP server over Streamable HTTP, 8 tools | **Working** — verified against a live browser |
 | Bearer auth + DNS-rebinding guards | **Working** — verified (401 / 403) |
 | Untrusted-content envelope | **Working** — verified |
-| Snapshot engine: refs, diff, render, volatility | **Built and tested** (37 tests) — *not yet wired to a live page* |
-| In-page walker | Written; the preload↔main bridge is the next piece |
+| Snapshot engine end-to-end (walker → refs → diff → render) | **Working** — verified on a real form |
+| Autofill: profile matching, plan/apply, sensitive-field redaction | **Working** — verified end-to-end |
+| Dark mode (per-tab force-dark + per-site policy) | **Working** — CDP override verified on Electron 43 |
+| Attachments (CV upload via `DOM.setFileInputFiles`) | Built; library is human-curated. Multi-upload forms need the ref→node bridge |
 | Tracker blocking | Wired; not yet measured |
 | Identity containers | Sessions and partitions working; per-container fingerprint not applied |
 | Vault | Crypto and API shape done; **fill path deliberately refuses** rather than pretending |
+| Password manager UI | **Not built yet** — the vault has no window, so it cannot be unlocked from the UI. Next piece |
 | Extensions | Not started — see below |
+
+**A bug worth recording, because testing caught it and the design predicted it.**
+The first end-to-end autofill run filled the date of birth through the
+agent-blind path, and then leaked it straight back out in the next snapshot —
+because the walker reads input values from the DOM. Filling correctly is only
+half the job: the value now lives in the page, and the agent has tools that read
+the page. Fixed with a per-tab taint set that redacts those fields before
+anything downstream sees them, cleared on navigation. The redaction is a fixed
+marker rather than a length-accurate mask, because length is real information
+about a secret.
 
 **Known risks, stated rather than buried:**
 

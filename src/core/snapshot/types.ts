@@ -75,6 +75,14 @@ export interface SnapshotNode {
   /** Number of options on a select, when not enumerated inline. */
   optionCount?: number;
   /**
+   * The field's own `autocomplete` token. Kept out of the rendered text (it
+   * costs tokens and the agent does not need it) but carried on the node,
+   * because it is the strongest available signal for autofill matching.
+   */
+  autocomplete?: string;
+  /** Input type attribute, for the same reason. */
+  inputType?: string;
+  /**
    * Shape hash over child roles, ignoring text. Runs of siblings sharing a
    * shape hash are what make "…21 more listitems (same shape)" possible.
    */

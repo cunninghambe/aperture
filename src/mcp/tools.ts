@@ -4,6 +4,29 @@ import type { TabManager } from '@main/tabs.js';
 import { normalizeUrl } from '@main/tabs.js';
 import { containers } from '@privacy/containers.js';
 import { vault } from '@vault/vault.js';
+import {
+  attachFiles,
+  markTainted,
+  observe,
+  requestFill,
+  stateFor,
+} from '@core/snapshot/engine.js';
+import { profiles } from '@vault/profileStore.js';
+import {
+  buildFillPlan,
+  fillableEntries,
+  type FieldCandidate,
+} from '@vault/profile.js';
+import type { SnapshotNode } from '@core/snapshot/types.js';
+import { attachments } from '@vault/attachments.js';
+import {
+  applyDarkMode,
+  applyToTab,
+  currentMode,
+  isDark,
+  mechanism,
+  setSitePolicy,
+} from '@privacy/darkmode.js';
 
 /**
  * The agent-facing tool surface.
@@ -68,6 +91,29 @@ function safeOrigin(url: string): string {
 
 function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
+}
+
+/** Walk the snapshot in document order for anything a profile could fill. */
+function collectFields(root: SnapshotNode, out: FieldCandidate[] = []): FieldCandidate[] {
+  const fillable =
+    root.role === 'textbox' || root.role === 'searchbox' || root.role === 'combobox';
+
+  // Password fields belong to the vault path, not the profile path. Their
+  // values are masked in the snapshot anyway, but excluding them here means the
+  // two systems can never be confused for one another.
+  if (fillable && root.ref && root.inputType !== 'password') {
+    out.push({
+      ref: root.ref,
+      key: root.key,
+      label: root.name ?? '',
+      autocomplete: root.autocomplete,
+      inputType: root.inputType,
+      hasValue: Boolean(root.value),
+    });
+  }
+
+  for (const c of root.children) collectFields(c, out);
+  return out;
 }
 
 export function registerBrowserTools(
@@ -197,21 +243,15 @@ export function registerBrowserTools(
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ tabId }) => {
+    async ({ mode, tabId, budgetTokens }) => {
       const t = tabs();
       const id = tabId ?? t.active;
       if (!id) return text('error: no active tab');
-      const info = t.info(id);
-      // The snapshot engine's in-page walker is wired up in the page preload;
-      // see src/preload/page.ts. Until that bridge lands this reports honestly
-      // rather than returning a plausible-looking empty tree.
-      return text(
-        untrusted(
-          info?.url ?? '',
-          `page "${info?.title}" ${info?.url}\n` +
-            '(snapshot bridge not yet wired — see docs/design/snapshot.md)',
-        ),
-      );
+      const { text: rendered } = await observe(id, t.webContents(id), {
+        full: mode === 'full',
+        budgetTokens,
+      });
+      return text(untrusted(t.info(id)?.url ?? '', rendered));
     },
   );
 
@@ -338,6 +378,233 @@ export function registerBrowserTools(
       return text(
         'fill refused: the vault fill path is not yet wired in this build.\n' +
           'No credential was read, and none was inserted.',
+      );
+    },
+  );
+
+  // -- autofill -------------------------------------------------------------
+
+  server.registerTool(
+    'browser_fill_form',
+    {
+      title: 'Fill a form from the saved identity profile',
+      description:
+        'Match the form on the page against the human\'s saved profile ' +
+        '(name, address, company, email, links) and fill it.\n\n' +
+        'Call with action:"plan" first. That returns the proposed mapping — ' +
+        'which field gets what — so you can show it to the human and ask ' +
+        'whether to use their defaults. Then call action:"apply".\n\n' +
+        'Low-confidence matches are listed but NOT filled, because silently ' +
+        'putting the wrong value in a field the human then submits is worse ' +
+        'than leaving it blank. Sensitive fields (date of birth, national ID, ' +
+        'salary) show as "from profile" and their values are never returned ' +
+        'to you — the browser inserts them directly.',
+      inputSchema: z.object({
+        action: z.enum(['plan', 'apply']).default('plan'),
+        tabId: z.string().optional(),
+        profileId: z.string().optional().describe('Defaults to the default profile.'),
+        overwrite: z
+          .boolean()
+          .default(false)
+          .describe('Replace values already present in the form.'),
+        only: z
+          .array(z.string())
+          .optional()
+          .describe('Restrict to these refs, e.g. after the human deselected some.'),
+      }),
+    },
+    async ({ action, tabId, profileId, overwrite, only }) => {
+      const t = tabs();
+      const id = tabId ?? t.active;
+      if (!id) return text('error: no active tab');
+
+      await profiles.load();
+      const profile = profiles.get(profileId);
+      if (!profile) {
+        return text(
+          'no identity profile saved yet — the human can add one in ' +
+            'Aperture\'s settings. Profiles are human-managed by design; ' +
+            'there is no tool here that writes one.',
+        );
+      }
+
+      // Snapshot first, so refs in the plan match what the agent has seen.
+      await observe(id, t.webContents(id));
+      const st = stateFor(id);
+      if (!st.last) return text('could not read the page');
+
+      const candidates = collectFields(st.last.root);
+      if (!candidates.length) return text('no fillable form fields found');
+
+      const plan = buildFillPlan(candidates, profile, { overwrite });
+      const selected = only
+        ? plan.filter((e) => only.includes(e.ref))
+        : plan;
+
+      if (action === 'plan') {
+        const lines = selected.map((e) => {
+          const val = e.sensitive
+            ? '(from profile — value not shown)'
+            : (e.preview ?? '—');
+          const flag = e.skip ? `  SKIP: ${e.skip}` : '';
+          const conf = e.confidence < 0.9 ? ` ~${Math.round(e.confidence * 100)}%` : '';
+          return `${e.ref} "${e.label}" → ${e.field}${conf}: ${val}${flag}`;
+        });
+        const willFill = fillableEntries(selected).length;
+        return text(
+          `profile "${profile.label}" · ${willFill} of ${selected.length} fields ready\n\n` +
+            lines.join('\n') +
+            '\n\nAsk the human whether to fill with these defaults, then call ' +
+            'action:"apply".',
+        );
+      }
+
+      const toFill = fillableEntries(selected);
+      if (!toFill.length) return text('nothing to fill');
+
+      const fills = toFill.map((e) => ({
+        key: e.key,
+        value: profile.values[e.field] ?? '',
+      }));
+
+      // Mark sensitive targets BEFORE the fill, so there is no window in which
+      // a concurrent snapshot could read the value back out of the DOM.
+      markTainted(
+        id,
+        toFill.filter((e) => e.sensitive).map((e) => e.key),
+      );
+
+      const res = await requestFill(t.webContents(id), fills);
+
+      // Report field names, never values — the sensitive ones must not come
+      // back through the agent on the return path either.
+      const names = toFill.map((e) => e.field).join(', ');
+      return text(
+        res.ok
+          ? `filled ${res.filled.length} fields: ${names}\n` +
+              'Call browser_snapshot to confirm, and check anything marked ' +
+              'SKIP in the plan.'
+          : `fill failed: ${res.reason ?? 'unknown'}`,
+      );
+    },
+  );
+
+  server.registerTool(
+    'browser_profile',
+    {
+      title: 'List saved identity profiles',
+      description:
+        'Which identity profiles exist and which fields each holds. Returns ' +
+        'field names only, never values. Profiles are created and edited by ' +
+        'the human in Aperture; there is no tool here that writes one.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      await profiles.load();
+      const list = profiles.list();
+      if (!list.length) return text('no profiles saved');
+      return text(
+        list
+          .map((p) => `${p.id} "${p.label}" — ${p.fields.join(', ')}`)
+          .join('\n'),
+      );
+    },
+  );
+
+  server.registerTool(
+    'browser_attach',
+    {
+      title: 'Attach a saved file (CV, cover letter, portfolio)',
+      description:
+        'List the human\'s attachment library, or attach one of its files to ' +
+        'the upload field on the page.\n\n' +
+        'You choose files by id from the library. You cannot pass a file path, ' +
+        'and there is no tool here that reads the filesystem — "attach my CV" ' +
+        'and "read any file on this machine and upload it" would otherwise be ' +
+        'the same capability.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'attach']).default('list'),
+        attachmentId: z.string().optional(),
+        tabId: z.string().optional(),
+      }),
+    },
+    async ({ action, attachmentId, tabId }) => {
+      await attachments.load();
+
+      if (action === 'list') {
+        const list = attachments.listPublic();
+        if (!list.length) {
+          return text(
+            'attachment library is empty — the human can add a CV in ' +
+              'Aperture\'s settings',
+          );
+        }
+        return text(
+          list
+            .map((a) => `${a.id} [${a.kind}] "${a.label}" — ${a.filename} (${a.sizeKb}KB)`)
+            .join('\n'),
+        );
+      }
+
+      if (!attachmentId) return text('error: attachmentId required');
+      const t = tabs();
+      const id = tabId ?? t.active;
+      if (!id) return text('error: no active tab');
+
+      const { paths, missing } = attachments.resolvePaths([attachmentId]);
+      if (missing.length || !paths.length) {
+        return text(`no attachment with id ${attachmentId}`);
+      }
+
+      const res = await attachFiles(t.webContents(id), '', paths);
+      const meta = attachments.listPublic().find((a) => a.id === attachmentId);
+      return text(
+        res.ok
+          ? `attached "${meta?.filename}" to the upload field`
+          : `attach failed: ${res.reason ?? 'unknown'}`,
+      );
+    },
+  );
+
+  server.registerTool(
+    'browser_theme',
+    {
+      title: 'Dark mode',
+      description:
+        'Read or set the browser theme. Sites that ship their own dark theme ' +
+        'get told the preference and use it; sites that do not are darkened ' +
+        'by Chromium\'s force-dark engine, which leaves images and video alone.\n\n' +
+        'Per-site policy: "auto" darkens unless the site already ships a dark ' +
+        'theme, "on" always darkens, "off" never does.',
+      inputSchema: z.object({
+        mode: z.enum(['system', 'light', 'dark']).optional(),
+        site: z
+          .enum(['auto', 'on', 'off'])
+          .optional()
+          .describe('Policy for the current tab\'s origin.'),
+        tabId: z.string().optional(),
+      }),
+    },
+    async ({ mode, site, tabId }) => {
+      const t = tabs();
+      if (mode) applyDarkMode(mode);
+
+      const id = tabId ?? t.active;
+      let applied = '';
+      if (id) {
+        const url = t.info(id)?.url ?? '';
+        const origin = safeOrigin(url);
+        if (site) setSitePolicy(origin, site);
+        if (origin !== 'unknown') {
+          const r = await applyToTab(t.webContents(id), origin);
+          applied = `\n${origin}: ${r.darkened ? 'darkened' : 'not darkened'} (${r.reason})`;
+        }
+      }
+
+      return text(
+        `theme: ${currentMode()} (rendering ${isDark() ? 'dark' : 'light'})\n` +
+          `mechanism: ${mechanism()}${applied}`,
       );
     },
   );

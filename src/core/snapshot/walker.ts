@@ -40,6 +40,16 @@ export interface WalkContext {
   frameId: number;
   doc: Document;
   win: Window;
+  /**
+   * Populated with identity key → live element as the walk proceeds, so the
+   * main process can later act on a node without us having to mutate the page.
+   *
+   * Playwright stamps `aria-ref` attributes onto the DOM to solve this.
+   * Keeping the index here instead means the page cannot see that it is being
+   * observed, and we leave no attributes behind for a site to fingerprint or
+   * for a hostile page to forge.
+   */
+  index?: Map<string, HTMLElement>;
 }
 
 /** Roles that get a ref, because an agent can address them. */
@@ -131,9 +141,12 @@ function visit(
   }
 
   const rect = rectOf(el);
+  const key = identityKey(el, role, name, ancestry, ctx.frameId);
+  if (ctx.index && ADDRESSABLE.has(role)) ctx.index.set(key, el);
+
   const node: SnapshotNode = {
     role,
-    key: identityKey(el, role, name, ancestry, ctx.frameId),
+    key,
     states: statesOf(el, ctx.win, rect),
     frameId: ctx.frameId,
     rect,
@@ -151,6 +164,16 @@ function visit(
 
   const value = valueOf(el);
   if (value !== undefined) node.value = value;
+
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  ) {
+    const ac = el.getAttribute('autocomplete');
+    if (ac && ac !== 'off') node.autocomplete = ac;
+    if (el instanceof HTMLInputElement) node.inputType = el.type.toLowerCase();
+  }
 
   if (el instanceof HTMLSelectElement) {
     // Enumerating 51 US states costs more than telling the agent there are 51.
@@ -402,6 +425,11 @@ function isRendered(el: HTMLElement, win: Window): boolean {
   const tag = el.tagName;
   if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE' ||
       tag === 'NOSCRIPT' || tag === 'META' || tag === 'LINK') return false;
+
+  // A <label> bound to a control contributes nothing: the control already
+  // carries that text as its accessible name, so emitting the label too
+  // doubles the line count of every form on the web.
+  if (el instanceof HTMLLabelElement && el.control) return false;
 
   const cs = win.getComputedStyle(el);
   if (cs.display === 'none' || cs.visibility === 'hidden') return false;
