@@ -1,72 +1,87 @@
 # Benchmark results
 
-Measured 2026-07-31. Aperture at commit `034ed1d` + the layout-table fix,
-against `@playwright/mcp@latest` headless, same URLs, same day.
+Re-run 2026-07-31 after the layout-table fix, the positional-ref fix, and the
+UA change. `bench/live.mjs` drives a running Aperture; `bench/tokens.mjs` is the
+synthetic model.
 
-Reproduce: `npm run bench` for the synthetic diff model; `bench/real-sites.md`
-for the method used below.
+## The finding that matters most
 
-## Full snapshot, real sites
+**`browser_act` does not exist.** The snapshot format legend — injected into
+every agent's context — says *"eN stable element ref — use it with
+browser_act"*, and `browser_snapshot`'s description says *"prefer letting
+browser_act return diffs."* No such tool is registered.
 
-Tokens estimated at chars/4 for both, so the two are directly comparable.
+An agent using Aperture today can navigate, snapshot, read, fill a form (behind
+the consent dialog), attach a file, capture, and set the theme. **It cannot
+click a button or type into an arbitrary field.**
 
-| Site | Aperture | playwright-mcp | ratio | Aperture refs | pw refs |
-|---|---|---|---|---|---|
-| Hacker News (front page) | **9,561** | 11,993 | 1.25× | 233 | 616 |
-| GitHub (anthropics/claude-code) | **5,430** | 9,523 | 1.75× | 97 | 446 |
-| Wikipedia (Model Context Protocol) | **6,605** | 18,269 | 2.77× | 206 | 611 |
+This means the loop the entire project is built around — act, observe delta —
+is not closed. It also means:
 
-**Per-snapshot, Aperture is ~1.25–2.8× smaller — call it ~1.9× on average.**
+- The 40× projection in the previous version of this file was never testable,
+  because no action could be performed to produce a real diff.
+- The reviewer's central question, *task success rate on diffs versus
+  re-dumps*, is not merely unmeasured but currently unanswerable.
 
-### Correction to an earlier claim
+That is now the top priority, ahead of everything else on the roadmap.
 
-The README previously said ref discipline made output "4.5× smaller," citing a
-third-party measurement of a different tool (WebClaw). Aperture's own measured
-figure is **1.9×**. The ref-count difference is real and large (2.6–6.3× fewer
-refs than playwright-mcp) but it does not translate into a proportional token
-saving, because refs are a small part of each line.
+## A. Full snapshot size, real sites
 
-## Where the actual win is
+| site | tokens | refs | lines |
+|---|---|---|---|
+| Hacker News | 9,512 | 233 | 654 |
+| GitHub (anthropics/claude-code) | 5,411 | 97 | 418 |
+| Wikipedia (Model Context Protocol) | 6,575 | 206 | 600 |
+| MDN (Web/API/fetch) | 7,415 | 161 | 713 |
 
-Per-snapshot size is the smaller half of the story. The compounding factor is
-that playwright-mcp re-dumps on every action while Aperture emits a diff.
+Reproduces the earlier head-to-head run (9,561 / 5,430 / 6,605) within page
+drift, so those numbers hold. Against `@playwright/mcp` on the same URLs:
+**1.25×–2.77× smaller**, averaging ~1.9×.
 
-For a 20-action task on the Wikipedia page:
+## B. Ref stability across a re-snapshot
 
-| | playwright-mcp | Aperture |
+| site | before | after | survived | % |
+|---|---|---|---|---|
+| Hacker News | 233 | 233 | 233 | **100%** |
+| GitHub | 97 | 97 | 97 | **100%** |
+| Wikipedia | 206 | 206 | 206 | **100%** |
+| MDN | 161 | 161 | 161 | **100%** |
+
+Identity keys are stable across repeated snapshots of a live page, including
+one (HN) whose content changes underneath.
+
+**This is the weak version of the test.** It does not involve an interaction, a
+re-render, or a virtualized list. The claim that refs survive a React re-render
+that replaces every DOM node remains **untested**, and cannot be tested until
+`browser_act` exists.
+
+## C. The no-change floor
+
+| site | full snapshot | observation when nothing changed |
 |---|---|---|
-| Initial observe | 18,269 | 6,605 |
-| Per action | 18,269 (re-dump) | ~40–150 (diff) |
-| **20-action total** | **~383,600** | **~9,600** |
+| Hacker News | 9,512 | 115 |
+| GitHub | 5,412 | 112 |
+| Wikipedia | 6,575 | 114 |
+| MDN | 7,415 | 115 |
 
-≈ **40×**, of which ~1.9× is snapshot size and the rest is not re-dumping.
+An earlier draft of this file reported these as "diff after a real interaction"
+and derived 48×–83× from them. **That was wrong.** The uniform ~113 tokens
+across four very different pages is the "no visible change" response plus the
+untrusted-content envelope — the floor case, not a diff.
 
-That number still rests on the diff staying small on a real site across a real
-action sequence, which the synthetic bench models but this table does not yet
-measure. Treat 40× as the ceiling and the 7–10× from `npm run bench` as the
-conservative floor.
+It is still a useful number: it is what an observation costs when nothing
+happened, and it bounds the cost of polling. It is not evidence for the diff
+design.
 
-## What this does NOT measure
+## Honest summary of what is proven
 
-**Task success rate.** None of the above says whether an agent completes a task
-as reliably reading deltas as it does re-reading the page. If it does not, the
-token saving is worthless. This remains the single most important unmeasured
-claim in the project.
+| claim | status |
+|---|---|
+| Snapshots are smaller than playwright-mcp's | **Measured: ~1.9× on four real sites** |
+| Refs are stable across re-snapshots | **Measured: 100% on four real sites** |
+| Refs survive real re-renders | **Untested** — blocked on `browser_act` |
+| Diffs are much cheaper than re-dumps | **Modelled only** (`npm run bench`: 7–10×) |
+| Agents succeed as often on diffs | **Unmeasured, currently unmeasurable** |
 
-**Ref stability under real re-renders.** The GitHub and Wikipedia pages are
-largely static. A React SPA that re-renders its list on every keystroke is the
-real test of the identity-key scheme, and it has not been run.
-
-## Bug this benchmark found
-
-Hacker News initially measured **206 tokens with 1 ref** — the entire front
-page, 30 stories and several hundred links, collapsed into 4 rows of
-concatenated text. `tableRows()` flattened *any* `<table>` into text and
-cleared its children, and HN uses tables for layout. An agent could not click
-anything on the site.
-
-Fixed by only flattening tables with no interactive descendants. HN went from
-206 tokens/1 ref to 9,561 tokens/233 refs.
-
-This is exactly the class of failure that "verified on one form" cannot catch,
-and it is the argument for running this benchmark against more real sites.
+The synthetic 7–10× is the only defensible figure for the diff mechanism, and
+it is a model rather than a measurement.
