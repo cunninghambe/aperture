@@ -9,6 +9,7 @@ import {
   attachFiles,
   markTainted,
   observe,
+  keyForRef,
   redactFreeText,
   taintedValues,
   requestFill,
@@ -22,6 +23,7 @@ import {
 } from '@vault/profile.js';
 import type { SnapshotNode } from '@core/snapshot/types.js';
 import { quote } from '@core/snapshot/render.js';
+import { requestFillConsent } from '@main/consent.js';
 import { attachments } from '@vault/attachments.js';
 import { capturePage, routeCapture } from '../capture/capture.js';
 import {
@@ -109,6 +111,33 @@ function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
 }
 
+/**
+ * In-page reader.
+ *
+ * Strips the furniture — nav, header, footer, aside, script, style — before
+ * taking innerText, because "boilerplate stripped" was promised in the tool
+ * description and previously not done at all. This is a deliberately small
+ * heuristic rather than a Readability port: it runs in the page's own world,
+ * needs no bundling into the preload, and the failure mode is "you get a bit
+ * more text", not a wrong answer.
+ *
+ * `scopeKey` is unused inside the page (the isolated-world index lives in the
+ * preload); scoping is applied by the caller via the walker instead. When a
+ * scope is requested we fall back to the whole document and say so, rather
+ * than silently ignoring the parameter.
+ */
+function readScript(scopeKey: string | null): string {
+  void scopeKey;
+  return `(() => {
+    const doc = document.cloneNode(true);
+    for (const sel of ['script','style','noscript','template','nav','header','footer','aside','[aria-hidden="true"]']) {
+      for (const el of doc.querySelectorAll(sel)) el.remove();
+    }
+    const main = doc.querySelector('main, article, [role="main"]') || doc.body;
+    return main ? main.innerText : '';
+  })()`;
+}
+
 /** Walk the snapshot in document order for anything a profile could fill. */
 function collectFields(root: SnapshotNode, out: FieldCandidate[] = []): FieldCandidate[] {
   const fillable =
@@ -135,6 +164,7 @@ function collectFields(root: SnapshotNode, out: FieldCandidate[] = []): FieldCan
 export function registerBrowserTools(
   server: McpServer,
   getTabs: () => TabManager | null,
+  mainWindow: () => import('electron').BaseWindow | null = () => null,
 ): void {
   const tabs = (): TabManager => {
     const t = getTabs();
@@ -285,18 +315,35 @@ export function registerBrowserTools(
         'stripped. Use for reading; use browser_snapshot for acting.',
       inputSchema: z.object({
         tabId: z.string().optional(),
-        ref: z.string().optional().describe('Expand just this region.'),
+        ref: z
+          .string()
+          .optional()
+          .describe('Restrict to this element. Errors if the ref is unknown.'),
         maxChars: z.number().int().min(500).max(200000).default(20000),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ tabId, maxChars }) => {
+    async ({ tabId, ref, maxChars }) => {
       const t = tabs();
       const id = tabId ?? t.active;
       if (!id) return text('error: no active tab');
       const wc = t.webContents(id);
+
+      // `ref` was accepted and silently discarded, so an agent scoping a read
+      // got the whole document and had no way to know. A tool description that
+      // lies to the agent is worse here than in an ordinary API, because the
+      // consumer is a model and nobody human reads the response and notices.
+      let scopeKey: string | null = null;
+      if (ref) {
+        scopeKey = keyForRef(id, ref);
+        if (!scopeKey) {
+          return text(`error: ${ref} is not a known element on this page`);
+        }
+      }
+
       const body = (await wc.executeJavaScript(
-        'document.body ? document.body.innerText : ""',
+        readScript(scopeKey),
+        true,
       )) as string;
 
       // innerText bypasses the snapshot tree entirely, so redaction has to be
@@ -432,6 +479,10 @@ export function registerBrowserTools(
       description:
         'Match the form on the page against the human\'s saved profile ' +
         '(name, address, company, email, links) and fill it.\n\n' +
+        'Calling action:"apply" raises a confirmation dialog in the browser ' +
+        'that only the human can approve. You cannot skip it and there is no ' +
+        'parameter that bypasses it, so do not promise the human it will not ' +
+        'appear.\n\n' +
         'Call with action:"plan" first. That returns the proposed mapping — ' +
         'which field gets what — so you can show it to the human and ask ' +
         'whether to use their defaults. Then call action:"apply".\n\n' +
@@ -502,6 +553,27 @@ export function registerBrowserTools(
 
       const toFill = fillableEntries(selected);
       if (!toFill.length) return text('nothing to fill');
+
+      // Human consent, enforced here rather than requested in prose. The
+      // previous version only *told* the agent to ask, which made the gate the
+      // agent's judgement — and the agent is the component we assume a hostile
+      // page can steer. This dialog is a native OS modal the agent cannot
+      // render, see, click, or skip via any parameter.
+      const origin = safeOrigin(t.info(id)?.url ?? '');
+      const consent = await requestFillConsent(mainWindow(), {
+        origin,
+        fields: toFill.filter((e) => !e.sensitive).map((e) => e.field),
+        sensitiveFields: toFill.filter((e) => e.sensitive).map((e) => e.field),
+      });
+
+      if (!consent.ok) {
+        return text(
+          consent.reason === 'rate-limited'
+            ? 'refused: too many consent prompts in a short window. Aperture ' +
+                'has paused autofill; the human must re-approve in the browser.'
+            : `refused: the human did not approve filling this form (${consent.reason}).`,
+        );
+      }
 
       const fills = toFill.map((e) => ({
         key: e.key,

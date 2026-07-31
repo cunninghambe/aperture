@@ -40,12 +40,13 @@ const PORT = 8817;
 
 export async function startMcpServer(
   getTabs: () => TabManager | null,
+  getWindow: () => import('electron').BaseWindow | null = () => null,
 ): Promise<McpHandle> {
   const token = randomBytes(24).toString('base64url');
 
   const handler = createMcpHandler(() => {
     const server = new McpServer({ name: 'aperture', version: '0.1.0' });
-    registerBrowserTools(server, getTabs);
+    registerBrowserTools(server, getTabs, getWindow);
     return server;
   });
 

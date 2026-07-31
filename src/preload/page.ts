@@ -32,6 +32,7 @@ ipcRenderer.on('aperture:walk', (_event, req: WalkRequest) => {
       doc: document,
       win: window,
       index: fresh,
+      seen: new Map(),
     });
     index = fresh;
     reply({ ok: true, result });

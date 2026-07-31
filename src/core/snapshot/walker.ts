@@ -50,6 +50,16 @@ export interface WalkContext {
    * for a hostile page to forge.
    */
   index?: Map<string, HTMLElement>;
+  /**
+   * Occurrence count per base key, for disambiguating structurally identical
+   * siblings.
+   *
+   * Without it, ten "Add to cart" buttons in a product grid all compute the
+   * same key, collapse onto one ref, and the page-side index keeps only the
+   * last — so acting on `e42` for product 1 hits product 10 silently. That is
+   * the single most common shape on the commercial web.
+   */
+  seen?: Map<string, number>;
 }
 
 /** Roles that get a ref, because an agent can address them. */
@@ -68,6 +78,8 @@ const ADDRESSABLE = new Set<Role>([
 
 export function walk(ctx: WalkContext): WalkResult {
   const { doc, win } = ctx;
+  // Fresh per walk: ordinals are document-order within a single pass.
+  ctx.seen = new Map();
   const root: SnapshotNode = {
     role: 'generic',
     key: 'root',
@@ -141,7 +153,7 @@ function visit(
   }
 
   const rect = rectOf(el);
-  const key = identityKey(el, role, name, ancestry, ctx.frameId);
+  const key = disambiguate(identityKey(el, role, name, ancestry, ctx.frameId), ctx);
   if (ctx.index && ADDRESSABLE.has(role)) ctx.index.set(key, el);
 
   const node: SnapshotNode = {
@@ -223,6 +235,33 @@ function visit(
  * (nearest named ancestor) is what tells ten identical "Add to cart" buttons
  * apart: each one is anchored by its own product card's heading.
  */
+/**
+ * Append a document-order ordinal when a key has already been seen this walk.
+ *
+ * The first occurrence keeps the bare key, so the common case — a genuinely
+ * unique element — has stable identity across walks even if a duplicate
+ * appears later.
+ *
+ * This makes such refs *positional*, and positional identity is exactly what
+ * reordering breaks. That is a real and acknowledged limitation: for elements
+ * distinguishable only by position, a reorder can move a ref. The alternative
+ * is worse — one ref for ten buttons and a silent click on the wrong one — and
+ * for elements that are truly indistinguishable, no agent plan can depend on
+ * the distinction anyway. `positional` is set on the node so the diff engine
+ * and the renderer can treat these as fragile.
+ */
+function disambiguate(base: string, ctx: WalkContext): string {
+  if (!ctx.seen) return base;
+  const n = ctx.seen.get(base) ?? 0;
+  ctx.seen.set(base, n + 1);
+  return n === 0 ? base : `${base}|#${n}`;
+}
+
+/** Was this key disambiguated by position rather than by content? */
+export function isPositionalKey(key: string): boolean {
+  return /\|#\d+$/.test(key);
+}
+
 export function identityKey(
   el: HTMLElement,
   role: Role,

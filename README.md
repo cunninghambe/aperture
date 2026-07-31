@@ -5,7 +5,7 @@ the one who stays in charge.
 
 > **Status: v0.2, early but real.** The browser runs, the MCP server works, and
 > Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI, tested crypto, and PSL-backed origin binding. 162
+> vault has a working UI, tested crypto, and PSL-backed origin binding. 167
 > tests pass, including regression tests for every finding of the security
 > review. See
 > [Honest status](#honest-status) for what is *not* done — nothing below is
@@ -36,11 +36,34 @@ burns 200k+ tokens re-reading a page that mostly did not change.
 Aperture treats the loop as **act → observe delta**. `browser_act` returns what
 changed, against a page state the model already holds.
 
-| | playwright-mcp style | Aperture (design target) |
-|---|---|---|
-| Initial observe | ~10,000 tok | ~1,200 tok (budgeted) |
-| Per action | ~10,000 tok | ~40–150 tok |
-| 20-action task | **~210,000 tok** | **~4,000 tok** |
+`npm run bench` measures both modes over the same 20-action sequence on the same
+page. Observation cost, in tokens:
+
+| list items | full snapshot | re-dump mode | diff mode | ratio |
+|---|---|---|---|---|
+| 5 | 236 | 4,956 | 756 | **6.6×** |
+| 24 | 937 | 19,677 | 2,158 | **9.1×** |
+| 60 | 2,276 | 47,796 | 4,836 | **9.9×** |
+| 150 | 5,698 | 119,658 | 11,680 | **10.2×** |
+
+> **An earlier version of this README claimed ~50×.** That number was a design
+> target I had never measured, and the first benchmark contradicted it. The
+> real figure is roughly **7–10×**, rising with page size. Still a large win —
+> and an order of magnitude smaller than what I had written down.
+>
+> Even this is a synthetic page, not a head-to-head run against playwright-mcp
+> on real sites. Read it as a floor on the mechanism's value, not as a
+> competitive result.
+>
+> The number that matters more is one nobody has published: **task success
+> rate on diffs versus full re-dumps.** A model reconstructing page state from
+> a base snapshot plus twelve deltas is doing bookkeeping that a re-dump does
+> for it. If completion rates drop, the token saving is negative and this whole
+> design is wrong. The fallback thresholds (30% change, 12 diffs) are currently
+> reasoned guesses, not tuned values.
+>
+> `npm run bench` measures the token half on a local fixture. The success-rate
+> half needs a task suite and is the single largest open gap in the project.
 
 Making that safe rather than merely small is the actual engineering:
 
@@ -61,6 +84,7 @@ Making that safe rather than merely small is the actual engineering:
   unprompted tick; anything changing repeatedly on its own is demoted; anything
   the agent reads or acts on is promoted straight back. Without this, one
   ticking timestamp defeats the entire diff argument.
+- **Positional fallback, acknowledged as fragile.** Elements distinguishable only by position (ten identical "Add to cart" buttons) get a document-order ordinal appended to their key. That makes those refs positional, and reordering is exactly what breaks positional identity — a real limitation, and the honest trade against the alternative, which was one ref for ten buttons and a silent click on the wrong product.
 - **Ref discipline.** Only actionable elements get refs. Playwright MCP puts 789
   refs on a GitHub page; a disciplined pass puts ~245, and the output is 4.5×
   smaller.
@@ -99,10 +123,20 @@ e8  "Apartment, suite, etc." → addressLine2: —  SKIP: no-value
 e16 "Date of birth"          → dateOfBirth ~85%: (from profile — value not shown)
 ```
 
-The human says "yes, use my defaults"; the browser fills. Note what is *not*
-in that list: "Why do you want this role?" is a prose question, not an identity
-field, and matching a stray keyword inside one is how you end up submitting
-"Director" as an essay answer. Free-text prompts are excluded by shape.
+Calling `apply` then raises a **native OS dialog** naming the origin and the
+fields. The agent cannot render it, see it, click it, or pass a parameter that
+skips it, and sensitive fields never ride on a prior grant.
+
+That gate used to be a sentence in the tool description asking the agent to
+check with the human — which made the approval the *agent's* judgement, and the
+agent is exactly the component we assume a hostile page can steer. The vault got
+origin binding with no override while profile autofill got a polite suggestion.
+That inconsistency was the worst thing in this codebase and is now fixed.
+
+Note what is *not* in the plan above: "Why do you want this role?" is a prose
+question, not an identity field, and matching a stray keyword inside one is how
+you end up submitting "Director" as an essay answer. Free-text prompts are
+excluded by shape.
 
 Matching uses the HTML `autocomplete` attribute first — it is a standardized
 declaration of exactly what a field wants, and a surprising share of real forms
@@ -188,6 +222,8 @@ reduces the design to the agent's judgment under adversarial input.
 
 Crypto: Argon2id (moderate limits, calibrated) → XChaCha20-Poly1305. The
 192-bit nonce means random nonces are safe without counter state.
+
+**Taint redaction is best-effort, not a guarantee.** Mirrored values are caught by exact substring match, so a reformatted date (fill `1990-01-05`, page echoes `January 5, 1990`), a case change, or a value split across text nodes all defeat it — and it over-redacts, turning every "Anna" on the page into a marker if that is your first name. It raises the cost of an accidental echo; it is not a boundary. The boundaries are origin binding and the process split.
 
 **What this does not claim:** a page can read back its own DOM, so a password
 delivered to an origin is a password that origin has. A password manager's real
@@ -378,6 +414,9 @@ direction.
 | Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
 | 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
 | Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
+| Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
+| Token benchmark | **Working** (`npm run bench`) — synthetic page only |
+| Task-success benchmark (diff vs re-dump) | **Not started.** The most important unmeasured claim in the project |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**

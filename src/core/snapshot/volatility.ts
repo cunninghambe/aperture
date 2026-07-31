@@ -30,9 +30,16 @@ interface Entry {
   shapeVolatile: boolean;
 }
 
-/** Text that is obviously a clock, a countdown, or a relative timestamp. */
+/**
+ * Text that is obviously a clock, a countdown, or a relative timestamp.
+ *
+ * Deliberately does NOT match a bare integer. `^\d+$` swept up cart badges,
+ * result counts, unread counts, quantities and un-symboled prices — exactly
+ * the numbers an agent is most likely to be watching — and the shape fast-path
+ * suppressed them after a single unprompted tick.
+ */
 const TIMER_SHAPE =
-  /^\d{1,2}:\d{2}(:\d{2})?$|^\d+\s*(second|minute|hour|day)s?\s*ago$|^\d+$/i;
+  /^\d{1,2}:\d{2}(:\d{2})?(\s*[ap]m)?$|^\d+\s*(second|minute|hour|day)s?\s*ago$|^(just now|yesterday)$/i;
 
 export class VolatilityTracker {
   private entries = new Map<string, Entry>();

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { isAllowedScheme, normalizeUrl } from '../src/main/tabs.js';
 import { quote } from '../src/core/snapshot/render.js';
 import { registrableDomain } from '../src/vault/vault.js';
+import { RefRegistry } from '../src/core/snapshot/registry.js';
+import { isPositionalKey } from '../src/core/snapshot/walker.js';
+import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
 
 /**
  * Regression tests for the findings of the July 2026 adversarial review.
@@ -171,5 +174,58 @@ describe('C2 (vault) — registrableDomain must not merge tenants', () => {
     // credential to, so fail closed rather than inventing one.
     expect(registrableDomain('https://github.io')).toBeNull();
     expect(registrableDomain('https://atlassian.net')).toBeNull();
+  });
+});
+
+describe('review — ten identical buttons must not share one ref', () => {
+  it('gives distinct refs to structurally identical siblings', () => {
+    // Before the ordinal fix, ten "Add to cart" buttons in a product grid all
+    // computed the same key, collapsed onto e1, and the page-side index kept
+    // only the last — so acting on e1 for product 1 clicked product 10.
+    const reg = new RefRegistry();
+    const seen = new Map<string, number>();
+    const base = 'S|0|button|add to cart|list:results|main>list';
+
+    const refs = Array.from({ length: 10 }, () => {
+      const n = seen.get(base) ?? 0;
+      seen.set(base, n + 1);
+      const key = n === 0 ? base : `${base}|#${n}`;
+      return reg.ensureRef({
+        role: 'button', name: 'Add to cart', key, states: 0, frameId: 0,
+        rect: [0, n * 100, 80, 30], children: [],
+      });
+    });
+
+    expect(new Set(refs).size).toBe(10);
+  });
+
+  it('marks positional keys so the diff engine knows they are fragile', () => {
+    expect(isPositionalKey('S|0|button|add to cart||#3')).toBe(true);
+    expect(isPositionalKey('S|0|button|add to cart|')).toBe(false);
+    expect(isPositionalKey('I|0|button|checkout-submit')).toBe(false);
+  });
+});
+
+describe('review — volatility must not suppress counts the agent watches', () => {
+  it('does not treat a bare integer as a clock', () => {
+    // Cart badges, result counts, unread counts, quantities.
+    const v = new VolatilityTracker();
+    v.noteChange('cart-count', 1000, false, '3');
+    v.noteChange('cart-count', 1100, false, '4');
+    expect(v.isVolatile('cart-count')).toBe(false);
+  });
+
+  it('still recognises an actual clock on sight', () => {
+    const v = new VolatilityTracker();
+    v.noteChange('clock', 1000, false, '12:04:37');
+    v.noteChange('clock', 1100, false, '12:04:38');
+    expect(v.isVolatile('clock')).toBe(true);
+  });
+
+  it('recognises relative timestamps', () => {
+    const v = new VolatilityTracker();
+    v.noteChange('ts', 1000, false, '3 minutes ago');
+    v.noteChange('ts', 1100, false, '4 minutes ago');
+    expect(v.isVolatile('ts')).toBe(true);
   });
 });

@@ -141,7 +141,7 @@ app.whenReady().then(async () => {
 
   await createWindow();
 
-  const mcp = await startMcpServer(() => tabs);
+  const mcp = await startMcpServer(() => tabs, () => win);
   await publishMcpConfig(mcp);
 
   // Dev-only: seed a demo identity profile so the autofill path can be

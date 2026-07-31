@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder",
+    "bench": "node bench/tokens.mjs"
   },
   "build": {
     "appId": "dev.aperture.browser",
@@ -41,7 +42,6 @@
     "@ghostery/adblocker-electron": "^2.18.1",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "@mozilla/readability": "^0.6.0",
     "libsodium-wrappers-sumo": "^0.8.4",
     "tldts": "^7.4.10",
     "zod": "^4.4.3"
