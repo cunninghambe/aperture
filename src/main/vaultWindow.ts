@@ -5,6 +5,11 @@ import { profiles } from '@vault/profileStore.js';
 import { attachments } from '@vault/attachments.js';
 import type { Profile } from '@vault/profile.js';
 import { loadNotionConfig, saveNotionConfig } from '../capture/capture.js';
+import {
+  loadTelemetryConfig,
+  saveTelemetryConfig,
+  telemetryStats,
+} from '../telemetry/reporter.js';
 
 /**
  * The vault window.
@@ -147,6 +152,22 @@ export function registerVaultIpc(): void {
   handle('vaultui:reveal', (_e, id: string) => vault.revealForHuman(id));
 
   handle('vaultui:generate', (_e, length: number) => vault.generatePassword(length));
+
+  handle('vaultui:totp', (_e, id: string) => vault.totpCode(id));
+  handle('vaultui:set-totp', (_e, id: string, secret: string) => vault.setTotp(id, secret));
+
+  // -- telemetry ----------------------------------------------------------
+  handle('vaultui:telemetry-get', async () => {
+    const cfg = await loadTelemetryConfig();
+    const { sent, dropped } = telemetryStats();
+    // The config is the authority on `enabled`; the stats object also carries
+    // one, and spreading it here would silently overwrite this.
+    return { enabled: cfg.enabled, dsn: cfg.dsn ?? '', sent, dropped };
+  });
+
+  handle('vaultui:telemetry-save', (_e, enabled: boolean, dsn: string) =>
+    saveTelemetryConfig({ enabled, dsn: dsn || undefined }),
+  );
 
   // -- identity profile -----------------------------------------------------
   handle('vaultui:profile-get', async () => {

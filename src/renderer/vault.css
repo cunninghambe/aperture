@@ -199,6 +199,18 @@ input:focus {
   user-select: text;
 }
 
+.otp {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 15px;
+  letter-spacing: 1px;
+  color: var(--ok);
+  cursor: default;
+  user-select: none;
+}
+.otp.expiring {
+  color: var(--sensitive);
+}
+
 .pill {
   display: inline-block;
   padding: 1px 7px;

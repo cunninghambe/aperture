@@ -90,7 +90,9 @@ function clearPassphraseInputs(): void {
 async function showApp(): Promise<void> {
   gate.hidden = true;
   app.hidden = false;
-  await Promise.all([renderLogins(), renderIdentity(), renderFiles(), renderNotion()]);
+  await Promise.all([
+    renderLogins(), renderIdentity(), renderFiles(), renderNotion(), renderTelemetry(),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +121,12 @@ $('lock-btn').addEventListener('click', async () => {
 // Logins
 // ---------------------------------------------------------------------------
 
+/** Live TOTP tickers, cleared whenever the list is rebuilt. */
+const rowTimers: ReturnType<typeof setInterval>[] = [];
+
 async function renderLogins(): Promise<void> {
   const list = $('logins-list');
+  for (const t of rowTimers.splice(0)) clearInterval(t);
   const entries = await api.list();
   list.replaceChildren();
   $('logins-empty').hidden = entries.length > 0;
@@ -173,6 +179,31 @@ function loginRow(e: VaultEntryPublic): HTMLElement {
     revealed = false;
   }
 
+  // Live 2FA code, refreshed each second with the time left in the window. A
+  // code with two seconds on it will be rejected by the time it is typed, so
+  // showing the countdown is the difference between "it worked" and "this app
+  // is broken".
+  if (e.hasTotp) {
+    const otp = document.createElement('span');
+    otp.className = 'otp';
+    const tick = async (): Promise<void> => {
+      const r = await api.totp(e.id);
+      if (!r) return;
+      otp.textContent = `${r.code.slice(0, 3)} ${r.code.slice(3)}`;
+      otp.dataset['left'] = String(r.secondsRemaining);
+      otp.classList.toggle('expiring', r.secondsRemaining <= 5);
+      otp.title = `expires in ${r.secondsRemaining}s — click to copy`;
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 1000);
+    otp.addEventListener('click', () => {
+      void navigator.clipboard.writeText((otp.textContent ?? '').replace(/\s/g, ''));
+    });
+    // The row is rebuilt on every render, so the interval must not outlive it.
+    rowTimers.push(timer);
+    row.appendChild(otp);
+  }
+
   const edit = document.createElement('button');
   edit.textContent = 'Edit';
   edit.addEventListener('click', () => openLoginDialog(e));
@@ -214,6 +245,13 @@ function openLoginDialog(entry?: VaultEntryPublic): void {
   $<HTMLInputElement>('d-pass').value = '';
   $<HTMLInputElement>('d-pass').type = 'password';
   $('d-show').textContent = 'Show';
+  // The stored seed is never sent back to the UI; the placeholder just says
+  // whether one exists.
+  const totpField = $<HTMLInputElement>('d-totp');
+  totpField.value = '';
+  totpField.placeholder = entry?.hasTotp
+    ? '2FA is set — paste a new secret to replace it'
+    : 'otpauth://… or base32 secret';
   dialog.showModal();
 }
 
@@ -246,16 +284,29 @@ $('d-save').addEventListener('click', async () => {
   const password = $<HTMLInputElement>('d-pass').value;
   if (!origin) return;
 
+  const totpSecret = $<HTMLInputElement>('d-totp').value.trim();
+
+  let targetId = editingId;
   if (editingId) {
     const patch: Record<string, string> = { origin, username };
     // An empty password field on edit means "leave it alone", not "erase it".
     if (password) patch['password'] = password;
     await api.update(editingId, patch);
   } else {
-    await api.add({ origin, username, password });
+    targetId = await api.add({ origin, username, password });
+  }
+
+  if (totpSecret && targetId) {
+    const ok = await api.setTotp(targetId, totpSecret);
+    if (!ok) {
+      // A seed that does not parse is a 2FA lockout discovered at the worst
+      // possible moment, so say so now rather than saving it.
+      alert('That 2FA secret could not be read. The rest was saved.');
+    }
   }
 
   $<HTMLInputElement>('d-pass').value = '';
+  $<HTMLInputElement>('d-totp').value = '';
   dialog.close();
   await renderLogins();
 });
@@ -406,6 +457,30 @@ $('notion-test').addEventListener('click', async () => {
   const r = await api.notionTest();
   out.textContent = r.detail;
   out.style.color = r.ok ? 'var(--ok)' : 'var(--danger)';
+});
+
+// ---------------------------------------------------------------------------
+// Crash reporting
+// ---------------------------------------------------------------------------
+
+async function renderTelemetry(): Promise<void> {
+  const t = await api.telemetryGet();
+  $<HTMLInputElement>('t-enabled').checked = t.enabled;
+  $<HTMLInputElement>('t-dsn').value = t.dsn;
+  $('t-stats').textContent = t.enabled
+    ? `${t.sent} sent, ${t.dropped} dropped this session`
+    : 'disabled';
+}
+
+$('telemetry-save').addEventListener('click', async () => {
+  await api.telemetrySave(
+    $<HTMLInputElement>('t-enabled').checked,
+    $<HTMLInputElement>('t-dsn').value.trim(),
+  );
+  const btn = $<HTMLButtonElement>('telemetry-save');
+  btn.textContent = 'Saved';
+  setTimeout(() => (btn.textContent = 'Save'), 1500);
+  await renderTelemetry();
 });
 
 // External links open in the user's real browser, not inside the vault window,

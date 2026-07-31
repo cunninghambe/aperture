@@ -137,6 +137,43 @@
           <button id="notion-test">Test connection</button>
           <span id="n-test-result" class="muted"></span>
         </div>
+
+        <hr style="margin: 24px 0; border: 0; border-top: 1px solid var(--border)" />
+
+        <h2>Crash reporting</h2>
+        <p class="muted">
+          Off by default. When on, Aperture sends crash reports to your own
+          uh-oh instance — never to anyone else.
+        </p>
+        <ul class="steps" style="list-style: disc">
+          <li>Sent: error type, message, stack, app version, OS.</li>
+          <li>
+            URLs are replaced with a <strong>salted hash of the origin</strong>,
+            so crashes still cluster by site without recording where you browsed.
+          </li>
+          <li>Your home directory is stripped from file paths.</li>
+          <li>
+            <em>The vault reports nothing at all</em> — not scrubbed, excluded.
+          </li>
+          <li>Anything not on the allowlist is dropped, including new fields.</li>
+        </ul>
+
+        <label
+          style="display: flex; gap: 8px; align-items: center; margin-top: 14px"
+        >
+          <input id="t-enabled" type="checkbox" style="width: auto; height: auto" />
+          Send crash reports
+        </label>
+
+        <div class="field" style="margin-top: 10px">
+          <label for="t-dsn">uh-oh DSN</label>
+          <input id="t-dsn" placeholder="https://key@uh-oh.example.com" autocomplete="off" />
+        </div>
+
+        <div style="margin-top: 12px; display: flex; gap: 8px; align-items: center">
+          <button id="telemetry-save">Save</button>
+          <span id="t-stats" class="muted"></span>
+        </div>
       </div>
     </section>
 
@@ -148,6 +185,19 @@
         <input id="d-origin" placeholder="example.com" autocomplete="off" />
         <label for="d-user">Username</label>
         <input id="d-user" autocomplete="off" />
+        <label for="d-totp">
+          2FA secret <span class="muted">(optional)</span>
+        </label>
+        <input
+          id="d-totp"
+          placeholder="otpauth://… or base32 secret"
+          autocomplete="off"
+        />
+        <p class="muted" style="margin: 4px 0 0; font-size: 11.5px">
+          Paste what the site shows next to its QR code. No registration —
+          TOTP is an offline standard.
+        </p>
+
         <label for="d-pass">Password</label>
         <div class="row">
           <input id="d-pass" type="password" autocomplete="off" />

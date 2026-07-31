@@ -206,6 +206,53 @@ browser process. That is sound against the threat that actually matters — a
 hostile page steering the agent — and not sound against local code execution as
 the same user. That is the T-Base tier in `docs/design/security.md`.
 
+## Two-factor codes
+
+The vault stores TOTP seeds and shows live codes with a countdown. **No
+registration, no accounts, no network calls** — TOTP (RFC 6238) is an offline
+standard, and "Google Authenticator" is just one client for it. Paste what the
+site prints next to its QR code. Verified against the RFC's own test vectors.
+
+**On using 2FA to unlock the vault itself: don't bother, and here's why.** The
+vault is encrypted with a key derived from your passphrase. A TOTP check would
+be an `if` statement in the UI — and an attacker with the vault file ignores the
+UI entirely and attacks the passphrase. Worse, verifying codes requires storing
+the seed *in* the vault, so it is available to exactly the attacker it claims to
+stop. A second factor only means something at rest if it contributes **key
+material**, which is what a TPM or Windows Hello does and what TOTP structurally
+cannot. Storing codes for other sites is genuinely valuable; gating the vault
+with one is theatre.
+
+## Crash reporting (off by default)
+
+Reports go to your own uh-oh instance, and only if you turn it on.
+
+A browser is the worst app to wire crash reporting into carelessly, because the
+crash context *is* the sensitive data: URLs are browsing history, titles are
+page content, stack traces can carry form values, and this process holds the MCP
+token and your profile. So:
+
+- **Allowlist, not denylist.** The event is rebuilt from an empty object with
+  only named fields copied in — a `delete` pass would leak whatever the SDK adds
+  in a future version.
+- **URLs become a salted hash of the origin.** You get "these crashes cluster on
+  one site" without recording which site. The salt is per-install, so hashes
+  can't be compared across users or matched against a list of popular domains.
+- **Your home directory is stripped** from file paths, since it usually contains
+  your real name.
+- **The vault reports nothing.** Not scrubbed — excluded, by tag and by any
+  vault module appearing in any stack frame. False positives cost a diagnostic;
+  a false negative costs a credential.
+- **Fail closed.** uh-oh's client documents that a `beforeSend` which throws
+  results in the event being sent *unmodified* — backwards for a scrubber — so
+  ours never throws and returns null on any failure.
+- **A final independent gate** re-scans the serialized payload and drops the
+  whole event if a secret survived, precisely because it doesn't depend on the
+  structural pass being correct.
+
+27 tests cover this, including "an unknown top-level field is dropped" and "a
+malformed event fails closed."
+
 ## Capture → Notion
 
 One button, on a fallback chain that matches what you actually mean:
@@ -293,6 +340,8 @@ direction.
 | Vault | Crypto and API shape done; **fill path deliberately refuses** rather than pretending |
 | Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
 | Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
+| 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
+| Crash reporting to uh-oh | Scrubber **built and tested** (27 tests), off by default. The uh-oh client itself still needs vendoring in |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**

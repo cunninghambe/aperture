@@ -34,6 +34,17 @@ const api = {
   generate: (length: number): Promise<string> =>
     ipcRenderer.invoke('vaultui:generate', length),
 
+  totp: (id: string): Promise<{ code: string; secondsRemaining: number } | null> =>
+    ipcRenderer.invoke('vaultui:totp', id),
+  setTotp: (id: string, secret: string): Promise<boolean> =>
+    ipcRenderer.invoke('vaultui:set-totp', id, secret),
+
+  telemetryGet: (): Promise<{
+    enabled: boolean; dsn: string; sent: number; dropped: number;
+  }> => ipcRenderer.invoke('vaultui:telemetry-get'),
+  telemetrySave: (enabled: boolean, dsn: string): Promise<void> =>
+    ipcRenderer.invoke('vaultui:telemetry-save', enabled, dsn),
+
   profileGet: (): Promise<Profile | null> => ipcRenderer.invoke('vaultui:profile-get'),
   profileSave: (p: Profile): Promise<void> =>
     ipcRenderer.invoke('vaultui:profile-save', p),

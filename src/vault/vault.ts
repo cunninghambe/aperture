@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import sodium from 'libsodium-wrappers-sumo';
 import type { VaultEntryPublic, VaultState } from '@shared/types';
+import { parseOtpauth, totp } from './totp.js';
 
 /**
  * The agent-blind vault.
@@ -276,6 +277,45 @@ export class Vault {
   // capability the agent cannot name is one a hostile page cannot talk it into
   // using.
   // -------------------------------------------------------------------------
+
+  /**
+   * The current TOTP code for an entry.
+   *
+   * Human-only, same as reveal. The *code* is short-lived and low-value on its
+   * own, but the seed it derives from is a permanent second factor — so the
+   * seed never leaves this class, and only the derived code is returned.
+   */
+  totpCode(id: string): { code: string; secondsRemaining: number } | null {
+    if (!this.key) return null;
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec?.totpSecret) return null;
+    try {
+      const parsed = parseOtpauth(rec.totpSecret);
+      if (!parsed) return null;
+      return totp(parsed.secret, Date.now(), {
+        digits: parsed.digits,
+        step: parsed.step,
+        algorithm: parsed.algorithm,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async setTotp(id: string, secretOrUri: string): Promise<boolean> {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return false;
+    if (!secretOrUri) {
+      delete rec.totpSecret;
+    } else {
+      // Validate before storing: a seed that does not parse is a 2FA lockout
+      // discovered at the worst possible moment.
+      if (!parseOtpauth(secretOrUri)) return false;
+      rec.totpSecret = secretOrUri;
+    }
+    await this.persist();
+    return true;
+  }
 
   async addRecord(spec: {
     origin: string;
