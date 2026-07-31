@@ -124,12 +124,20 @@ export function originatesInVault(event: Record<string, unknown>): boolean {
     if (surface === 'vault') return true;
   }
 
-  const exception = event['exception'] as
-    | { stacktrace?: { frames?: { filename?: string }[] } }
-    | undefined;
+  // `stacktrace` is a flat StackFrame[] on the wire. Reading it as
+  // `.stacktrace.frames` silently found nothing, so this returned false for
+  // every event and the vault exclusion — the strongest claim in the telemetry
+  // design — did not actually exclude anything.
+  const exception = event['exception'] as { stacktrace?: unknown } | undefined;
+  const frames = Array.isArray(exception?.stacktrace) ? exception.stacktrace : [];
 
-  const frames = exception?.stacktrace?.frames ?? [];
-  return frames.some((f) => /vault|credential|passphrase/i.test(f.filename ?? ''));
+  return frames.some((f) => {
+    const filename = (f as { filename?: unknown }).filename;
+    return (
+      typeof filename === 'string' &&
+      /vault|credential|passphrase|profileStore|attachments/i.test(filename)
+    );
+  });
 }
 
 export function telemetryStats(): { sent: number; dropped: number; enabled: boolean } {
@@ -151,6 +159,7 @@ export async function initTelemetry(release: string): Promise<{
       release,
       environment: app.isPackaged ? 'production' : 'development',
       runtime: 'node',
+      debug: process.argv.includes('--telemetry-debug'),
       beforeSend: makeBeforeSend({ salt: cfg.salt }) as never,
       // The queue is spooled next to the other app data so a crash during
       // shutdown still reports on next launch.

@@ -5,7 +5,7 @@ the one who stays in charge.
 
 > **Status: v0.2, early but real.** The browser runs, the MCP server works, and
 > Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI, tested crypto, and PSL-backed origin binding. 152
+> vault has a working UI, tested crypto, and PSL-backed origin binding. 162
 > tests pass, including regression tests for every finding of the security
 > review. See
 > [Honest status](#honest-status) for what is *not* done — nothing below is
@@ -265,8 +265,29 @@ token and your profile. So:
   whole event if a secret survived, precisely because it doesn't depend on the
   structural pass being correct.
 
-27 tests cover this, including "an unknown top-level field is dropped" and "a
+37 tests cover this, including "an unknown top-level field is dropped" and "a
 malformed event fails closed."
+
+**Verify it end-to-end, not just in unit tests.** `npx electron . --test-crash`
+sends a probe error deliberately containing a URL, an email, a bearer token and
+your home path, so you can inspect what actually landed on the server. That flag
+exists because the unit tests were green while the pipeline was completely
+broken — three separate ways:
+
+- The scrubber rebuilt events against a shape I had *assumed* rather than the
+  real `EventEnvelopeSchema` (`stacktrace` is a flat array, not `{frames}`;
+  `mechanism` is required; breadcrumbs use `ts`, not `timestamp`). The server
+  400'd every event. The tests passed because they used the same invented shape
+  as the code did.
+- That same wrong shape meant `originatesInVault` found no frames — so the vault
+  exclusion, the strongest claim in this section, silently excluded nothing.
+- With events finally arriving, the leak audit found the username in every stack
+  frame: real frames are `file:///C:/Users/name/…` with forward slashes, while
+  the stripper matched `os.homedir()`'s backslash form.
+
+All three are fixed and now have tests, including one asserting that scrubbed
+output still satisfies the wire contract. The lesson is worth keeping: a test
+that shares the code's assumptions validates the assumption, not the behaviour.
 
 ## Capture → Notion
 
@@ -356,7 +377,7 @@ direction.
 | Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
 | Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
 | 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
-| Crash reporting to uh-oh | Scrubber **built and tested** (27 tests), off by default. The uh-oh client itself still needs vendoring in |
+| Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**

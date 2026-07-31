@@ -72,6 +72,33 @@ describe('scrubUrls', () => {
     // The useful part of the path survives.
     expect(out).toContain('aperture');
   });
+
+  it('strips the username from file:// stack frames', () => {
+    // Real stack frames arrive as file:// URLs with FORWARD slashes, so
+    // matching only the literal os.homedir() form let the username through in
+    // every frame while the message scrubbed cleanly. Caught end-to-end, not
+    // by a unit test — hence this one.
+    const out = scrubUrls(
+      'file:///C:/Users/brad/dev/aperture/out/main/index.js',
+      's',
+      'C:\\Users\\brad',
+    );
+    expect(out).not.toContain('brad');
+    expect(out).toContain('aperture');
+    expect(out).not.toContain('file://');
+  });
+
+  it('is case-insensitive, because Windows paths vary in case', () => {
+    const out = scrubUrls('at c:\\users\\BRAD\\x.js', 's', 'C:\\Users\\brad');
+    expect(out.toLowerCase()).not.toContain('brad');
+  });
+
+  it('removes a bare username even in a path shape it does not recognise', () => {
+    // The enumeration of path forms can never be exhaustive, so the username
+    // itself is the backstop.
+    const out = scrubUrls('/mnt/c/Users/brad/thing', 's', 'C:\\Users\\brad');
+    expect(out).not.toContain('brad');
+  });
 });
 
 describe('scrubEvent', () => {
@@ -85,11 +112,16 @@ describe('scrubEvent', () => {
     exception: {
       type: 'TypeError',
       value: 'failed on https://mybank.com/statement',
-      stacktrace: {
-        frames: [
-          { function: 'load', filename: 'C:\\Users\\brad\\dev\\aperture\\tabs.ts', lineno: 40, inApp: true },
-        ],
-      },
+      // Flat array, per the wire schema — not { frames: [...] }.
+      stacktrace: [
+        {
+          function: 'load',
+          filename: 'C:\\Users\\brad\\dev\\aperture\\tabs.ts',
+          lineno: 40,
+          inApp: true,
+        },
+      ],
+      mechanism: 'js-manual',
     },
     breadcrumbs: [],
   };
@@ -103,8 +135,8 @@ describe('scrubEvent', () => {
 
   it('keeps the stack useful while removing the username', () => {
     const out = scrubEvent(base, OPTS)!;
-    const frames = (out['exception'] as { stacktrace: { frames: { filename: string; lineno: number }[] } })
-      .stacktrace.frames;
+    const frames = (out['exception'] as { stacktrace: { filename: string; lineno: number }[] })
+      .stacktrace;
     expect(frames[0]!.filename).not.toContain('brad');
     expect(frames[0]!.filename).toContain('tabs.ts');
     expect(frames[0]!.lineno).toBe(40);
@@ -138,8 +170,8 @@ describe('scrubEvent', () => {
       {
         ...base,
         breadcrumbs: [
-          { level: 'info', category: 'nav', message: 'went to https://x.com',
-            data: { formValue: 'my-password' } },
+          { level: 'info', category: 'nav', ts: '2026-07-31T00:00:00Z',
+            message: 'went to https://x.com', data: { formValue: 'my-password' } },
         ],
       },
       OPTS,
@@ -148,6 +180,88 @@ describe('scrubEvent', () => {
     expect(crumbs[0]!['data']).toBeUndefined();
     expect(JSON.stringify(out)).not.toContain('my-password');
     expect(JSON.stringify(out)).not.toContain('x.com');
+  });
+});
+
+/**
+ * The test that was missing, and whose absence let a broken scrubber ship
+ * behind 27 green tests.
+ *
+ * Everything above checks that secrets are *removed*. Nothing checked that
+ * what survives is still a valid envelope — so the scrubber emitted
+ * `stacktrace: {frames: []}` against a schema wanting a flat array, dropped
+ * the required `mechanism`, and renamed breadcrumb `ts` to `timestamp`. Unit
+ * tests all passed; the server 400'd every single event and the crash pipeline
+ * was silently dead.
+ *
+ * This mirrors @uh-oh/types EventEnvelopeSchema. If the wire contract changes,
+ * this should fail here rather than in production.
+ */
+describe('scrubbed output still satisfies the wire contract', () => {
+  const realistic = {
+    sdk: { name: 'uh-oh-js', version: '0.6.0' },
+    timestamp: '2026-07-31T00:00:00.000Z',
+    platform: 'node',
+    release: { version: '0.1.0', build: '1' },
+    level: 'error',
+    device: { os: 'win32', osVersion: '10' },
+    exception: {
+      type: 'TypeError',
+      value: 'boom',
+      stacktrace: [{ function: 'f', filename: 'src/main/tabs.ts', lineno: 4, inApp: true }],
+      mechanism: 'js-global',
+    },
+    breadcrumbs: [
+      { category: 'nav', message: 'went somewhere', level: 'info', ts: '2026-07-31T00:00:00.000Z' },
+    ],
+  };
+
+  it('keeps every field the schema requires', () => {
+    const out = scrubEvent(realistic, OPTS)!;
+    for (const k of ['sdk', 'timestamp', 'platform', 'release', 'level', 'exception', 'device']) {
+      expect(out[k], `required field ${k} was dropped`).toBeDefined();
+    }
+  });
+
+  it('emits stacktrace as a flat array, not a {frames} wrapper', () => {
+    const ex = scrubEvent(realistic, OPTS)!['exception'] as Record<string, unknown>;
+    expect(Array.isArray(ex['stacktrace'])).toBe(true);
+    expect(ex['frames']).toBeUndefined();
+  });
+
+  it('preserves the required mechanism field', () => {
+    const ex = scrubEvent(realistic, OPTS)!['exception'] as Record<string, unknown>;
+    expect(ex['mechanism']).toBe('js-global');
+  });
+
+  it('supplies a mechanism when the source event lacks one', () => {
+    const noMech = { ...realistic, exception: { ...realistic.exception, mechanism: undefined } };
+    const ex = scrubEvent(noMech, OPTS)!['exception'] as Record<string, unknown>;
+    expect(typeof ex['mechanism']).toBe('string');
+  });
+
+  it('keeps every frame field the schema names, and inApp as a boolean', () => {
+    const ex = scrubEvent(realistic, OPTS)!['exception'] as { stacktrace: Record<string, unknown>[] };
+    const f = ex.stacktrace[0]!;
+    expect(f['inApp']).toBe(true);
+    expect(f['lineno']).toBe(4);
+    expect(f['function']).toBe('f');
+    // Optional fields must be absent rather than explicitly undefined.
+    expect('colno' in f).toBe(false);
+  });
+
+  it('uses `ts` for the breadcrumb timestamp, not `timestamp`', () => {
+    const crumbs = scrubEvent(realistic, OPTS)!['breadcrumbs'] as Record<string, unknown>[];
+    expect(crumbs[0]!['ts']).toBe('2026-07-31T00:00:00.000Z');
+    expect(crumbs[0]!['timestamp']).toBeUndefined();
+    expect(typeof crumbs[0]!['category']).toBe('string');
+    expect(typeof crumbs[0]!['message']).toBe('string');
+  });
+
+  it('survives a JSON round-trip with nothing undefined left behind', () => {
+    const out = JSON.parse(JSON.stringify(scrubEvent(realistic, OPTS)));
+    expect(out.exception.stacktrace).toHaveLength(1);
+    expect(out.exception.mechanism).toBe('js-global');
   });
 });
 
@@ -171,7 +285,7 @@ describe('originatesInVault', () => {
   it('catches events whose stack passes through vault code', () => {
     expect(
       originatesInVault({
-        exception: { stacktrace: { frames: [{ filename: '/app/src/vault/vault.ts' }] } },
+        exception: { stacktrace: [{ filename: '/app/src/vault/vault.ts' }] },
       }),
     ).toBe(true);
   });
@@ -179,7 +293,7 @@ describe('originatesInVault', () => {
   it('allows ordinary browser errors through', () => {
     expect(
       originatesInVault({
-        exception: { stacktrace: { frames: [{ filename: '/app/src/main/tabs.ts' }] } },
+        exception: { stacktrace: [{ filename: '/app/src/main/tabs.ts' }] },
       }),
     ).toBe(false);
   });
@@ -203,7 +317,7 @@ describe('beforeSend hook', () => {
   it('fails closed rather than emitting a payload that still holds a secret', () => {
     const evt = {
       sdk: { name: 'x', version: '1' },
-      exception: { type: 'E', value: 'ok', stacktrace: { frames: [] } },
+      exception: { type: 'E', value: 'ok', stacktrace: [], mechanism: 'js-manual' },
       // A shape the structural pass does not rewrite, to prove the final gate
       // is doing independent work.
       tags: { note: '-----BEGIN RSA PRIVATE KEY-----' },
@@ -222,7 +336,8 @@ describe('beforeSend hook', () => {
       exception: {
         type: 'TypeError',
         value: 'cannot read length of undefined',
-        stacktrace: { frames: [{ function: 'f', filename: 'src/main/tabs.ts', lineno: 1, inApp: true }] },
+        stacktrace: [{ function: 'f', filename: 'src/main/tabs.ts', lineno: 1, inApp: true }],
+        mechanism: 'js-global',
       },
       breadcrumbs: [],
     });

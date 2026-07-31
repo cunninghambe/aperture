@@ -79,10 +79,51 @@ export function hashOrigin(url: string, salt: string): string {
  */
 export function scrubUrls(s: string, salt: string, homeDir: string): string {
   let out = s.replace(/https?:\/\/[^\s"'<>)]+/g, (m) => hashOrigin(m, salt));
+
+  // Stack frames arrive as `file:///C:/Users/name/...` URLs, which the http(s)
+  // pattern above does not touch. Strip the scheme so the path handling below
+  // sees a plain path — the local path is what makes a trace useful, the
+  // scheme is noise.
+  out = out.replace(/\bfile:\/\/\/?/gi, '');
+
   if (homeDir) {
-    out = out.split(homeDir).join('~');
+    // The home directory appears in at least three forms in practice, and
+    // matching only the literal one let the username through in every stack
+    // frame while the message itself scrubbed cleanly:
+    //   C:\Users\name      (os.homedir)
+    //   C:/Users/name      (file:// URL, forward slashes)
+    //   C%3A%2FUsers%2Fname (percent-encoded, occasionally)
+    const forward = homeDir.replace(/\\/g, '/');
+    for (const form of [homeDir, forward, encodeURI(forward)]) {
+      if (form) out = splitJoinCI(out, form, '~');
+    }
+
+    // Belt and braces: whatever the shape, the username itself must not
+    // survive. This is what actually guarantees the property, since the
+    // enumeration above can never be exhaustive.
+    const user = homeDir.split(/[\\/]/).filter(Boolean).pop();
+    if (user && user.length >= 3) out = splitJoinCI(out, user, '~user');
   }
+
   return out;
+}
+
+/** Case-insensitive replace-all. Windows paths vary in case constantly. */
+function splitJoinCI(haystack: string, needle: string, replacement: string): string {
+  if (!needle) return haystack;
+  const lowerHay = haystack.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const at = lowerHay.indexOf(lowerNeedle, i);
+    if (at === -1) {
+      out += haystack.slice(i);
+      return out;
+    }
+    out += haystack.slice(i, at) + replacement;
+    i = at + needle.length;
+  }
 }
 
 export interface ScrubOptions {
@@ -113,26 +154,38 @@ export function scrubEvent(
   // are; an identifier buys nothing and costs everything.
   delete out['user'];
 
+  // The envelope shape below is the wire contract (@uh-oh/types
+  // EventEnvelopeSchema), NOT a shape invented here. Getting it wrong does not
+  // fail loudly in unit tests — it fails as a 400 at ingest, silently dropping
+  // every crash. `stacktrace` is a flat StackFrame[]; `mechanism` is required.
   const exception = event['exception'] as
-    | { type?: string; value?: string; stacktrace?: { frames?: unknown[] } }
+    | { type?: string; value?: string; stacktrace?: unknown; mechanism?: string }
     | undefined;
 
   if (exception) {
+    const frames = Array.isArray(exception.stacktrace) ? exception.stacktrace : [];
     out['exception'] = {
-      type: typeof exception.type === 'string' ? exception.type : 'Error',
+      type: typeof exception.type === 'string' && exception.type
+        ? exception.type
+        : 'Error',
       value: clean(exception.value),
-      stacktrace: {
-        frames: (exception.stacktrace?.frames ?? []).map((f) => {
-          const frame = f as Record<string, unknown>;
-          return {
-            function: typeof frame['function'] === 'string' ? frame['function'] : undefined,
-            filename: clean(frame['filename']),
-            lineno: typeof frame['lineno'] === 'number' ? frame['lineno'] : undefined,
-            colno: typeof frame['colno'] === 'number' ? frame['colno'] : undefined,
-            inApp: frame['inApp'] === true,
-          };
-        }),
-      },
+      stacktrace: frames.slice(0, 500).map((f) => {
+        const frame = f as Record<string, unknown>;
+        const out: Record<string, unknown> = { inApp: frame['inApp'] === true };
+        // Optional fields are omitted rather than set to undefined: the schema
+        // rejects an explicit null, and JSON.stringify drops undefined anyway.
+        if (typeof frame['function'] === 'string') out['function'] = frame['function'];
+        if (typeof frame['module'] === 'string') out['module'] = clean(frame['module']);
+        if (typeof frame['filename'] === 'string') out['filename'] = clean(frame['filename']);
+        if (typeof frame['lineno'] === 'number') out['lineno'] = frame['lineno'];
+        if (typeof frame['colno'] === 'number') out['colno'] = frame['colno'];
+        return out;
+      }),
+      // Required by the schema. Preserved as-is: it is an enum of our own
+      // making ('js-global', 'js-manual', ...) and carries nothing sensitive.
+      mechanism: typeof exception.mechanism === 'string'
+        ? exception.mechanism
+        : 'js-manual',
     };
   }
 
@@ -140,16 +193,21 @@ export function scrubEvent(
   // or a form value to have been logged.
   const crumbs = event['breadcrumbs'];
   if (Array.isArray(crumbs)) {
+    // Field names per BreadcrumbSchema: category, message, level, ts. The
+    // timestamp key is `ts`, not `timestamp` — an easy and silent 400.
     out['breadcrumbs'] = crumbs.slice(-40).map((c) => {
       const crumb = c as Record<string, unknown>;
-      return {
-        timestamp: crumb['timestamp'],
-        level: crumb['level'],
-        category: typeof crumb['category'] === 'string' ? crumb['category'] : 'app',
-        message: clean(crumb['message']),
-        // `data` is dropped wholesale: it is an arbitrary bag and cannot be
-        // allowlisted meaningfully.
+      const b: Record<string, unknown> = {
+        category: typeof crumb['category'] === 'string' && crumb['category']
+          ? crumb['category'].slice(0, 64)
+          : 'app',
+        message: clean(crumb['message']).slice(0, 1024),
+        level: typeof crumb['level'] === 'string' ? crumb['level'] : 'info',
       };
+      if (typeof crumb['ts'] === 'string') b['ts'] = crumb['ts'];
+      // `data` is dropped wholesale: an arbitrary bag cannot be allowlisted
+      // meaningfully, and it is where page-derived values end up.
+      return b;
     });
   }
 

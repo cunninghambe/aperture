@@ -104,6 +104,20 @@ async function createWindow(): Promise<void> {
 
   if (process.argv.includes('--open-vault')) openVaultWindow(win);
 
+  // Dev-only: prove the crash pipeline end to end, including that the scrubber
+  // actually redacts in production and not merely in unit tests. The payload
+  // deliberately contains a URL, a home path and a bearer token.
+  if (process.argv.includes('--test-crash')) {
+    const err = new Error(
+      'APERTURE_SCRUB_PROBE at https://secret-bank.example.com/account/12345 ' +
+        `for user probe@example.com with Authorization: Bearer ${'A'.repeat(32)} ` +
+        `from ${app.getPath('home')}\\dev\\aperture\\src\\main\\index.ts`,
+    );
+    report(err, 'main');
+    await flushTelemetry(5000);
+    console.log('[aperture] test crash reported and flushed');
+  }
+
   win.on('closed', () => {
     win = null;
     chrome = null;
