@@ -85,9 +85,11 @@ Making that safe rather than merely small is the actual engineering:
   the agent reads or acts on is promoted straight back. Without this, one
   ticking timestamp defeats the entire diff argument.
 - **Positional fallback, acknowledged as fragile.** Elements distinguishable only by position (ten identical "Add to cart" buttons) get a document-order ordinal appended to their key. That makes those refs positional, and reordering is exactly what breaks positional identity — a real limitation, and the honest trade against the alternative, which was one ref for ten buttons and a silent click on the wrong product.
-- **Ref discipline.** Only actionable elements get refs. Playwright MCP puts 789
-  refs on a GitHub page; a disciplined pass puts ~245, and the output is 4.5×
-  smaller.
+- **Ref discipline.** Only actionable elements get refs. Measured against
+  playwright-mcp on the same pages: 97 refs vs 446 on a GitHub repo page, 206 vs
+  611 on a Wikipedia article. That makes each snapshot **~1.9× smaller** — the
+  README previously claimed 4.5×, which was a third-party number for a
+  different tool. See [bench/RESULTS.md](bench/RESULTS.md).
 
 ## Small tool surface, deliberately
 
@@ -415,7 +417,8 @@ direction.
 | 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
 | Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
 | Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
-| Token benchmark | **Working** (`npm run bench`) — synthetic page only |
+| Token benchmark | **Working** — synthetic (`npm run bench`) plus real-site head-to-head vs playwright-mcp, see [bench/RESULTS.md](bench/RESULTS.md) |
+| Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
 | Task-success benchmark (diff vs re-dump) | **Not started.** The most important unmeasured claim in the project |
 | Extensions | Not started — see below |
 

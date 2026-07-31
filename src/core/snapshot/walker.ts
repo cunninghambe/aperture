@@ -204,7 +204,15 @@ function visit(
     }
   }
 
-  if (el instanceof HTMLTableElement) {
+  // Only DATA tables get flattened into pipe-joined rows. A table containing
+  // interactive elements is being used for layout, and collapsing it destroys
+  // every link and button inside it.
+  //
+  // Measured on the Hacker News front page before this check: 30 stories and
+  // several hundred links collapsed to 4 rows of concatenated text with ONE
+  // usable ref. The agent could not click anything at all. Table layout is
+  // still everywhere — older sites, webmail, enterprise tooling.
+  if (el instanceof HTMLTableElement && !hasInteractiveDescendant(el)) {
     const rows = tableRows(el);
     if (rows.length) {
       node.rows = rows;
@@ -559,6 +567,21 @@ function headingLevel(el: HTMLElement): 1 | 2 | 3 | 4 | 5 | 6 | undefined {
     if (n >= 1 && n <= 6) return n as 1 | 2 | 3 | 4 | 5 | 6;
   }
   return undefined;
+}
+
+/**
+ * Does this table contain anything an agent could act on?
+ *
+ * If so it is a layout table, not a data table, and flattening it would throw
+ * away every actionable element inside.
+ */
+function hasInteractiveDescendant(el: HTMLElement): boolean {
+  return (
+    el.querySelector(
+      'a[href], button, input:not([type=hidden]), select, textarea, ' +
+        '[role=button], [role=link], [onclick], [tabindex]:not([tabindex="-1"])',
+    ) !== null
+  );
 }
 
 function tableRows(t: HTMLTableElement): string[][] {
