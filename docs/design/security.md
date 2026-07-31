@@ -85,6 +85,36 @@ observable correlate you cannot also fake.** In particular the UA major version
 must equal the real Chromium major version, because the TLS ClientHello comes
 from BoringSSL and cannot be faked from JS.
 
+## Origin identity: the Public Suffix List
+
+`registrableDomain()` is the function every origin decision routes through, so
+it is worth stating exactly what backs it.
+
+The PSL is **bundled** (via `tldts`), never fetched at runtime. An attacker who
+controls your suffix list controls your origin policy, and correct routing is
+the only guarantee a password manager genuinely provides.
+
+Three properties, each of which was a bug before:
+
+1. **`allowPrivateDomains: true` is load-bearing.** The PSL's ICANN section
+   alone collapses every tenant of a shared host into one identity —
+   `victim.github.io` and `attacker.github.io` both reduce to `github.io`, so a
+   credential saved for one is offered to the other. The private section is
+   what keeps them apart.
+2. **A suffix must actually be in the PSL.** `tldts` otherwise treats an
+   unrecognised final label as a valid one-label suffix, so `a.b.notarealtld`
+   yields `b.notarealtld`. We check `isIcann || isPrivate` and return `null`
+   otherwise. Failing closed costs usability, not security.
+3. **The PSL is not sufficient on its own.** Its private section is opt-in — a
+   vendor has to submit their own suffix — so several large multi-tenant
+   platforms are absent. Atlassian is the clearest case: `acme.atlassian.net`
+   and `evil.atlassian.net` are different customers, anyone can provision the
+   latter free, and the PSL does not separate them. `SUPPLEMENTAL_SUFFIXES`
+   covers those gaps and is a supplement, never a replacement.
+
+A bare public suffix (`github.io` itself) has no registrable domain and returns
+`null` — there is no site under it to bind a credential to.
+
 ## Verification queue
 
 Ordered by how much collapses if the answer is unfavorable.

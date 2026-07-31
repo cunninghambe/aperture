@@ -21,10 +21,20 @@
     "productName": "Aperture",
     "afterPack": "build/afterPack.cjs",
     "asar": true,
-    "files": ["out/**/*", "package.json"],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg", "hardenedRuntime": true },
-    "linux": { "target": "AppImage" }
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "hardenedRuntime": true
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
@@ -33,6 +43,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@mozilla/readability": "^0.6.0",
     "libsodium-wrappers-sumo": "^0.8.4",
+    "tldts": "^7.4.10",
     "zod": "^4.4.3"
   },
   "devDependencies": {

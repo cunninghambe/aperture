@@ -79,9 +79,9 @@ describe('C2/M1 — page text cannot forge snapshot structure', () => {
 
 describe('C2 (vault) — registrableDomain must not merge tenants', () => {
   it('keeps multi-tenant platform subdomains apart', () => {
-    // Each of these pairs was previously collapsed into one trust domain, so a
-    // credential saved for the first was offered to the second — and an
-    // attacker can provision the second for free.
+    // Each pair was previously collapsed into one trust domain, so a credential
+    // saved for the first was offered to the second — and an attacker can
+    // provision the second for free.
     const pairs: [string, string][] = [
       ['https://acme.atlassian.net', 'https://evil.atlassian.net'],
       ['https://victim.github.io', 'https://attacker.github.io'],
@@ -92,25 +92,51 @@ describe('C2 (vault) — registrableDomain must not merge tenants', () => {
       ['https://x.blogspot.com', 'https://y.blogspot.com'],
       ['https://corp.sharepoint.com', 'https://evil.sharepoint.com'],
       ['https://a.ngrok.io', 'https://b.ngrok.io'],
+      ['https://a.netlify.app', 'https://b.netlify.app'],
+      ['https://a.azurewebsites.net', 'https://b.azurewebsites.net'],
+      ['https://a.workers.dev', 'https://b.workers.dev'],
+      ['https://a.zendesk.com', 'https://b.zendesk.com'],
+      ['https://a.my.salesforce.com', 'https://b.my.salesforce.com'],
+      ['https://a.onmicrosoft.com', 'https://b.onmicrosoft.com'],
     ];
     for (const [a, b] of pairs) {
-      expect(registrableDomain(a)).not.toBe(registrableDomain(b));
+      const da = registrableDomain(a);
+      const db = registrableDomain(b);
+      expect(da, `${a} vs ${b}`).not.toBe(db);
+      expect(da).not.toBeNull();
+    }
+  });
+
+  it('covers PSL suffixes the hand-rolled list never had', () => {
+    // The point of using the real PSL: entries nobody thought to enumerate.
+    const pairs: [string, string][] = [
+      ['https://a.s3.eu-west-1.amazonaws.com', 'https://b.s3.eu-west-1.amazonaws.com'],
+      ['https://a.cyon.site', 'https://b.cyon.site'],
+      ['https://a.pythonanywhere.com', 'https://b.pythonanywhere.com'],
+      ['https://a.readthedocs.io', 'https://b.readthedocs.io'],
+      ['https://a.fastly-terrarium.com', 'https://b.fastly-terrarium.com'],
+    ];
+    for (const [a, b] of pairs) {
+      expect(registrableDomain(a), `${a} vs ${b}`).not.toBe(registrableDomain(b));
     }
   });
 
   it('still treats ordinary subdomains as the same site', () => {
     expect(registrableDomain('https://gist.github.com')).toBe('github.com');
     expect(registrableDomain('https://mail.google.com')).toBe('google.com');
+    expect(registrableDomain('https://deep.nested.sub.example.com')).toBe('example.com');
   });
 
   it('handles ccTLD second-level suffixes', () => {
     expect(registrableDomain('https://shop.example.co.uk')).toBe('example.co.uk');
     expect(registrableDomain('https://bank.garanti.com.tr')).toBe('garanti.com.tr');
     expect(registrableDomain('https://a.example.com.au')).toBe('example.com.au');
+    expect(registrableDomain('https://a.example.co.jp')).toBe('example.co.jp');
   });
 
   it('is not fooled by a trailing dot', () => {
     expect(registrableDomain('https://github.com./')).toBe('github.com');
+    expect(registrableDomain('https://evil.github.io./')).toBe('evil.github.io');
   });
 
   it('is not fooled by userinfo in the URL', () => {
@@ -120,5 +146,30 @@ describe('C2 (vault) — registrableDomain must not merge tenants', () => {
 
   it('is not fooled by a lookalike subdomain', () => {
     expect(registrableDomain('https://google.com.evil.com')).toBe('evil.com');
+  });
+
+  it('is not fooled by case or punycode', () => {
+    expect(registrableDomain('https://GitHub.COM/')).toBe('github.com');
+    // Cyrillic 'о' in "gооgle" is a different domain, and must stay one.
+    expect(registrableDomain('https://gооgle.com')).not.toBe('google.com');
+  });
+
+  it('fails closed on an unknown TLD rather than merging identities', () => {
+    // Returning the bare host here would let an unrecognised suffix merge two
+    // sites. A null just means "no credential matches".
+    expect(registrableDomain('https://a.b.invalidtldthatdoesnotexist')).toBeNull();
+  });
+
+  it('treats literal addresses as their own identity', () => {
+    expect(registrableDomain('http://localhost:3000')).toBe('localhost');
+    expect(registrableDomain('http://127.0.0.1:8080')).toBe('127.0.0.1');
+    expect(registrableDomain('http://[::1]:8080')).toBe('[::1]');
+  });
+
+  it('has no registrable domain for a bare public suffix', () => {
+    // github.io is itself a public suffix: there is no site under it to bind a
+    // credential to, so fail closed rather than inventing one.
+    expect(registrableDomain('https://github.io')).toBeNull();
+    expect(registrableDomain('https://atlassian.net')).toBeNull();
   });
 });

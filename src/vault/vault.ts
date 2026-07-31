@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import sodium from 'libsodium-wrappers-sumo';
 import type { VaultEntryPublic, VaultState } from '@shared/types';
+import { parse } from 'tldts';
 import { parseOtpauth, totp } from './totp.js';
 
 /**
@@ -323,7 +324,12 @@ export class Vault {
     password: string;
     totpSecret?: string;
   }): Promise<string> {
-    const rp = registrableDomain(spec.origin) ?? spec.origin;
+    // Falling back to the raw input here stored an rpId that no lookup could
+    // ever produce — a human typing "www.github.com" got a permanently
+    // invisible entry with no error. Refuse instead, so the UI can say so.
+    const rp = resolveOriginForStorage(spec.origin);
+    if (!rp) throw new Error(`not a usable site: ${spec.origin}`);
+
     const id = sodium.to_hex(sodium.randombytes_buf(8));
     this.records.push({
       id,
@@ -348,7 +354,9 @@ export class Vault {
     if (patch.username !== undefined) rec.username = patch.username;
     if (patch.password !== undefined) rec.password = patch.password;
     if (patch.origin !== undefined) {
-      rec.rpId = registrableDomain(patch.origin) ?? patch.origin;
+      const rp = resolveOriginForStorage(patch.origin);
+      if (!rp) throw new Error(`not a usable site: ${patch.origin}`);
+      rec.rpId = rp;
     }
     await this.persist();
     return true;
@@ -419,13 +427,18 @@ export type FillDenyCode =
   | 'USER_DENIED';
 
 /**
- * Registrable domain (eTLD+1).
+ * Registrable domain (eTLD+1) — the unit of origin identity for the vault.
  *
- * This is a deliberately conservative placeholder: it uses a bundled short
- * list of multi-part suffixes rather than the full Public Suffix List. A live
- * PSL fetch is explicitly rejected — an attacker who controls your suffix list
- * controls your origin policy. Ship a versioned PSL snapshot before relying on
- * this for anything beyond development.
+ * Backed by the Public Suffix List, bundled via `tldts` rather than fetched at
+ * runtime. A live fetch is deliberately rejected: an attacker who controls your
+ * suffix list controls your origin policy, and the vault's only real guarantee
+ * is correct routing.
+ *
+ * **`allowPrivateDomains` is the load-bearing option.** Without it the PSL's
+ * ICANN section alone is used, and every tenant of a shared host collapses into
+ * one identity — `victim.github.io` and `attacker.github.io` both reduce to
+ * `github.io`, so a credential saved for one is offered to the other. With it,
+ * the private section is honoured and tenants stay separate.
  */
 export function registrableDomain(origin: string): string | null {
   let host: string;
@@ -435,88 +448,97 @@ export function registrableDomain(origin: string): string | null {
     return null;
   }
   if (!host) return null;
-  if (host === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return host;
 
+  // Strip the root label; `github.com.` and `github.com` are the same host but
+  // only the latter is in the PSL.
   if (host.endsWith('.')) host = host.slice(0, -1);
-  const parts = host.split('.');
-  if (parts.length <= 2) return host;
+  if (!host) return null;
 
-  const lastTwo = parts.slice(-2).join('.');
+  // Literal addresses have no registrable domain; they are their own identity.
+  if (host === 'localhost') return host;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host;
+  if (host.startsWith('[') || host.includes(':')) return host;
 
-  // Suffixes under which anyone can register a name. Treating these as a
-  // registrable domain would put every tenant in one trust domain: a
-  // credential saved for acme.atlassian.net would be offered to — and filled
-  // on — evil.atlassian.net, which an attacker can provision for free. Same for
-  // github.io, vercel.app, myshopify.com and friends.
-  if (MULTI_TENANT_SUFFIXES.has(lastTwo)) return parts.slice(-3).join('.');
+  const supplemented = applySupplementalSuffixes(host);
+  if (supplemented !== undefined) return supplemented;
 
-  const lastThree = parts.slice(-3).join('.');
-  if (MULTI_TENANT_SUFFIXES.has(lastThree)) return parts.slice(-4).join('.');
+  const parsed = parse(host, { allowPrivateDomains: true });
 
-  if (CCTLD_SECOND_LEVEL.has(lastTwo)) return parts.slice(-3).join('.');
-  return lastTwo;
+  // The suffix must actually be in the PSL. tldts otherwise treats an
+  // unrecognised final label as a valid one-label suffix, so
+  // `a.b.notarealtld` would yield `b.notarealtld` — letting an unknown or
+  // internal TLD establish an identity we cannot reason about.
+  if (!parsed.isIcann && !parsed.isPrivate) return null;
+
+  // Null here means the host IS a public suffix with no registrable part
+  // (`github.io` itself). There is no site to bind a credential to, so fail
+  // closed — a null means "no credential matches", which costs usability, not
+  // security.
+  return parsed.domain ?? null;
 }
 
 /**
- * ccTLD second-level suffixes, e.g. `co.uk`.
+ * Resolve what the human typed in the vault UI into a storable rpId.
  *
- * This is a bundled subset, not the full Public Suffix List. A live PSL fetch
- * is deliberately rejected — an attacker who controls your suffix list controls
- * your origin policy — but this list must grow into a versioned PSL snapshot
- * before the vault fill path is wired for real. Tracked in
- * docs/design/security.md.
+ * People type `github.com`, `www.github.com` and `https://github.com/login`
+ * interchangeably. All three should land on the same entry, so this tolerates
+ * a missing scheme rather than making the human know the difference.
  */
-const CCTLD_SECOND_LEVEL = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk', 'sch.uk',
-  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'id.au',
-  'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz',
-  'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'go.jp',
-  'com.br', 'net.br', 'org.br', 'gov.br',
-  'co.za', 'org.za', 'net.za', 'gov.za',
-  'com.mx', 'org.mx', 'gob.mx',
-  'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in', 'edu.in',
-  'com.tr', 'net.tr', 'org.tr', 'gov.tr', 'edu.tr',
-  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-  'com.sg', 'com.hk', 'com.tw', 'co.kr', 'co.il', 'com.ar', 'com.co',
-  'co.th', 'com.my', 'com.ph', 'com.vn', 'com.pk', 'com.ua', 'com.pl',
-  'co.id', 'com.eg', 'com.sa', 'com.ng', 'com.es', 'com.pe',
+export function resolveOriginForStorage(input: string): string | null {
+  const s = input.trim();
+  if (!s) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+  return registrableDomain(withScheme);
+}
+
+/**
+ * Multi-tenant hosts the PSL does not cover.
+ *
+ * The PSL's private section is opt-in — a vendor has to submit their own
+ * suffix — so several large multi-tenant platforms are absent. Atlassian is the
+ * clearest example: `acme.atlassian.net` and `evil.atlassian.net` are different
+ * customers, anyone can provision the latter for free, and the PSL does not
+ * separate them.
+ *
+ * Entries here are a supplement to the PSL, never a replacement. Each one means
+ * "treat one more label as part of the suffix".
+ */
+const SUPPLEMENTAL_SUFFIXES = new Set([
+  'atlassian.net',
+  'jira.com',
+  'zendesk.com',
+  'freshdesk.com',
+  'statuspage.io',
+  'service-now.com',
+  'my.salesforce.com',
+  'lightning.force.com',
+  'sharepoint.com',
+  'onmicrosoft.com',
+  'workday.com',
+  'zohosites.com',
+  'discourse.group',
+  'sslip.io',
+  'nip.io',
 ]);
 
 /**
- * Suffixes where subdomains belong to mutually untrusted parties.
- *
- * The private section of the PSL. Missing one of these is a credential-theft
- * bug, not a cosmetic one, because it silently merges tenants.
+ * Returns the registrable domain if a supplemental suffix applies, `null` if
+ * the host IS a bare supplemental suffix (no registrable part, so nothing to
+ * bind a credential to), or `undefined` if none applies and the PSL should
+ * decide.
  */
-const MULTI_TENANT_SUFFIXES = new Set([
-  // Code hosting / pages
-  'github.io', 'gitlab.io', 'bitbucket.io', 'pages.dev', 'netlify.app',
-  'vercel.app', 'now.sh', 'surge.sh', 'neocities.org', 'js.org',
-  'github.dev', 'gitpod.io', 'glitch.me', 'repl.co', 'replit.dev',
-  'codesandbox.io', 'stackblitz.io',
-  // PaaS
-  'herokuapp.com', 'herokudns.com', 'appspot.com', 'cloudfunctions.net',
-  'run.app', 'web.app', 'firebaseapp.com', 'azurewebsites.net',
-  'cloudapp.net', 'trafficmanager.net', 'elasticbeanstalk.com',
-  'amazonaws.com', 's3.amazonaws.com', 'cloudfront.net', 'fly.dev',
-  'render.com', 'onrender.com', 'railway.app', 'deta.dev', 'workers.dev',
-  // SaaS tenants
-  'atlassian.net', 'jira.com', 'zendesk.com', 'freshdesk.com',
-  'myshopify.com', 'shopifypreview.com', 'squarespace.com', 'wixsite.com',
-  'webflow.io', 'bigcartel.com', 'notion.site', 'zohosites.com',
-  'salesforce.com', 'force.com', 'lightning.force.com', 'my.salesforce.com',
-  'sharepoint.com', 'onmicrosoft.com', 'service-now.com', 'workday.com',
-  'statuspage.io', 'discourse.group', 'slack.com',
-  // Blogging / user content
-  'blogspot.com', 'wordpress.com', 'tumblr.com', 'medium.com',
-  'substack.com', 'ghost.io', 'blogger.com', 'livejournal.com',
-  // Dynamic DNS / tunnels
-  'ngrok.io', 'ngrok-free.app', 'trycloudflare.com', 'loca.lt',
-  'serveo.net', 'localtunnel.me', 'duckdns.org', 'no-ip.com', 'dyndns.org',
-  'sslip.io', 'nip.io', 'localhost.run',
-  // Misc user content
-  'firebaseio.com', 'appspot.com', 'translate.goog', 'cdn.ampproject.org',
-]);
+function applySupplementalSuffixes(host: string): string | null | undefined {
+  const parts = host.split('.');
+  // Longest match first, so `my.salesforce.com` beats `salesforce.com`.
+  for (let take = Math.min(4, parts.length); take >= 2; take--) {
+    const suffix = parts.slice(-take).join('.');
+    if (!SUPPLEMENTAL_SUFFIXES.has(suffix)) continue;
+    // Matches tldts: a bare public suffix has no registrable domain.
+    if (parts.length === take) return null;
+    return parts.slice(-(take + 1)).join('.');
+  }
+  return undefined;
+}
 
 function isLocalhost(origin: string): boolean {
   try {

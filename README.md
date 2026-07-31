@@ -5,7 +5,9 @@ the one who stays in charge.
 
 > **Status: v0.2, early but real.** The browser runs, the MCP server works, and
 > Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI and tested crypto. 132 tests pass. See
+> vault has a working UI, tested crypto, and PSL-backed origin binding. 152
+> tests pass, including regression tests for every finding of the security
+> review. See
 > [Honest status](#honest-status) for what is *not* done — nothing below is
 > claimed as working unless it is marked working.
 
@@ -350,7 +352,7 @@ direction.
 | Attachments (CV upload via `DOM.setFileInputFiles`) | Built; library is human-curated. Multi-upload forms need the ref→node bridge |
 | Tracker blocking | Wired; not yet measured |
 | Identity containers | Sessions and partitions working; per-container fingerprint not applied |
-| Vault | Crypto and API shape done; **fill path deliberately refuses** rather than pretending |
+| Vault | Crypto, origin binding (bundled PSL) and API shape done; **MCP fill path deliberately refuses** rather than pretending |
 | Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
 | Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
 | 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
