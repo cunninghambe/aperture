@@ -53,6 +53,12 @@ export class Vault {
   private records: VaultRecord[] = [];
   private lockTimer: NodeJS.Timeout | null = null;
   private ready = false;
+  /**
+   * KDF parameters for the open vault, kept so callers never have to pass
+   * them. Making a caller supply crypto parameters on every write is how you
+   * end up with one code path quietly using weaker ones.
+   */
+  private kdf: { salt: Uint8Array; opslimit: number; memlimit: number } | null = null;
 
   /**
    * Idle auto-lock. Agent activity deliberately does NOT count as activity —
@@ -109,6 +115,11 @@ export class Vault {
       );
       this.records = JSON.parse(new TextDecoder().decode(plain));
       this.key = key;
+      this.kdf = {
+        salt,
+        opslimit: file.kdf.opslimit,
+        memlimit: file.kdf.memlimit,
+      };
       this.touch();
       return true;
     } catch {
@@ -121,9 +132,20 @@ export class Vault {
   lock(): void {
     if (this.key) sodium.memzero(this.key);
     this.key = null;
+    this.kdf = null;
     this.records = [];
     if (this.lockTimer) clearTimeout(this.lockTimer);
     this.lockTimer = null;
+  }
+
+  /** Whether a vault file exists yet, so the UI knows to offer create vs unlock. */
+  async exists(): Promise<boolean> {
+    try {
+      await readFile(this.path());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Restart the idle countdown. Called on *human* interaction only. */
@@ -148,15 +170,14 @@ export class Vault {
       sodium.crypto_pwhash_ALG_ARGON2ID13,
     );
     this.records = [];
-    await this.persist(salt, opslimit, memlimit);
+    this.kdf = { salt, opslimit, memlimit };
+    this.touch();
+    await this.persist();
   }
 
-  private async persist(
-    salt: Uint8Array,
-    opslimit: number,
-    memlimit: number,
-  ): Promise<void> {
-    if (!this.key) throw new Error('vault is locked');
+  private async persist(): Promise<void> {
+    if (!this.key || !this.kdf) throw new Error('vault is locked');
+    const { salt, opslimit, memlimit } = this.kdf;
     const nonce = sodium.randombytes_buf(
       sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
     );
@@ -246,20 +267,106 @@ export class Vault {
     return { username: rec.username, password: rec.password };
   }
 
-  /** Human-only. Never reachable from the agent surface. */
-  async addRecord(
-    r: Omit<VaultRecord, 'id' | 'createdAt' | 'lastUsed'>,
-    salt: Uint8Array,
-    opslimit: number,
-    memlimit: number,
-  ): Promise<void> {
+  // -------------------------------------------------------------------------
+  // Human-only operations.
+  //
+  // Everything below is reachable ONLY from the vault window's own IPC
+  // channel. None of it is registered as an MCP tool, and none of it is
+  // exposed on the page preload. That separation is the enforcement: a
+  // capability the agent cannot name is one a hostile page cannot talk it into
+  // using.
+  // -------------------------------------------------------------------------
+
+  async addRecord(spec: {
+    origin: string;
+    username: string;
+    password: string;
+    totpSecret?: string;
+  }): Promise<string> {
+    const rp = registrableDomain(spec.origin) ?? spec.origin;
+    const id = sodium.to_hex(sodium.randombytes_buf(8));
     this.records.push({
-      ...r,
-      id: sodium.to_hex(sodium.randombytes_buf(8)),
+      id,
+      rpId: rp,
+      username: spec.username,
+      password: spec.password,
+      totpSecret: spec.totpSecret,
+      aliases: [],
       createdAt: new Date().toISOString(),
       lastUsed: null,
     });
-    await this.persist(salt, opslimit, memlimit);
+    await this.persist();
+    return id;
+  }
+
+  async updateRecord(
+    id: string,
+    patch: { username?: string; password?: string; origin?: string },
+  ): Promise<boolean> {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return false;
+    if (patch.username !== undefined) rec.username = patch.username;
+    if (patch.password !== undefined) rec.password = patch.password;
+    if (patch.origin !== undefined) {
+      rec.rpId = registrableDomain(patch.origin) ?? patch.origin;
+    }
+    await this.persist();
+    return true;
+  }
+
+  async deleteRecord(id: string): Promise<boolean> {
+    const before = this.records.length;
+    this.records = this.records.filter((r) => r.id !== id);
+    if (this.records.length === before) return false;
+    await this.persist();
+    return true;
+  }
+
+  /** Every entry, for the vault window's list. Metadata only. */
+  listAllPublic(): VaultEntryPublic[] {
+    if (!this.key) return [];
+    return this.records.map((r) => ({
+      id: r.id,
+      origin: r.rpId,
+      username: r.username,
+      hasTotp: Boolean(r.totpSecret),
+      lastUsed: r.lastUsed,
+    }));
+  }
+
+  /**
+   * Reveal a password to the human, on screen, on explicit request.
+   *
+   * This is the one function that returns plaintext, and it exists because a
+   * password manager you cannot read from is not usable — sometimes you have
+   * to type a password into a phone or a terminal.
+   *
+   * It is safe *only* because of where it can be called from: the vault
+   * window's IPC channel, which the agent has no handle to and cannot address.
+   * If this were ever exposed through the MCP surface or the page preload, the
+   * entire agent-blind property would be void. It must never grow a caller
+   * outside the vault window.
+   */
+  revealForHuman(id: string): string | null {
+    if (!this.key) return null;
+    return this.records.find((r) => r.id === id)?.password ?? null;
+  }
+
+  /**
+   * Generate a password.
+   *
+   * Rejection sampling via libsodium rather than `Math.random()` or a modulo
+   * over `randomBytes`, both of which bias the distribution.
+   */
+  generatePassword(length = 20, opts: { symbols?: boolean } = {}): string {
+    const alphabet =
+      'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789' +
+      (opts.symbols === false ? '' : '!@#$%^&*-_=+?');
+    let out = '';
+    for (let i = 0; i < length; i++) {
+      out += alphabet[sodium.randombytes_uniform(alphabet.length)];
+    }
+    return out;
   }
 }
 

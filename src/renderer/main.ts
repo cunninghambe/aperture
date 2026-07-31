@@ -11,6 +11,7 @@ const api = window.aperture;
 
 const el = <T extends HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
+const $ = el;
 
 const tabstrip = el<HTMLDivElement>('tabstrip');
 const omnibox = el<HTMLInputElement>('omnibox');
@@ -102,6 +103,21 @@ omnibox.addEventListener('focus', () => omnibox.select());
 omnibox.addEventListener('blur', () => {
   omniboxDirty = false;
   render();
+});
+
+$<HTMLButtonElement>('vault-btn').addEventListener('click', () => void api.vault.open());
+
+$<HTMLButtonElement>('capture-btn').addEventListener('click', async () => {
+  const btn = $<HTMLButtonElement>('capture-btn');
+  btn.disabled = true;
+  const res = await api.capture();
+  // Confirm in place. A capture that silently succeeds leaves you wondering
+  // whether it worked, and a capture that opens a dialog is worse.
+  btn.textContent = res.destination === 'disk' ? '✓ saved' : '✓ Notion';
+  setTimeout(() => {
+    btn.textContent = '⧉';
+    btn.disabled = false;
+  }, 1800);
 });
 
 backBtn.addEventListener('click', () => activeId && void api.tabs.back(activeId));

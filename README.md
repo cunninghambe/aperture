@@ -179,6 +179,54 @@ delivered to an origin is a password that origin has. A password manager's real
 guarantee is *correct routing*, not secrecy from the site. Passkeys are the
 actual fix; every password in a vault is technical debt.
 
+## The vault window
+
+The password manager is a separate window with three properties that are
+structural rather than policy:
+
+1. **The agent cannot address it.** TabManager never learns about it, so it has
+   no tab id — and every agent action routes through TabManager by id. There is
+   no argument the agent could pass to reach it. Not a blocked one, an
+   unrepresentable one. *Verified:* with the vault window open, `browser_tabs`
+   lists only the browser tab.
+2. **It is excluded from capture.** `setContentProtection(true)` maps to
+   `WDA_EXCLUDEFROMCAPTURE` on Windows, so screenshots and screen shares see a
+   blank region — including the agent's own capture tool.
+3. **Its IPC is separate and sender-checked.** The `vaultui:` channels verify
+   the caller is the vault window on every call, so knowing a channel name is
+   not enough to use it.
+
+`revealForHuman` is the one function in the codebase that returns a plaintext
+password. It is safe only because of where it can be called from, and it must
+never grow a caller outside that window.
+
+**Honest limitation:** the security design calls for this to run in its own OS
+process (hardened: its own low-privilege account). It currently runs in the
+browser process. That is sound against the threat that actually matters — a
+hostile page steering the agent — and not sound against local code execution as
+the same user. That is the T-Base tier in `docs/design/security.md`.
+
+## Capture → Notion
+
+One button, on a fallback chain that matches what you actually mean:
+
+1. A Notion page is open in a tab → append the capture there.
+2. Notion configured but no page open → append to today's dated page.
+3. Otherwise → write a PNG to `Pictures/Aperture`.
+
+Every step falls through on failure, and step 3 cannot fail short of a full
+disk. Losing a screenshot because an API call returned 400 would be the worst
+outcome for a button whose entire job is "keep this".
+
+The capture is filed, never returned to the agent's context — invisible text in
+a screenshot is a known prompt-injection vector against vision models.
+
+> ⚠ **The Notion API path is unverified.** Two pages of Notion's own docs
+> disagree on the field names for file uploads, and I had no workspace token to
+> test against. It is written to fail loudly and fall back to disk. Validate it
+> before trusting it; the token goes in the vault window's Notion tab, never
+> through the agent or a chat message.
+
 ## Prompt injection is the defining threat
 
 Brave demonstrated hidden text in a Reddit post making Comet exfiltrate a user's
@@ -243,7 +291,8 @@ direction.
 | Tracker blocking | Wired; not yet measured |
 | Identity containers | Sessions and partitions working; per-container fingerprint not applied |
 | Vault | Crypto and API shape done; **fill path deliberately refuses** rather than pretending |
-| Password manager UI | **Not built yet** — the vault has no window, so it cannot be unlocked from the UI. Next piece |
+| Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
+| Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**

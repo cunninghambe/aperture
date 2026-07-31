@@ -30,6 +30,10 @@ export default defineConfig({
           shell: resolve('src/preload/shell.ts'),
           // Preload injected into every web page (hostile territory).
           page: resolve('src/preload/page.ts'),
+          // Preload for the vault window only. The one preload that exposes a
+          // plaintext-returning method, loaded by a window the agent cannot
+          // address.
+          vault: resolve('src/preload/vault.ts'),
         },
         output: { format: 'cjs', entryFileNames: '[name].cjs' },
       },
@@ -39,7 +43,10 @@ export default defineConfig({
     resolve: { alias },
     build: {
       rollupOptions: {
-        input: { index: resolve('src/renderer/index.html') },
+        input: {
+          index: resolve('src/renderer/index.html'),
+          vault: resolve('src/renderer/vault.html'),
+        },
       },
     },
   },

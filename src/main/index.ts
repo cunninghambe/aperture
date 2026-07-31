@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { app, BaseWindow, WebContentsView, ipcMain, shell } from 'electron';
 import { TabManager, CHROME_HEIGHT } from './tabs.js';
 import { registerIpc } from './ipc.js';
+import { openVaultWindow, registerVaultIpc } from './vaultWindow.js';
 import { installBlocker } from '@privacy/blocker';
 import { containers } from '@privacy/containers';
 import { startMcpServer } from '@mcp/server';
@@ -76,6 +77,7 @@ async function createWindow(): Promise<void> {
   });
 
   registerIpc({ tabs, chrome, window: win });
+  registerVaultIpc();
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     await chrome.webContents.loadURL(
@@ -93,6 +95,8 @@ async function createWindow(): Promise<void> {
   });
 
   tabs.create({ url: 'https://duckduckgo.com', activate: true });
+
+  if (process.argv.includes('--open-vault')) openVaultWindow(win);
 
   win.on('closed', () => {
     win = null;

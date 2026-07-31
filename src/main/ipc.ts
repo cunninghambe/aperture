@@ -3,6 +3,8 @@ import type { TabManager } from './tabs.js';
 import { containers } from '@privacy/containers';
 import { blockedCount } from '@privacy/blocker';
 import { vault } from '@vault/vault';
+import { openVaultWindow } from './vaultWindow.js';
+import { capturePage, routeCapture } from '../capture/capture.js';
 
 export interface IpcDeps {
   tabs: TabManager;
@@ -35,14 +37,31 @@ export function registerIpc(d: IpcDeps): void {
 
   handle('privacy:stats', () => ({ blocked: blockedCount() }));
 
+  handle('capture:page', async () => {
+    const t = deps!.tabs;
+    const id = t.active;
+    if (!id) return { destination: 'disk', location: '' };
+    const info = t.info(id);
+    const bytes = await capturePage(t.webContents(id));
+    return routeCapture(bytes, {
+      openUrls: t.list().map((tab) => tab.url),
+      title: info?.title,
+      sourceUrl: info?.url,
+    });
+  });
+
   // --- vault -------------------------------------------------------------
   // Note what is absent: there is no 'vault:read' or 'vault:get-password'.
   // The chrome UI can list entries and trigger fills; it cannot extract a
   // secret, and neither can anything downstream of it.
   handle('vault:state', () => vault.state());
-  handle('vault:list', (_e, origin?: string) => vault.listPublic(origin));
-  handle('vault:unlock', (_e, passphrase: string) => vault.unlock(passphrase));
   handle('vault:lock', () => vault.lock());
+  // Opening the vault window is the only vault action the chrome UI can take.
+  // Unlocking happens inside that window, so the passphrase never crosses this
+  // channel — the chrome UI renders content derived from page titles and
+  // favicons, and a passphrase should not share a bus with anything a page
+  // can influence.
+  handle('vault:open', () => openVaultWindow(deps!.window));
 }
 
 function handle(

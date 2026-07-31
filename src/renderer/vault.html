@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <title>Aperture Vault</title>
+    <link rel="stylesheet" href="./vault.css" />
+  </head>
+  <body>
+    <!-- Locked / first-run -->
+    <section id="gate" class="gate">
+      <div class="gate-card">
+        <div class="lockmark" aria-hidden="true">◈</div>
+        <h1 id="gate-title">Unlock your vault</h1>
+        <p id="gate-sub" class="muted">
+          Your passphrase never leaves this window.
+        </p>
+        <form id="gate-form">
+          <input
+            id="pass"
+            type="password"
+            placeholder="Master passphrase"
+            autocomplete="off"
+            aria-label="Master passphrase"
+          />
+          <input
+            id="pass2"
+            type="password"
+            placeholder="Confirm passphrase"
+            autocomplete="off"
+            aria-label="Confirm passphrase"
+            hidden
+          />
+          <button id="gate-go" type="submit">Unlock</button>
+        </form>
+        <p id="gate-err" class="err" role="alert" hidden></p>
+        <p class="fineprint">
+          There is no recovery. If you forget this passphrase the vault cannot
+          be opened — not by us, not by anyone.
+        </p>
+      </div>
+    </section>
+
+    <!-- Unlocked -->
+    <section id="app" hidden>
+      <nav id="tabs" role="tablist">
+        <button role="tab" data-panel="logins" class="active">Logins</button>
+        <button role="tab" data-panel="identity">Identity</button>
+        <button role="tab" data-panel="files">Files</button>
+        <button role="tab" data-panel="notion">Notion</button>
+        <button id="lock-btn" title="Lock vault">Lock</button>
+      </nav>
+
+      <!-- Logins -->
+      <div id="panel-logins" class="panel">
+        <div class="panel-head">
+          <h2>Saved logins</h2>
+          <button id="add-login" class="primary">Add login</button>
+        </div>
+        <div id="logins-list" class="list"></div>
+        <p id="logins-empty" class="muted empty" hidden>
+          No logins saved yet.
+        </p>
+      </div>
+
+      <!-- Identity -->
+      <div id="panel-identity" class="panel" hidden>
+        <div class="panel-head">
+          <h2>Identity</h2>
+          <button id="save-profile" class="primary">Save</button>
+        </div>
+        <p class="muted">
+          Used to fill forms. Fields marked
+          <span class="pill sensitive">sensitive</span> are never shown to the
+          AI — it can fill them, but not read them.
+        </p>
+        <div id="identity-form" class="grid"></div>
+      </div>
+
+      <!-- Files -->
+      <div id="panel-files" class="panel" hidden>
+        <div class="panel-head">
+          <h2>Attachments</h2>
+          <button id="add-file" class="primary">Add file</button>
+        </div>
+        <p class="muted">
+          CVs, cover letters, portfolios. The AI can attach these to a form but
+          cannot browse your disk or choose any other file.
+        </p>
+        <div id="files-list" class="list"></div>
+        <p id="files-empty" class="muted empty" hidden>No files added yet.</p>
+      </div>
+
+      <!-- Notion -->
+      <div id="panel-notion" class="panel" hidden>
+        <div class="panel-head">
+          <h2>Notion</h2>
+          <button id="notion-save" class="primary">Save</button>
+        </div>
+        <p class="muted">
+          Where screenshots go. With no token set, captures are saved as PNGs
+          to your Pictures folder instead.
+        </p>
+
+        <ol class="steps">
+          <li>
+            Open
+            <a href="#" data-ext="https://www.notion.so/my-integrations"
+              >notion.so/my-integrations</a
+            >
+            and create a <strong>New integration</strong> (type: Internal).
+          </li>
+          <li>Copy its <strong>Internal Integration Secret</strong> (starts <code>ntn_</code>).</li>
+          <li>
+            Open the Notion page you want captures filed under, click
+            <strong>⋯ → Connections →</strong> and add your integration.
+            <em>The token alone grants nothing — this step is what gives it access.</em>
+          </li>
+          <li>Paste the secret below, and the page URL or ID as the inbox.</li>
+        </ol>
+
+        <div class="field" style="margin-top: 14px">
+          <label for="n-token">Integration secret</label>
+          <input id="n-token" type="password" placeholder="ntn_…" autocomplete="off" />
+          <p class="muted" id="n-state">Not configured.</p>
+        </div>
+
+        <div class="field" style="margin-top: 10px">
+          <label for="n-inbox">Inbox page (URL or ID)</label>
+          <input id="n-inbox" placeholder="https://notion.so/Captures-abc123…" autocomplete="off" />
+        </div>
+
+        <div style="margin-top: 14px; display: flex; gap: 8px; align-items: center">
+          <button id="notion-test">Test connection</button>
+          <span id="n-test-result" class="muted"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Add / edit login -->
+    <dialog id="login-dialog">
+      <form method="dialog" id="login-form">
+        <h3 id="login-dialog-title">Add login</h3>
+        <label for="d-origin">Site</label>
+        <input id="d-origin" placeholder="example.com" autocomplete="off" />
+        <label for="d-user">Username</label>
+        <input id="d-user" autocomplete="off" />
+        <label for="d-pass">Password</label>
+        <div class="row">
+          <input id="d-pass" type="password" autocomplete="off" />
+          <button type="button" id="d-gen" title="Generate a strong password">
+            Generate
+          </button>
+          <button type="button" id="d-show" title="Show password">Show</button>
+        </div>
+        <menu>
+          <button type="button" id="d-cancel">Cancel</button>
+          <button type="button" id="d-save" class="primary">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="./vault-ui.ts"></script>
+  </body>
+</html>

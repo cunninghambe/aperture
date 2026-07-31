@@ -19,6 +19,7 @@ import {
 } from '@vault/profile.js';
 import type { SnapshotNode } from '@core/snapshot/types.js';
 import { attachments } from '@vault/attachments.js';
+import { capturePage, routeCapture } from '../capture/capture.js';
 import {
   applyDarkMode,
   applyToTab,
@@ -605,6 +606,50 @@ export function registerBrowserTools(
       return text(
         `theme: ${currentMode()} (rendering ${isDark() ? 'dark' : 'light'})\n` +
           `mechanism: ${mechanism()}${applied}`,
+      );
+    },
+  );
+
+  server.registerTool(
+    'browser_capture',
+    {
+      title: 'Screenshot the page and file it',
+      description:
+        'Capture the visible page and send it somewhere useful. If a Notion ' +
+        'page is open in a tab, the capture is appended there. Otherwise it ' +
+        'goes to today\'s dated Notion page, and if Notion is not configured ' +
+        'or the call fails, it is saved as a PNG.\n\n' +
+        'The image is written to its destination, not returned to you. ' +
+        'Screenshots are a known prompt-injection vector — text that is ' +
+        'invisible to a human can be legible to a vision model — so this tool ' +
+        'files them rather than putting them in your context.',
+      inputSchema: z.object({
+        tabId: z.string().optional(),
+        title: z.string().optional().describe('Caption for the capture.'),
+        diskOnly: z.boolean().default(false),
+      }),
+    },
+    async ({ tabId, title, diskOnly }) => {
+      const t = tabs();
+      const id = tabId ?? t.active;
+      if (!id) return text('error: no active tab');
+
+      const info = t.info(id);
+      const bytes = await capturePage(t.webContents(id));
+      const res = await routeCapture(bytes, {
+        openUrls: t.list().map((tab) => tab.url),
+        title: title ?? info?.title,
+        sourceUrl: info?.url,
+        diskOnly,
+      });
+
+      const where =
+        res.destination === 'disk'
+          ? `saved to ${res.location}`
+          : `appended to Notion page ${res.location}`;
+      return text(
+        `captured ${Math.round(res.bytes / 1024)}KB · ${where}` +
+          (res.fellBackBecause ? `\n(Notion failed: ${res.fellBackBecause})` : ''),
       );
     },
   );

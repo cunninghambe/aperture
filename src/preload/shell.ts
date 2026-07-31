@@ -42,12 +42,13 @@ const api = {
 
   vault: {
     state: (): Promise<VaultState> => ipcRenderer.invoke('vault:state'),
-    list: (origin?: string): Promise<VaultEntryPublic[]> =>
-      ipcRenderer.invoke('vault:list', origin),
-    unlock: (passphrase: string): Promise<boolean> =>
-      ipcRenderer.invoke('vault:unlock', passphrase),
     lock: (): Promise<void> => ipcRenderer.invoke('vault:lock'),
+    /** Opens the vault window. Unlocking happens there, not here. */
+    open: (): Promise<void> => ipcRenderer.invoke('vault:open'),
   },
+
+  capture: (): Promise<{ destination: string; location: string }> =>
+    ipcRenderer.invoke('capture:page'),
 
   agent: {
     /** Fires when the agent acts, so the human can watch it work. */
