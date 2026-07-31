@@ -5,6 +5,7 @@ import { registrableDomain } from '../src/vault/vault.js';
 import { RefRegistry } from '../src/core/snapshot/registry.js';
 import { isPositionalKey } from '../src/core/snapshot/walker.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
+import { buildUaProfile, isCoherent } from '../src/privacy/useragent.js';
 
 /**
  * Regression tests for the findings of the July 2026 adversarial review.
@@ -227,5 +228,36 @@ describe('review — volatility must not suppress counts the agent watches', () 
     v.noteChange('ts', 1000, false, '3 minutes ago');
     v.noteChange('ts', 1100, false, '4 minutes ago');
     expect(v.isVolatile('ts')).toBe(true);
+  });
+});
+
+describe('UA profile must be self-consistent', () => {
+  it('is coherent for the shipped profile', () => {
+    const p = buildUaProfile('150.0.7871.129');
+    const r = isCoherent(p);
+    expect(r.problems).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('never leaks Electron', () => {
+    expect(buildUaProfile('150.0.7871.129').userAgent).not.toContain('Electron');
+  });
+
+  it('claims the real engine version, which TLS would otherwise contradict', () => {
+    const p = buildUaProfile('150.0.7871.129');
+    expect(p.userAgent).toContain('150.0.7871.129');
+    expect(p.fullVersion).toBe('150.0.7871.129');
+  });
+
+  it('catches a UA claiming Chrome when the brands say only Chromium', () => {
+    // The contradiction that shipped before this was measured.
+    const bad = { ...buildUaProfile('150.0.0.0') };
+    bad.userAgent = bad.userAgent.replace('Chromium/', 'Chrome/');
+    expect(isCoherent(bad).ok).toBe(false);
+  });
+
+  it('catches a version mismatch between the string and the hints', () => {
+    const bad = { ...buildUaProfile('150.0.0.0'), fullVersion: '149.0.0.0' };
+    expect(isCoherent(bad).ok).toBe(false);
   });
 });

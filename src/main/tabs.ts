@@ -3,9 +3,17 @@ import { join } from 'node:path';
 import { WebContentsView, type BaseWindow, type Session } from 'electron';
 import type { ContainerId, LoadState, TabId, TabInfo } from '@shared/types';
 import { containers } from '@privacy/containers';
+import { applyUaProfile, buildUaProfile, type UaProfile } from '@privacy/useragent.js';
 
 /** Height of the browser chrome (tab strip + address bar), in CSS px. */
 export const CHROME_HEIGHT = 88;
+
+/** Built once from the real Chromium version; see privacy/useragent.ts. */
+let cachedUa: UaProfile | null = null;
+function uaProfile(): UaProfile {
+  cachedUa ??= buildUaProfile(process.versions.chrome ?? '150.0.0.0');
+  return cachedUa;
+}
 
 interface TabRecord {
   id: TabId;
@@ -78,6 +86,12 @@ export class TabManager extends EventEmitter {
     this.tabs.set(id, rec);
     this.order.push(id);
     this.wire(rec);
+
+    // Apply the coherent UA profile before the first navigation, so the very
+    // first request already carries matching client hints. Setting the UA
+    // string alone leaves Sec-CH-UA absent, which is a louder tell than the
+    // string itself.
+    void applyUaProfile(view.webContents, uaProfile());
 
     this.window.contentView.addChildView(view);
     if (opts.activate !== false) this.activate(id);

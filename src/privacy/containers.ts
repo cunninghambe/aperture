@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { session, type Session } from 'electron';
 import type { Container, ContainerId } from '@shared/types';
+import { buildUaProfile } from './useragent.js';
 
 /**
  * Identity containers.
@@ -109,11 +110,9 @@ class ContainerRegistry {
 
     // Strip the Electron/Chrome version skew from the UA. A stock Electron UA
     // announces "Electron/43.0.0" and is trivially fingerprintable.
-    const chromeVersion = process.versions.chrome ?? '141.0.0.0';
-    s.setUserAgent(
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ` +
-        `Chrome/${chromeVersion} Safari/537.36`,
-    );
+    // Session-level UA, kept in sync with the per-tab profile in
+    // privacy/useragent.ts so the two can never disagree.
+    s.setUserAgent(buildUaProfile(process.versions.chrome ?? '150.0.0.0').userAgent);
 
     void c; // per-container fingerprint derivation is applied in the page preload
   }
