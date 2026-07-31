@@ -3,11 +3,11 @@
 An AI-native, privacy-first browser. The primary user is an agent; the human is
 the one who stays in charge.
 
-> **Status: v0.1, early.** The shell runs and browses, the MCP server works and
-> Claude Code can drive it, and the snapshot engine's logic is built and tested.
-> The in-page bridge that connects them is not wired yet. See
-> [Honest status](#honest-status) — nothing below is claimed as working unless
-> it is marked working.
+> **Status: v0.2, early but real.** The browser runs, the MCP server works, and
+> Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
+> vault has a working UI and tested crypto. 132 tests pass. See
+> [Honest status](#honest-status) for what is *not* done — nothing below is
+> claimed as working unless it is marked working.
 
 ---
 
