@@ -1,0 +1,224 @@
+:root {
+  --bg: #16161a;
+  --bg-raised: #1e1e24;
+  --border: #2c2c35;
+  --fg: #e6e6ea;
+  --fg-dim: #9a9aa8;
+  --accent: #6aa9ff;
+  --agent: #b98bff;
+  --shield: #5fd39a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+#chrome {
+  display: flex;
+  flex-direction: column;
+  height: 88px;
+}
+
+/* -- tab strip ------------------------------------------------------------ */
+
+#tabstrip {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 44px;
+  padding: 8px 8px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#tabstrip::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+  max-width: 220px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: default;
+  white-space: nowrap;
+}
+.tab:hover {
+  background: #ffffff0d;
+}
+.tab.active {
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.tab-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A tab the agent opened is marked, so you always know which windows into
+   your session you opened and which something else did. */
+.tab.agent {
+  border-top: 2px solid var(--agent);
+}
+
+.tab-container {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tab-close {
+  opacity: 0;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  cursor: default;
+}
+.tab:hover .tab-close {
+  opacity: 0.7;
+}
+
+.tab-new {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin-left: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 17px;
+  cursor: default;
+}
+.tab-new:hover {
+  background: #ffffff0d;
+  color: var(--fg);
+}
+
+/* -- toolbar -------------------------------------------------------------- */
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+#toolbar button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 16px;
+  cursor: default;
+}
+#toolbar button:hover:not(:disabled) {
+  background: #ffffff0d;
+  color: var(--fg);
+}
+#toolbar button:disabled {
+  opacity: 0.3;
+}
+
+#omnibox {
+  flex: 1;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  background: #00000040;
+  color: var(--fg);
+  font: inherit;
+  user-select: text;
+}
+#omnibox:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #00000060;
+}
+
+#shield {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 12px;
+  background: #00000040;
+  color: var(--shield);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The agent activity pill. The human should never have to wonder whether
+   something else is driving their browser. */
+#agent-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: #00000040;
+  color: var(--fg-dim);
+  font-size: 11px;
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+#agent-pill.active {
+  color: var(--agent);
+  background: #b98bff1a;
+}
+
+#agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+#agent-pill.active #agent-dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+#agent-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

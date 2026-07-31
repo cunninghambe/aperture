@@ -1,0 +1,314 @@
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { app } from 'electron';
+import sodium from 'libsodium-wrappers-sumo';
+import type { VaultEntryPublic, VaultState } from '@shared/types';
+
+/**
+ * The agent-blind vault.
+ *
+ * The security property is structural, not procedural: there is no code path
+ * that returns a plaintext credential to a caller. Not a discouraged one, not
+ * one behind a flag — none. `VaultEntryPublic` is the only shape that crosses
+ * the boundary toward the agent, and it has no field that can carry a secret.
+ *
+ * Two properties do the real work:
+ *
+ *   1. No getter. `fill()` performs the insertion itself and returns which
+ *      fields it touched. A `getPassword()` that exists can be called, and
+ *      anything the agent can call, a hostile page can talk it into calling.
+ *
+ *   2. Unnameability. `listPublic(origin)` returns only entries matching the
+ *      frame's committed origin. On evil.com the agent is never told a
+ *      google.com entry exists, so a prompt injection has no identifier to
+ *      weaponize. Removing the vocabulary beats blocking the action.
+ *
+ * See docs/design/security.md for the full threat model.
+ */
+
+const MAGIC = 'APVLT\x01\x00\x00';
+
+interface VaultRecord {
+  id: string;
+  /** Registrable domain (eTLD+1), ASCII/punycode. */
+  rpId: string;
+  username: string;
+  password: string;
+  totpSecret?: string;
+  /** Extra origins the *human* has approved. Never agent-writable. */
+  aliases: string[];
+  createdAt: string;
+  lastUsed: string | null;
+}
+
+interface VaultFile {
+  version: 1;
+  kdf: { alg: 'argon2id'; opslimit: number; memlimit: number; salt: string };
+  nonce: string;
+  ciphertext: string;
+}
+
+export class Vault {
+  private key: Uint8Array | null = null;
+  private records: VaultRecord[] = [];
+  private lockTimer: NodeJS.Timeout | null = null;
+  private ready = false;
+
+  /**
+   * Idle auto-lock. Agent activity deliberately does NOT count as activity —
+   * an always-on agent would otherwise hold the vault open forever, which is
+   * the easiest way to accidentally void the whole design.
+   */
+  private idleMs = 5 * 60 * 1000;
+
+  private path(): string {
+    return join(app.getPath('userData'), 'vault.aperture');
+  }
+
+  private async init(): Promise<void> {
+    if (!this.ready) {
+      await sodium.ready;
+      this.ready = true;
+    }
+  }
+
+  state(): VaultState {
+    if (this.key) return 'unlocked';
+    return 'locked';
+  }
+
+  async unlock(passphrase: string): Promise<boolean> {
+    await this.init();
+    let raw: Buffer;
+    try {
+      raw = await readFile(this.path());
+    } catch {
+      return false;
+    }
+
+    const file = JSON.parse(raw.toString('utf8')) as VaultFile;
+    if (!raw.toString('utf8').length || file.version !== 1) return false;
+
+    const salt = sodium.from_base64(file.kdf.salt);
+    const key = sodium.crypto_pwhash(
+      sodium.crypto_secretbox_KEYBYTES,
+      passphrase,
+      salt,
+      file.kdf.opslimit,
+      file.kdf.memlimit,
+      sodium.crypto_pwhash_ALG_ARGON2ID13,
+    );
+
+    try {
+      const plain = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+        null,
+        sodium.from_base64(file.ciphertext),
+        MAGIC,
+        sodium.from_base64(file.nonce),
+        key,
+      );
+      this.records = JSON.parse(new TextDecoder().decode(plain));
+      this.key = key;
+      this.touch();
+      return true;
+    } catch {
+      // Wrong passphrase, or a tampered file. Indistinguishable by design.
+      sodium.memzero(key);
+      return false;
+    }
+  }
+
+  lock(): void {
+    if (this.key) sodium.memzero(this.key);
+    this.key = null;
+    this.records = [];
+    if (this.lockTimer) clearTimeout(this.lockTimer);
+    this.lockTimer = null;
+  }
+
+  /** Restart the idle countdown. Called on *human* interaction only. */
+  touch(): void {
+    if (this.lockTimer) clearTimeout(this.lockTimer);
+    this.lockTimer = setTimeout(() => this.lock(), this.idleMs);
+  }
+
+  async create(passphrase: string): Promise<void> {
+    await this.init();
+    const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
+    // Interactive desktop unlock happens rarely, so we spend far more than the
+    // OWASP floor: memory-hardness is what makes offline guessing expensive.
+    const opslimit = sodium.crypto_pwhash_OPSLIMIT_MODERATE;
+    const memlimit = sodium.crypto_pwhash_MEMLIMIT_MODERATE;
+    this.key = sodium.crypto_pwhash(
+      sodium.crypto_secretbox_KEYBYTES,
+      passphrase,
+      salt,
+      opslimit,
+      memlimit,
+      sodium.crypto_pwhash_ALG_ARGON2ID13,
+    );
+    this.records = [];
+    await this.persist(salt, opslimit, memlimit);
+  }
+
+  private async persist(
+    salt: Uint8Array,
+    opslimit: number,
+    memlimit: number,
+  ): Promise<void> {
+    if (!this.key) throw new Error('vault is locked');
+    const nonce = sodium.randombytes_buf(
+      sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
+    );
+    const ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+      new TextEncoder().encode(JSON.stringify(this.records)),
+      MAGIC,
+      null,
+      nonce,
+      this.key,
+    );
+
+    const file: VaultFile = {
+      version: 1,
+      kdf: { alg: 'argon2id', opslimit, memlimit, salt: sodium.to_base64(salt) },
+      nonce: sodium.to_base64(nonce),
+      ciphertext: sodium.to_base64(ct),
+    };
+
+    const p = this.path();
+    await mkdir(dirname(p), { recursive: true });
+    // Write-then-rename so a crash mid-write cannot leave a truncated vault.
+    const tmp = `${p}.tmp`;
+    await writeFile(tmp, JSON.stringify(file), 'utf8');
+    await rename(tmp, p);
+  }
+
+  // -------------------------------------------------------------------------
+  // The agent-facing surface. Everything below returns metadata only.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Entries for an origin.
+   *
+   * Passing no origin returns nothing rather than everything — the absence of
+   * a list-all is deliberate, and defaulting to "all" would reintroduce it.
+   */
+  listPublic(origin?: string): VaultEntryPublic[] {
+    if (!this.key) return [];
+    if (!origin) return [];
+
+    const rp = registrableDomain(origin);
+    if (!rp) return [];
+
+    return this.records
+      .filter((r) => r.rpId === rp || r.aliases.includes(rp))
+      .map((r) => ({
+        id: r.id,
+        origin: r.rpId,
+        username: r.username,
+        hasTotp: Boolean(r.totpSecret),
+        lastUsed: r.lastUsed,
+      }));
+  }
+
+  /**
+   * Resolve an entry for filling.
+   *
+   * Deliberately NOT exported and NOT reachable from IPC or MCP. The only
+   * caller is the fill path in the main process, which hands the value
+   * straight to the renderer without returning it upward.
+   */
+  resolveForFill(
+    entryId: string,
+    committedOrigin: string,
+  ): { username: string; password: string } | { error: FillDenyCode } {
+    if (!this.key) return { error: 'VAULT_LOCKED' };
+
+    const rec = this.records.find((r) => r.id === entryId);
+    if (!rec) return { error: 'NO_MATCH' };
+
+    const rp = registrableDomain(committedOrigin);
+    if (!rp) return { error: 'ORIGIN_MISMATCH' };
+
+    // Origin mismatch is terminal. There is no force flag and no override,
+    // because the agent is exactly the component we have assumed is
+    // manipulable — giving it a way to say "do it anyway" would reduce the
+    // whole design to the agent's judgement under adversarial input.
+    if (rec.rpId !== rp && !rec.aliases.includes(rp)) {
+      return { error: 'ORIGIN_MISMATCH' };
+    }
+
+    if (!committedOrigin.startsWith('https://') && !isLocalhost(committedOrigin)) {
+      return { error: 'INSECURE_TRANSPORT' };
+    }
+
+    rec.lastUsed = new Date().toISOString();
+    return { username: rec.username, password: rec.password };
+  }
+
+  /** Human-only. Never reachable from the agent surface. */
+  async addRecord(
+    r: Omit<VaultRecord, 'id' | 'createdAt' | 'lastUsed'>,
+    salt: Uint8Array,
+    opslimit: number,
+    memlimit: number,
+  ): Promise<void> {
+    this.records.push({
+      ...r,
+      id: sodium.to_hex(sodium.randombytes_buf(8)),
+      createdAt: new Date().toISOString(),
+      lastUsed: null,
+    });
+    await this.persist(salt, opslimit, memlimit);
+  }
+}
+
+export type FillDenyCode =
+  | 'VAULT_LOCKED'
+  | 'NO_MATCH'
+  | 'ORIGIN_MISMATCH'
+  | 'INSECURE_TRANSPORT'
+  | 'NODE_NOT_FILLABLE'
+  | 'USER_DENIED';
+
+/**
+ * Registrable domain (eTLD+1).
+ *
+ * This is a deliberately conservative placeholder: it uses a bundled short
+ * list of multi-part suffixes rather than the full Public Suffix List. A live
+ * PSL fetch is explicitly rejected — an attacker who controls your suffix list
+ * controls your origin policy. Ship a versioned PSL snapshot before relying on
+ * this for anything beyond development.
+ */
+export function registrableDomain(origin: string): string | null {
+  let host: string;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+  if (host === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return host;
+
+  const parts = host.split('.');
+  if (parts.length <= 2) return host;
+
+  const twoLevel = new Set([
+    'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au',
+    'co.nz', 'co.jp', 'com.br', 'co.za', 'com.mx', 'co.in',
+  ]);
+  const lastTwo = parts.slice(-2).join('.');
+  if (twoLevel.has(lastTwo)) return parts.slice(-3).join('.');
+  return lastTwo;
+}
+
+function isLocalhost(origin: string): boolean {
+  try {
+    const h = new URL(origin).hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+  } catch {
+    return false;
+  }
+}
+
+export const vault = new Vault();

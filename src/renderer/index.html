@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    />
+    <title>Aperture</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="chrome">
+      <div id="tabstrip"></div>
+      <div id="toolbar">
+        <button id="back" title="Back" aria-label="Back">‹</button>
+        <button id="forward" title="Forward" aria-label="Forward">›</button>
+        <button id="reload" title="Reload" aria-label="Reload">⟳</button>
+        <input
+          id="omnibox"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Search or enter address"
+          aria-label="Address bar"
+        />
+        <div id="shield" title="Trackers blocked on this page">
+          <span id="shield-count">0</span>
+        </div>
+        <div id="agent-pill" class="idle" title="Agent activity">
+          <span id="agent-dot"></span><span id="agent-text">agent idle</span>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.DS_Store
+.vite/
+coverage/
+
+# Local user data — never commit
+userdata/
+*.vault
+.aperture-token
