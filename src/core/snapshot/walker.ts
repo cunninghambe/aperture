@@ -166,7 +166,17 @@ function visit(
   }
 
   const rect = rectOf(el);
-  const key = disambiguate(identityKey(el, role, name, ancestry, ctx.frameId), ctx);
+  // A sibling's own text is the best disambiguator available: in a product
+  // grid the "Add to cart" buttons are identical, but each one sits beside a
+  // uniquely-named link. Keying on that makes the button inherit its row's
+  // identity, which is what a human means by "that product's button" — and it
+  // survives filtering, where a document-order ordinal does not.
+  const sibling = siblingDiscriminator(el);
+  const baseKey = identityKey(el, role, name, ancestry, ctx.frameId);
+  const key = disambiguate(
+    sibling ? `${baseKey}|~${sibling}` : baseKey,
+    ctx,
+  );
   if (ctx.index && ADDRESSABLE.has(role)) ctx.index.set(key, el);
 
   const node: SnapshotNode = {
@@ -271,6 +281,37 @@ function visit(
  * the distinction anyway. `positional` is set on the node so the diff engine
  * and the renderer can treat these as fragile.
  */
+/**
+ * Find a nearby uniquely-named element to key against.
+ *
+ * Looks at the parent's other children first (the link beside a button in a
+ * product card), then at the parent itself. Only content-bearing roles count —
+ * another identical button is no help.
+ *
+ * Returns undefined when nothing distinguishing is nearby, in which case the
+ * caller falls back to a document-order ordinal.
+ */
+function siblingDiscriminator(el: HTMLElement): string | undefined {
+  const parent = el.parentElement;
+  if (!parent) return undefined;
+
+  for (const sib of Array.from(parent.children)) {
+    if (sib === el) continue;
+    const tag = sib.tagName;
+    // A link or heading beside us names the row we are in.
+    if (tag !== 'A' && tag !== 'H1' && tag !== 'H2' && tag !== 'H3' && tag !== 'H4') {
+      continue;
+    }
+    const t = (sib.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (t) return norm(t);
+  }
+
+  // One level up: the card wrapper's own heading or link.
+  const near = parent.querySelector(':scope > a, :scope > h1, :scope > h2, :scope > h3');
+  const t = (near?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  return t ? norm(t) : undefined;
+}
+
 function disambiguate(base: string, ctx: WalkContext): string {
   if (!ctx.seen) return base;
   const n = ctx.seen.get(base) ?? 0;

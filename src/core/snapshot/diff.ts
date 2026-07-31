@@ -77,7 +77,26 @@ export function diffSnapshots(
     const matched = countMatched(oldKids, newKids);
     const span = Math.max(oldKids.length, newKids.length);
     if (span >= REPLACE_MIN_CHILDREN && matched / span < REPLACE_MATCH_RATIO) {
-      ops.push({ op: 'replace', ref: reg.ensureRef(n), subtree: n });
+      // A replace must say what it DESTROYED, not only what it created.
+      //
+      // Measured failure this fixes: emitting the new subtree alone left the
+      // model holding refs for every element the replace removed, with no
+      // mechanical way to learn they were gone. Fidelity check reported 8
+      // phantom refs — elements the agent believed existed and did not — which
+      // is precisely how a wrong-element click happens.
+      const survivors = new Set<string>();
+      collectKeys(n, survivors);
+      const gone: string[] = [];
+      for (const key of keysOf(o)) {
+        if (survivors.has(key)) continue;
+        const ref = reg.byKeyLookup(key)?.ref;
+        if (ref) {
+          gone.push(ref);
+          reg.markDead(ref);
+        }
+      }
+
+      ops.push({ op: 'replace', ref: reg.ensureRef(n), subtree: n, gone });
       return;
     }
 
@@ -197,6 +216,17 @@ export function propDelta(o: SnapshotNode, n: SnapshotNode): PropDelta | null {
   }
 
   return any ? d : null;
+}
+
+function collectKeys(n: SnapshotNode, out: Set<string>): void {
+  out.add(n.key);
+  for (const c of n.children) collectKeys(c, out);
+}
+
+function keysOf(n: SnapshotNode): string[] {
+  const s = new Set<string>();
+  collectKeys(n, s);
+  return [...s];
 }
 
 export function indexByKey(root: SnapshotNode): Map<string, SnapshotNode> {

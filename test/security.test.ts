@@ -261,3 +261,41 @@ describe('UA profile must be self-consistent', () => {
     expect(isCoherent(bad).ok).toBe(false);
   });
 });
+
+describe('review — identical siblings must follow their row, not their slot', () => {
+  /**
+   * Ten "Add to cart" buttons are indistinguishable from each other, so the
+   * only stable handle is the uniquely-named link beside each one. Keying on a
+   * document-order ordinal instead made a filtered list re-target: slot 2's
+   * ref survived, but slot 2 now held a different product.
+   *
+   * These assert the KEY SHAPE the walker produces, since the walker itself
+   * needs a DOM. The live proof is in bench/RESULTS.md.
+   */
+  const keyFor = (role: string, name: string, sibling?: string) => {
+    const base = `S|0|${role}|${name}||list`;
+    return sibling ? `${base}|~${sibling}` : base;
+  };
+
+  it('gives two identical buttons different keys via their siblings', () => {
+    const a = keyFor('button', 'add to cart', 'anker 7-in-1 usb-c hub');
+    const b = keyFor('button', 'add to cart', 'anker 655 8-in-1');
+    expect(a).not.toBe(b);
+  });
+
+  it('keeps a button keyed to its product regardless of position', () => {
+    // Position 5 before filtering, position 2 after — same key either way,
+    // because the key names the product rather than the slot.
+    const before = keyFor('button', 'add to cart', 'anker 655 8-in-1');
+    const after = keyFor('button', 'add to cart', 'anker 655 8-in-1');
+    expect(before).toBe(after);
+  });
+
+  it('falls back to a positional ordinal only when nothing distinguishes', () => {
+    // Genuinely indistinguishable siblings still need SOME separation, or ten
+    // buttons collapse onto one ref.
+    const bare = keyFor('button', 'add to cart');
+    expect(isPositionalKey(`${bare}|#3`)).toBe(true);
+    expect(isPositionalKey(bare)).toBe(false);
+  });
+});

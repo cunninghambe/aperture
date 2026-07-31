@@ -126,7 +126,14 @@ export type DiffOp =
    * both cheaper and far less likely to be misapplied by the model than
    * twenty adds interleaved with twenty removes.
    */
-  | { op: 'replace'; ref: string; subtree: SnapshotNode };
+  | {
+      op: 'replace';
+      ref: string;
+      subtree: SnapshotNode;
+      /** Refs destroyed by the replace. Without these the model keeps
+       *  believing in elements that no longer exist. */
+      gone?: string[];
+    };
 
 export interface SnapshotDiff {
   seq: string;

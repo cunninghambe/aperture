@@ -421,7 +421,9 @@ direction.
 | Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
 | `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
 | Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** (positional keys can mis-target). See [bench/RESULTS.md](bench/RESULTS.md) |
-| Task-success benchmark (diff vs re-dump) | **Not started** — unblocked, still the most important unmeasured claim |
+| Diff fidelity, static page | **GREEN** (`npm run bench:fidelity`) |
+| Diff fidelity, full re-render | **RED** — 6 phantom refs; do not use agentically on re-rendering pages yet |
+| Task-success benchmark | **Not started** — gated on the RED above |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**

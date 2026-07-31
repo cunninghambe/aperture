@@ -238,7 +238,13 @@ function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string
     case 'replace': {
       const lines: string[] = [];
       renderNode(op.subtree, 1, lines, reg, seq);
-      return `! ${op.ref} replaced:\n${lines.join('\n')}`;
+      // Naming the refs the replace destroyed is what stops the model going on
+      // believing in elements that no longer exist — the phantom refs the
+      // fidelity check caught. A replace that reports only what it created is
+      // a lossy diff.
+      const goneNote =
+        op.gone && op.gone.length ? ` (gone: ${op.gone.join(' ')})` : '';
+      return `! ${op.ref} replaced${goneNote}:\n${lines.join('\n')}`;
     }
   }
 }

@@ -223,3 +223,55 @@ by "that product's add-to-cart button".
 | Refs survive a full re-render **when the element has a distinguishing name** | **Measured: yes** |
 | Refs survive a full re-render **when siblings are identical** | **Measured: NO** — positional, can mis-target |
 | Agents succeed as often on diffs | **Still unmeasured** |
+
+---
+
+# Update: diff fidelity — the precondition for task success
+
+`npm run bench:fidelity -- <token> [form|rerender]`
+
+Builds the model an agent could construct **from the diff stream alone**, then
+compares it against a fresh full snapshot. It does not measure whether a model
+*would* succeed; it measures whether succeeding is *possible* — if base + diffs
+does not describe the real page, no amount of model quality helps.
+
+| scenario | result |
+|---|---|
+| `form` — 8 field edits, static page | **GREEN**: 16/16 refs verified, 0 wrong values, 0 phantoms |
+| `rerender` — 3 filters, full DOM teardown each time | **RED**: 6 phantom refs |
+
+## What the RED means
+
+A *phantom* is a ref the agent believes exists that does not. It is the exact
+precondition for a wrong-element click.
+
+**Root cause found and partly fixed.** The `!  replaced` op emitted the new
+subtree and never said which refs it had **destroyed**. A model applying that
+diff had no mechanical way to learn they were gone. `replace` now carries a
+`gone:` list:
+
+```
+! e3 replaced (gone: e6 e7 e31 e8 e9 e32 e10 e11 …):
+```
+
+That took phantoms from 8 to 6 on the hard scenario. **The remaining 6 are not
+yet diagnosed.** The likely mechanism is ref *revival* — the registry
+deliberately revives a dead ref when its identity key reappears, so across
+three successive filters a ref can die, revive, and die again, and the diff
+stream does not currently narrate that cycle unambiguously.
+
+## Honest status
+
+| claim | status |
+|---|---|
+| Diff stream is faithful on a static page | **GREEN, measured** |
+| Diff stream is faithful through full re-renders | **RED, measured** — 6 phantom refs |
+| Agents succeed as often on diffs | **Still unmeasured**, and now known to be gated on the RED above |
+
+**Do not ship agentic use against re-rendering pages until `rerender` is
+green.** The failure mode is silent and it is a wrong click, not an error.
+
+This is also the argument for the fidelity check existing at all: the loop
+looked completely healthy from the outside — actions succeeded, diffs were
+small, refs looked stable — while the agent's model was quietly drifting from
+the page.
