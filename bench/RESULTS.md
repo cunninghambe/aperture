@@ -85,3 +85,62 @@ design.
 
 The synthetic 7–10× is the only defensible figure for the diff mechanism, and
 it is a model rather than a measurement.
+
+---
+
+# Update: `browser_act` implemented, diffs finally measurable
+
+## The loop, closed
+
+```
+> browser_act { action: "type", ref: "e3", text: "Brad" }
+ok type e3
+page #1.1 (diff from #1.0)
+~ e3 ="Brad" +focused
+```
+
+## Real 8-action sequence (local form, 324-token page)
+
+| | tokens |
+|---|---|
+| Full snapshot | 324 |
+| Per action | 119–126 (mean ~124) |
+| **8 actions, diff mode** | **1,315** |
+| **8 actions, re-dump mode** | **2,916** |
+| ratio | **2.2×** |
+
+## The finding that matters: the envelope dominates small diffs
+
+The diff payload for a typed field is **~15 tokens** (`~ e3 ="Brad" +focused`).
+The observation costs **~124**. The other **~109 tokens is the
+`<untrusted-page-content>` envelope**, emitted in full on every single response.
+
+So on a small page the prompt-injection wrapper is roughly **7× larger than the
+payload it wraps**, and it is what caps the ratio at 2.2× rather than the ~20×
+the mechanism itself achieves.
+
+That envelope is not optional — it is the structural separation that stops page
+text being read as instructions. But repeating the full preamble per call is
+waste: the legend is already paid once per session in the tool description, and
+the same argument applies here. A shortened continuation form
+(`<untrusted id="…">` with the explanation only on first use) would recover
+most of the difference.
+
+**Projected effect on a real page** (HN, 9,512-token snapshot, 8 actions):
+9,512 + 8×124 = **10,504** vs 9,512×9 = **85,608** → **8.1×**. The fixed
+envelope cost matters far less as the page grows, which is why the small-form
+number is the pessimistic one.
+
+## Revised claim status
+
+| claim | status |
+|---|---|
+| Smaller snapshots than playwright-mcp | **Measured: ~1.9×** |
+| Refs stable across re-snapshots | **Measured: 100%**, four sites |
+| Diffs cheaper than re-dumps | **Measured: 2.2×** small page, **~8×** projected large |
+| Diff payload itself is tiny | **Measured: ~15 tokens** per field edit |
+| Refs survive real re-renders | **Still untested** — now unblocked |
+| Agents succeed as often on diffs | **Still unmeasured** — now possible |
+
+The earlier synthetic 7–10× and the 40× projection were both optimistic in the
+same way: neither accounted for a fixed per-response overhead.

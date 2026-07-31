@@ -4,6 +4,7 @@ import { WebContentsView, type BaseWindow, type Session } from 'electron';
 import type { ContainerId, LoadState, TabId, TabInfo } from '@shared/types';
 import { containers } from '@privacy/containers';
 import { applyUaProfile, buildUaProfile, type UaProfile } from '@privacy/useragent.js';
+import { setWindowOffset } from '@core/snapshot/act.js';
 
 /** Height of the browser chrome (tab strip + address bar), in CSS px. */
 export const CHROME_HEIGHT = 88;
@@ -307,6 +308,9 @@ export class TabManager extends EventEmitter {
   /** Lay the active tab out below the chrome. */
   layout(): void {
     const b = this.window.getContentBounds();
+    // Keep the screen-space offset current so synthesized mouse events carry a
+    // plausible screenX/screenY rather than one identical to clientX/clientY.
+    setWindowOffset(b.x, b.y + CHROME_HEIGHT);
     this.bounds = { width: b.width, height: b.height };
     for (const [id, rec] of this.tabs) {
       if (id !== this.activeId) continue;

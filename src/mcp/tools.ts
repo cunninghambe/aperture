@@ -23,6 +23,15 @@ import {
 } from '@vault/profile.js';
 import type { SnapshotNode } from '@core/snapshot/types.js';
 import { quote } from '@core/snapshot/render.js';
+import {
+  clearField,
+  click,
+  hover,
+  pressKey,
+  resolveRef,
+  scroll,
+  typeText,
+} from '@core/snapshot/act.js';
 import { requestFillConsent } from '@main/consent.js';
 import { attachments } from '@vault/attachments.js';
 import { capturePage, routeCapture } from '../capture/capture.js';
@@ -466,6 +475,124 @@ export function registerBrowserTools(
       return text(
         'fill refused: the vault fill path is not yet wired in this build.\n' +
           'No credential was read, and none was inserted.',
+      );
+    },
+  );
+
+  server.registerTool(
+    'browser_act',
+    {
+      title: 'Act on the page',
+      description:
+        'Click, type, hover, scroll, or press a key, then observe what ' +
+        'changed.\n\n' +
+        'The result is a DIFF against the page state you already hold — ' +
+        'typically 40-150 tokens rather than a full re-read. That is the whole ' +
+        'point: do not call browser_snapshot after every action.\n\n' +
+        'Input is dispatched as real browser input, so framework handlers, ' +
+        'native widgets and validation behave exactly as they do for a human.\n\n' +
+        'If a ref has gone stale you get a targeted error naming what is there ' +
+        'now, so you can recover without re-reading the whole page.',
+      inputSchema: z.object({
+        action: z.enum(['click', 'type', 'hover', 'scroll', 'key', 'clear']),
+        ref: z
+          .string()
+          .optional()
+          .describe('Element to act on. Not needed for scroll or key.'),
+        text: z.string().optional().describe('For type.'),
+        key: z
+          .string()
+          .optional()
+          .describe('For key: Enter, Tab, Escape, Backspace, ArrowDown, …'),
+        deltaY: z
+          .number()
+          .optional()
+          .describe('For scroll: pixels. Positive scrolls down. Default 600.'),
+        submit: z
+          .boolean()
+          .default(false)
+          .describe('For type: press Enter afterwards.'),
+        tabId: z.string().optional(),
+      }),
+    },
+    async ({ action, ref, text: textArg, key, deltaY, submit, tabId }) => {
+      const t = tabs();
+      const id = tabId ?? t.active;
+      if (!id) return text('error: no active tab');
+      const wc = t.webContents(id);
+
+      // Actions that do not target an element.
+      if (action === 'scroll' || action === 'key') {
+        if (action === 'scroll') await scroll(wc, 400, 400, deltaY ?? 600);
+        else {
+          if (!key) return text('error: key required');
+          try {
+            await pressKey(wc, key);
+          } catch (e) {
+            return text(`error: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const { text: obs } = await observe(id, wc, { afterAction: true });
+        return text(untrusted(t.info(id)?.url ?? '', `ok ${action}\n${obs}`));
+      }
+
+      if (!ref) return text(`error: ref required for ${action}`);
+      const key2 = keyForRef(id, ref);
+      if (!key2) {
+        return text(
+          `error: ${ref} is not a known element. Call browser_snapshot to re-read the page.`,
+        );
+      }
+
+      const r = await resolveRef(wc, key2);
+      if (!r.ok) {
+        // Targeted recovery rather than "something went wrong": tell the agent
+        // what it can do next without re-reading the entire page.
+        const { text: obs } = await observe(id, wc);
+        return text(
+          untrusted(
+            t.info(id)?.url ?? '',
+            `error: ${ref} could not be acted on (${r.reason}).\n` +
+              `The page as it stands now:\n${obs}`,
+          ),
+        );
+      }
+
+      if (r.obstructed) {
+        return text(
+          `error: ${ref} is covered by ${r.obstructor ?? 'another element'} — ` +
+            'likely a modal or cookie banner. Dismiss it first; clicking here ' +
+            'would hit the overlay, not the element you named.',
+        );
+      }
+
+      switch (action) {
+        case 'click':
+          await click(wc, r.x, r.y);
+          break;
+        case 'hover':
+          await hover(wc, r.x, r.y);
+          break;
+        case 'clear':
+          await click(wc, r.x, r.y);
+          await clearField(wc);
+          break;
+        case 'type': {
+          if (textArg === undefined) return text('error: text required for type');
+          if (!r.editable) {
+            return text(`error: ${ref} is a ${r.tag.toLowerCase()}, not an editable field`);
+          }
+          await click(wc, r.x, r.y);
+          await clearField(wc);
+          await typeText(wc, textArg);
+          if (submit) await pressKey(wc, 'Enter');
+          break;
+        }
+      }
+
+      const { text: obs } = await observe(id, wc, { afterAction: true });
+      return text(
+        untrusted(t.info(id)?.url ?? '', `ok ${action} ${ref}\n${obs}`),
       );
     },
   );

@@ -98,3 +98,54 @@ ipcRenderer.on(
     }
   },
 );
+
+/**
+ * Resolve a ref's identity key to a live rect, scrolling it into view first.
+ *
+ * Returns viewport coordinates for CDP input dispatch. The hit-test is what
+ * stops an agent "clicking" an element that is covered by a modal or a cookie
+ * banner: if the point belongs to something else, we say so rather than
+ * dispatching into whatever happens to be on top.
+ */
+ipcRenderer.on(
+  'aperture:resolve',
+  (_event, req: { requestId: string; key: string }) => {
+    const reply = (payload: unknown): void =>
+      ipcRenderer.send('aperture:resolve-result', req.requestId, payload);
+
+    try {
+      const el = index.get(req.key);
+      if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
+
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) {
+        return reply({ ok: false, reason: 'not-visible' });
+      }
+
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+
+      const atPoint = document.elementFromPoint(x, y);
+      const obstructed =
+        atPoint !== null && atPoint !== el && !el.contains(atPoint) && !atPoint.contains(el);
+
+      reply({
+        ok: true,
+        x,
+        y,
+        obstructed,
+        obstructor: obstructed
+          ? (atPoint?.tagName ?? '') + (atPoint?.id ? `#${atPoint.id}` : '')
+          : null,
+        tag: el.tagName,
+        editable:
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          (el as HTMLElement).isContentEditable,
+      });
+    } catch (err) {
+      reply({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+    }
+  },
+);

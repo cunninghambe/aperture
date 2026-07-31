@@ -419,8 +419,8 @@ direction.
 | Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
 | Token benchmark | **Working** — synthetic (`npm run bench`) plus real-site head-to-head vs playwright-mcp, see [bench/RESULTS.md](bench/RESULTS.md) |
 | Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
-| **`browser_act` (click/type/scroll)** | **NOT IMPLEMENTED.** The format legend tells agents to use it; it does not exist. The act-observe loop is not closed |
-| Task-success benchmark (diff vs re-dump) | **Blocked** on browser_act — currently unmeasurable, not merely unmeasured |
+| `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
+| Task-success benchmark (diff vs re-dump) | **Not started** — now unblocked, still the most important unmeasured claim |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**
