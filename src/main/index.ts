@@ -9,6 +9,7 @@ import { containers } from '@privacy/containers';
 import { startMcpServer } from '@mcp/server';
 import { profiles } from '@vault/profileStore';
 import { invalidate } from '@core/snapshot/engine';
+import { flushTelemetry, initTelemetry, report } from '../telemetry/reporter.js';
 import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
 
 /** Chromium switches applied before app-ready. */
@@ -67,9 +68,14 @@ async function createWindow(): Promise<void> {
 
   tabs = new TabManager(win);
 
-  // A navigation invalidates every ref and clears any taint, so the next
-  // observation must be a full snapshot.
-  tabs.on('navigated', (tabId: string) => invalidate(tabId));
+  // Refs are invalidated on any navigation, including same-document ones,
+  // because a pushState can rewrite the whole view.
+  tabs.on('navigated', (tabId: string) => invalidate(tabId, false));
+  // Taint is only dropped when the DOCUMENT is replaced. A same-document
+  // navigation leaves the filled values sitting in the DOM, so clearing taint
+  // there let a page reveal them with one line:
+  //   input.addEventListener('input', () => history.pushState({}, '', '#ok'))
+  tabs.on('document-navigated', (tabId: string) => invalidate(tabId, true));
 
   // Push tab state to the chrome UI whenever it changes.
   tabs.on('changed', (list, activeId) => {
@@ -110,6 +116,12 @@ applyCommandLineSwitches();
 app.whenReady().then(async () => {
   // Blocking must be installed on the default container's session before the
   // first request goes out.
+  // Before anything else that might throw, so early failures are reported.
+  const tel = await initTelemetry(app.getVersion());
+  console.log(
+    `[aperture] crash reporting: ${tel.active ? 'on' : `off (${tel.reason})`}`,
+  );
+
   applyDarkMode('dark');
   await installBlocker(containers.sessionFor(containers.defaultId()));
 
@@ -197,6 +209,17 @@ async function publishMcpConfig(mcp: {
 
 process.on('uncaughtException', (err) => {
   console.error('[aperture] uncaught:', err);
+  report(err, 'main');
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[aperture] unhandled rejection:', reason);
+  report(reason, 'main');
+});
+
+// Give queued reports a moment to leave before the process goes away.
+app.on('before-quit', () => {
+  void flushTelemetry(1500);
 });
 
 // Handle IPC that must exist even before a window does.

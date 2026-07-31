@@ -475,10 +475,22 @@ function hrefOf(el: HTMLElement): string | undefined {
     // cheaper across a results page with 50 links.
     let s = u.pathname + (u.search.length <= 40 ? u.search : '?…');
     if (u.origin !== el.ownerDocument.location?.origin) s = u.origin + s;
-    return s;
+    return sanitizeHref(s);
   } catch {
-    return raw.slice(0, 60);
+    // The parse-failure path returned the raw attribute, newlines intact —
+    // and href is rendered UNQUOTED, so `href="//[<newline>FULL SNAPSHOT #9"`
+    // forged a snapshot reset header at column 0. Anchors chain, so this gave
+    // a page arbitrary multi-line control of the rendered snapshot.
+    return sanitizeHref(raw);
   }
+}
+
+/**
+ * hrefs are rendered unquoted, so nothing that could start a new line — or be
+ * treated as one by a downstream tokenizer — may survive.
+ */
+function sanitizeHref(s: string): string {
+  return s.replace(/[\s\u0000-\u001f\u0085\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, '').slice(0, 60);
 }
 
 function valueOf(el: HTMLElement): string | undefined {

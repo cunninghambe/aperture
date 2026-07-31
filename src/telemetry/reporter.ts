@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { app } from 'electron';
+import * as uhOh from './uh-oh-client.js';
 import { payloadIsSafe, scrubEvent } from './scrub.js';
 
 /**
@@ -135,21 +136,74 @@ export function telemetryStats(): { sent: number; dropped: number; enabled: bool
   return { sent, dropped, enabled: config?.enabled === true };
 }
 
-/**
- * Wire the SDK.
- *
- * The uh-oh client is vendored per its own instructions rather than imported,
- * so this is where it gets attached once a client file is dropped in. Until
- * then the hook above is fully testable on its own, which is the part that
- * carries the risk.
- */
-export async function initTelemetry(): Promise<{ active: boolean; reason?: string }> {
+/** Wire the vendored uh-oh client. No-op unless the human turned it on. */
+export async function initTelemetry(release: string): Promise<{
+  active: boolean;
+  reason?: string;
+}> {
   const cfg = await loadTelemetryConfig();
   if (!cfg.enabled) return { active: false, reason: 'disabled (default)' };
   if (!cfg.dsn) return { active: false, reason: 'no DSN configured' };
 
-  // Deliberately not auto-installing global handlers here. See README: the
-  // vendored client lands in src/telemetry/uh-oh-client.ts, and this function
-  // calls its init() with { dsn, release, beforeSend: makeBeforeSend(...) }.
-  return { active: false, reason: 'uh-oh client not yet vendored' };
+  try {
+    uhOh.init({
+      dsn: cfg.dsn,
+      release,
+      environment: app.isPackaged ? 'production' : 'development',
+      runtime: 'node',
+      beforeSend: makeBeforeSend({ salt: cfg.salt }) as never,
+      // The queue is spooled next to the other app data so a crash during
+      // shutdown still reports on next launch.
+      spoolDir: app.getPath('userData'),
+      // Usage analytics stays off. This is a privacy browser; "which pages did
+      // you open" is precisely what it exists not to send.
+      analytics: { auto: false },
+    } as never);
+
+    // Non-secret build context, matching the scrubber's context allowlist.
+    uhOh.setContext('electron', {
+      electron: process.versions.electron ?? 'unknown',
+      chrome: process.versions.chrome ?? 'unknown',
+      node: process.versions.node,
+      arch: process.arch,
+    });
+
+    // No user identity is ever attached. There is one user and we know who
+    // they are; an id buys nothing and costs everything.
+    uhOh.setUser(null);
+
+    return { active: true };
+  } catch (err) {
+    // Telemetry must never be the reason the browser fails to start.
+    return {
+      active: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Report an error we caught ourselves.
+ *
+ * Routed through here rather than calling the client directly, so the
+ * enabled-check and the vault exclusion cannot be bypassed by a future caller.
+ */
+export function report(err: unknown, surface: string): void {
+  if (config?.enabled !== true) return;
+  if (surface === 'vault') return;
+  try {
+    uhOh.setTag('surface', surface);
+    uhOh.captureException(err);
+  } catch {
+    // Never let reporting an error raise one.
+  }
+}
+
+export async function flushTelemetry(timeoutMs = 2000): Promise<void> {
+  if (config?.enabled !== true) return;
+  try {
+    await uhOh.flush(timeoutMs);
+  } catch {
+    /* shutdown path; nothing useful to do */
+  }
 }

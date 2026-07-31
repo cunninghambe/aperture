@@ -105,13 +105,19 @@ export function stateFor(tabId: string): TabSnapshotState {
   return s;
 }
 
-/** A navigation invalidates every ref, so the next observation must be full. */
-export function invalidate(tabId: string): void {
+/**
+ * A navigation invalidates every ref, so the next observation must be full.
+ *
+ * `documentReplaced` distinguishes a real navigation from a same-document one
+ * (pushState, hash change). Only the former means the tainted nodes are gone;
+ * clearing taint on a pushState let a hostile page unmask a filled national ID
+ * by calling `history.pushState` from an input handler.
+ */
+export function invalidate(tabId: string, documentReplaced: boolean): void {
   const st = states.get(tabId);
   if (!st) return;
   st.requireFull();
-  // The old document is gone, so nothing in it is still tainted.
-  st.tainted.clear();
+  if (documentReplaced) st.tainted.clear();
 }
 
 export function forget(tabId: string): void {
@@ -321,11 +327,68 @@ function redactTainted(root: SnapshotNode, tainted: Set<string>): void {
   const stack: SnapshotNode[] = [root];
   while (stack.length) {
     const n = stack.pop()!;
-    if (tainted.has(n.key) && n.value !== undefined && n.value !== '') {
-      n.value = '(filled from profile)';
+    if (tainted.has(n.key)) {
+      // `value` is not enough. A node that is not an input carries its content
+      // in `text` or `name`, so copying a filled value into a <div> produced an
+      // unredacted line. All three are rendered, so all three are redacted.
+      if (n.value !== undefined && n.value !== '') n.value = REDACTED;
+      if (n.text) n.text = REDACTED;
+      if (n.name) n.name = REDACTED;
     }
     for (const c of n.children) stack.push(c);
   }
+}
+
+const REDACTED = '(filled from profile)';
+
+/**
+ * Values currently tainted in this tab, for redacting text that did not come
+ * through the snapshot tree — `browser_read`, in particular, which reads
+ * `innerText` directly and would otherwise bypass redaction entirely.
+ */
+export function redactFreeText(tabId: string, s: string): string {
+  const st = states.get(tabId);
+  if (!st || st.tainted.size === 0 || !st.last) return s;
+
+  let out = s;
+  for (const value of collectTaintedValues(st.last.root, st.tainted)) {
+    if (value.length < 4) continue;
+    out = out.split(value).join(REDACTED);
+  }
+  return out;
+}
+
+function collectTaintedValues(root: SnapshotNode, tainted: Set<string>): string[] {
+  const vals: string[] = [];
+  const stack: SnapshotNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
+    if (tainted.has(n.key)) {
+      for (const v of [n.value, n.text, n.name]) {
+        if (v && v !== REDACTED) vals.push(v);
+      }
+    }
+    for (const c of n.children) stack.push(c);
+  }
+  return vals;
+}
+
+/**
+ * The live values of tainted fields, read fresh from the page.
+ *
+ * Needed because the retained tree holds the redacted copy, so a value that
+ * only ever appears in free text (a page echoing it into a div) would not be
+ * matchable. Kept in the main process and never returned upward.
+ */
+export async function taintedValues(
+  tabId: string,
+  wc: WebContents,
+): Promise<string[]> {
+  const st = states.get(tabId);
+  if (!st || st.tainted.size === 0) return [];
+  const payload = await requestWalk(wc);
+  if (!payload.ok || !payload.result) return [];
+  return collectTaintedValues(payload.result.root, st.tainted);
 }
 
 /** Mark fields as holding sensitive values, so snapshots redact them. */

@@ -16,6 +16,16 @@
     "test:watch": "vitest",
     "dist": "electron-vite build && electron-builder"
   },
+  "build": {
+    "appId": "dev.aperture.browser",
+    "productName": "Aperture",
+    "afterPack": "build/afterPack.cjs",
+    "asar": true,
+    "files": ["out/**/*", "package.json"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg", "hardenedRuntime": true },
+    "linux": { "target": "AppImage" }
+  },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
     "@ghostery/adblocker-electron": "^2.18.1",
@@ -26,6 +36,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.3",
     "@types/libsodium-wrappers-sumo": "^0.7.8",
     "@types/node": "^24.0.0",
     "electron": "^43.2.0",

@@ -262,7 +262,13 @@ export function quote(s: string): string {
   let t = s.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   // Strip control characters and the bidi overrides used to visually reorder
   // text so that what a human reviewer sees differs from what is really there.
-  t = t.replace(/[ -‪-‮⁦-⁩]/g, '');
+  t = t.replace(
+    /[\u0000-\u001f\u0085\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    '',
+  );
   if (t.length > MAX_TEXT) t = `${t.slice(0, MAX_TEXT - 1)}…`;
-  return `"${t.replace(/"/g, '\\"')}"`;
+  // Backslash must be escaped before the quote, or the encoding is not
+  // injective and page text can close the quoted string early, leaving the
+  // remainder to parse as snapshot structure.
+  return `"${t.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }

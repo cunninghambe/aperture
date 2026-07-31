@@ -64,7 +64,10 @@ export function openVaultWindow(parent: BaseWindow): void {
       preload: join(__dirname, '../preload/vault.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // The vault preload uses only contextBridge and ipcRenderer, both of
+      // which are available to a sandboxed preload. There is no reason to give
+      // the window that holds credentials a preload with full Node access.
+      sandbox: true,
       // No remote content is ever loaded here, so there is nothing for a
       // network origin to reach.
       webSecurity: true,
