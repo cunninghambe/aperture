@@ -67,8 +67,21 @@ Making that safe rather than merely small is the actual engineering:
 
 Every registered MCP tool costs roughly 1,000 tokens of schema before it does
 anything. playwright-mcp (~50 tools) and chrome-devtools-mcp (51) levy a ~50k
-token tax on every session. Aperture ships 8 tools behind `action`
-discriminators.
+token tax on every session. Aperture ships **13**, kept down by putting related
+operations behind an `action` discriminator rather than splitting them into a
+tool each:
+
+```
+browser_tabs      browser_navigate   browser_snapshot   browser_read
+browser_fill_form browser_profile    browser_attach     browser_capture
+browser_container browser_theme      browser_console
+vault_entries_for_origin             vault_request_fill
+```
+
+Note what is absent: there is no `vault_reveal`, no `vault_unlock`, no
+`vault_export`, and no tool that reads the filesystem. Those capabilities do not
+exist on this surface at all — see below for why that is the enforcement
+mechanism rather than a policy.
 
 ## Autofill: the thing that makes this useful daily
 
@@ -328,7 +341,7 @@ direction.
 | Area | State |
 |---|---|
 | Electron shell, tab model (`WebContentsView`), browser UI | **Working** — launches and browses |
-| MCP server over Streamable HTTP, 8 tools | **Working** — verified against a live browser |
+| MCP server over Streamable HTTP, 13 tools | **Working** — verified against a live browser |
 | Bearer auth + DNS-rebinding guards | **Working** — verified (401 / 403) |
 | Untrusted-content envelope | **Working** — verified |
 | Snapshot engine end-to-end (walker → refs → diff → render) | **Working** — verified on a real form |
