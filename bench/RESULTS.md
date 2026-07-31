@@ -144,3 +144,82 @@ number is the pessimistic one.
 
 The earlier synthetic 7–10× and the 40× projection were both optimistic in the
 same way: neither accounted for a fixed per-response overhead.
+
+---
+
+# Update: ref stability under a real re-render — measured, and it failed first
+
+Fixture: `test/fixtures/rerender.html`. Every keystroke calls
+`replaceChildren()` and rebuilds the whole list from scratch — no node reuse at
+all, no `id`, no `data-testid`. This is the worst case the identity-key scheme
+claims to survive, and it is what a naive React list does.
+
+## First run: the claim failed
+
+Typing into the search box reallocated **every ref in the list**. `e4` "Anker
+7-in-1 USB-C Hub" became `e29`; the entire `main` was re-added as `e28`.
+
+**Cause, and it was a design flaw rather than a bug.** `accessibleName()` falls
+back to `textContent`, so a `<ul>`'s name was every product inside it. Filtering
+changed the container's name → changed the *anchor* → changed the identity key
+of every descendant.
+
+The anchor exists to disambiguate siblings. Deriving it from content makes it
+change precisely when content changes, which is when stability is needed. **An
+anchor derived from content cannot stabilise content.**
+
+**Fix:** containers take only an *explicit* name — `aria-label`,
+`aria-labelledby`, `title`, or their own child heading — never a textContent
+fallback. Leaf elements still use the full accessible name, because a button's
+name genuinely *is* its text.
+
+## Second run: passes, with one honest exception
+
+```
+~ e2 ="anker" +focused
+! e3 replaced:
+  list e3
+    listitem
+      link e4  "Anker 7-in-1 USB-C Hub"   ← survived
+      button e5 "Add to cart"             ← survived
+    listitem
+      link e12 "Anker 655 8-in-1"         ← survived (was e12 before filtering)
+      button e7 "Add to cart"             ← POSITIONAL: was another product's
+```
+
+| element class | survives full re-render? |
+|---|---|
+| Form field with a `name` attribute (`e2`) | **Yes** — Tier-1 identity |
+| Container with a heading (`e3`) | **Yes** |
+| Link with a distinguishing accessible name (`e4`, `e12`) | **Yes** |
+| Button identical to its siblings (`e5`, `e7`) | **No — follows position** |
+
+The links survive because their names distinguish them. The "Add to cart"
+buttons are identical to each other, so they fall back to the positional
+ordinal — and after filtering, position 2's ordinal belongs to a different
+product than it did before.
+
+**This is a live correctness hazard, not a cosmetic one.** An agent that reads
+the list, filters it, and then clicks a remembered button ref can act on the
+wrong product. The mitigation available today is that `browser_act` returns a
+diff after every action, so the agent sees the list was replaced — but nothing
+*stops* the mis-click.
+
+The reviewer who predicted this was right: for elements distinguishable only by
+position, reordering is exactly what breaks positional identity, and the LIS
+pass does not help because these are not the same elements moving — they are
+different elements occupying the same slots.
+
+**Proper fix, not yet implemented:** derive the ordinal from the nearest
+*distinguishing* ancestor rather than from document order — the enclosing
+`listitem`'s link name, here — so a button inherits its product's identity.
+That makes the button's key a function of its row, which is what a human means
+by "that product's add-to-cart button".
+
+## Status after this round
+
+| claim | status |
+|---|---|
+| Refs survive a full re-render **when the element has a distinguishing name** | **Measured: yes** |
+| Refs survive a full re-render **when siblings are identical** | **Measured: NO** — positional, can mis-target |
+| Agents succeed as often on diffs | **Still unmeasured** |

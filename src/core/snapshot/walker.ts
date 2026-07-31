@@ -122,11 +122,24 @@ function visit(
   if (!isRendered(el, ctx.win)) return null;
 
   const role = roleOf(el);
-  const name = accessibleName(el);
+  // Containers take only an explicit name. Letting a <ul> or <main> inherit
+  // its own textContent as its name produced two problems at once: an unstable
+  // identity key (it changed whenever any child changed) and a rendered line
+  // carrying every product title concatenated together.
+  const name = isSemanticContainer(role) ? explicitName(el) : accessibleName(el);
 
   const kids: SnapshotNode[] = [];
+  // The anchor uses only an EXPLICIT name — never the textContent fallback.
+  //
+  // Measured failure this fixes: a container's accessible name falls back to
+  // its own textContent, so a <ul>'s name is every product in it. Filtering
+  // the list changed the container's name, which changed the anchor, which
+  // changed the identity key of every descendant — so a full re-render
+  // reallocated every ref, on exactly the SPA pattern the scheme claims to
+  // survive. An anchor derived from content cannot stabilise content.
+  const anchorName = explicitName(el);
   const nextAncestry = isSemanticContainer(role)
-    ? [...ancestry, `${role}${name ? `:${norm(name)}` : ''}`]
+    ? [...ancestry, `${role}${anchorName ? `:${norm(anchorName)}` : ''}`]
     : ancestry;
 
   // Shadow roots are pierced silently. A shadow boundary is an implementation
@@ -386,6 +399,39 @@ function isKnownRole(r: string): boolean {
  * that matters in practice. Not a complete implementation of accname — it is
  * the subset that determines what an agent can recognize an element by.
  */
+/**
+ * A name the page author set on purpose, with no textContent fallback.
+ *
+ * Used for identity anchors and for container roles generally. A container's
+ * text is its children's text, so a text-derived name changes whenever the
+ * children do — which is the opposite of what an identity anchor needs.
+ * A heading inside the container is allowed, since headings label their region
+ * and rarely change when the region's contents are filtered.
+ */
+export function explicitName(el: HTMLElement): string | undefined {
+  const labelledby = el.getAttribute('aria-labelledby');
+  if (labelledby) {
+    const parts = labelledby
+      .split(/\s+/)
+      .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? '')
+      .filter(Boolean);
+    if (parts.length) return truncate(parts.join(' '));
+  }
+
+  const label = el.getAttribute('aria-label');
+  if (label?.trim()) return truncate(label);
+
+  const title = el.getAttribute('title');
+  if (title?.trim()) return truncate(title);
+
+  // A landmark's own heading is a stable label for it.
+  const heading = el.querySelector(':scope > h1, :scope > h2, :scope > h3');
+  const headingText = heading?.textContent?.trim();
+  if (headingText) return truncate(headingText);
+
+  return undefined;
+}
+
 export function accessibleName(el: HTMLElement): string | undefined {
   const labelledby = el.getAttribute('aria-labelledby');
   if (labelledby) {

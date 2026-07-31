@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Re-render stress</title>
+  </head>
+  <body>
+    <main>
+      <h1>Product search</h1>
+      <label for="q">Search</label>
+      <input id="q" name="q" autocomplete="off" placeholder="Filter products" />
+      <p id="count"></p>
+      <ul id="results"></ul>
+    </main>
+
+    <script>
+      // Deliberately hostile to identity schemes that key on DOM nodes:
+      // every keystroke destroys and rebuilds the entire list, so not one
+      // node survives. This is what a naive React list does, and it is the
+      // case Aperture's identity keys claim to survive.
+      const PRODUCTS = [
+        'Anker 7-in-1 USB-C Hub', 'Plugable 11-in-1 Dock', 'Belkin 4-Port Mini Hub',
+        'Satechi Slim Multiport', 'Anker 655 8-in-1', 'UGREEN Revodok Pro',
+        'Hyper HyperDrive Next', 'Baseus 17-in-1 Dock', 'CalDigit TS4',
+        'Dell WD19S Dock', 'Lenovo USB-C Dock', 'HP Thunderbolt G4',
+      ];
+
+      const results = document.getElementById('results');
+      const count = document.getElementById('count');
+      const q = document.getElementById('q');
+
+      function render() {
+        const term = q.value.toLowerCase();
+        const items = PRODUCTS.filter((p) => p.toLowerCase().includes(term));
+
+        // Full teardown. No node reuse whatsoever.
+        results.replaceChildren();
+        count.textContent = items.length + ' products';
+
+        for (const name of items) {
+          const li = document.createElement('li');
+
+          const a = document.createElement('a');
+          a.href = '/p/' + encodeURIComponent(name);
+          a.textContent = name;
+
+          const btn = document.createElement('button');
+          // No stable id or data-testid anywhere: forces the Tier-2 fallback
+          // (role + accessible name + nearest named ancestor + semantic path).
+          btn.textContent = 'Add to cart';
+
+          li.append(a, btn);
+          results.append(li);
+        }
+      }
+
+      q.addEventListener('input', render);
+      render();
+    </script>
+  </body>
+</html>

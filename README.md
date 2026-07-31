@@ -420,7 +420,8 @@ direction.
 | Token benchmark | **Working** — synthetic (`npm run bench`) plus real-site head-to-head vs playwright-mcp, see [bench/RESULTS.md](bench/RESULTS.md) |
 | Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
 | `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
-| Task-success benchmark (diff vs re-dump) | **Not started** — now unblocked, still the most important unmeasured claim |
+| Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** (positional keys can mis-target). See [bench/RESULTS.md](bench/RESULTS.md) |
+| Task-success benchmark (diff vs re-dump) | **Not started** — unblocked, still the most important unmeasured claim |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**
