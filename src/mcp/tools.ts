@@ -64,7 +64,7 @@ Snapshot format (indentation = containment):
   /path         link destination       hN      heading level N
   bare words    states: checked disabled required expanded selected modal
   NxM           table dims; cells joined with |
-  "... K more"  collapsed repetition — expand with browser_read
+  "... K more"  collapsed repetition — browser_snapshot expand:true for refs
   #E.n          page state id (epoch.step)
 
 Diff ops: ~ changed  + added  - removed  > moved  ! subtree replaced
@@ -295,20 +295,32 @@ export function registerBrowserTools(
         'Prefer letting browser_act return diffs rather than re-snapshotting ' +
         'after every action — a diff is typically 40-150 tokens where a full ' +
         'snapshot is thousands.\n\n' +
+        'Repeated siblings collapse to "… N more". Those items have refs, but ' +
+        'no ordinary read reveals them: set expand:true to get every one.\n\n' +
         FORMAT_LEGEND,
       inputSchema: z.object({
         mode: z.enum(['auto', 'full']).default('auto'),
         tabId: z.string().optional(),
         budgetTokens: z.number().int().min(200).max(20000).optional(),
+        expand: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Render collapsed "… N more" runs in full. Costs tokens; use ' +
+              'when you need refs for items hidden behind a collapse marker.',
+          ),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ mode, tabId, budgetTokens }) => {
+    async ({ mode, tabId, budgetTokens, expand }) => {
       const t = tabs();
       const id = tabId ?? t.active;
       if (!id) return text('error: no active tab');
+      // Expanding a stale diff base makes no sense — the elision the agent is
+      // asking to see through lives in a full snapshot — so expand implies full.
       const { text: rendered } = await observe(id, t.webContents(id), {
-        full: mode === 'full',
+        full: mode === 'full' || expand,
+        expand,
         budgetTokens,
       });
       return text(untrusted(t.info(id)?.url ?? '', rendered));

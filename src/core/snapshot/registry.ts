@@ -42,6 +42,7 @@ export class RefRegistry {
       rect: n.rect,
       state: 'live',
       emitted: false,
+      needsReannounce: false,
       lastSeenSeq: '0.0',
     };
     this.byRef.set(ref, entry);
@@ -64,13 +65,21 @@ export class RefRegistry {
 
   markDead(ref: string): void {
     const e = this.byRef.get(ref);
-    if (e) e.state = 'dead';
+    if (!e) return;
+    e.state = 'dead';
+    // A ref the model was never shown owes it nothing on the way back. One it
+    // *was* shown, and has since deleted, must be re-stated in full if the key
+    // ever reappears — otherwise the revival is invisible and every later
+    // mention of the ref refers to something the model no longer holds.
+    if (e.emitted) e.needsReannounce = true;
   }
 
   markEmitted(ref: string, seq: string): void {
     const e = this.byRef.get(ref);
     if (!e) return;
     e.emitted = true;
+    // Rendering the full line IS the re-announcement.
+    e.needsReannounce = false;
     e.lastSeenSeq = seq;
   }
 
@@ -78,12 +87,17 @@ export class RefRegistry {
     return this.byRef.get(ref)?.emitted ?? false;
   }
 
+  /** True while a revived ref still owes the model a full line. */
+  needsReannounce(ref: string): boolean {
+    return this.byRef.get(ref)?.needsReannounce ?? false;
+  }
+
   /** Mark every ref not seen in this snapshot as dead. */
   reapExcept(liveKeys: Set<string>): string[] {
     const died: string[] = [];
-    for (const [key, entry] of this.byKey) {
-      if (entry.state === 'live' && !liveKeys.has(key)) {
-        entry.state = 'dead';
+    for (const entry of this.byKey.values()) {
+      if (entry.state === 'live' && !liveKeys.has(entry.key)) {
+        this.markDead(entry.ref);
         died.push(entry.ref);
       }
     }

@@ -90,10 +90,14 @@ export function diffSnapshots(
       for (const key of keysOf(o)) {
         if (survivors.has(key)) continue;
         const ref = reg.byKeyLookup(key)?.ref;
-        if (ref) {
-          gone.push(ref);
-          reg.markDead(ref);
-        }
+        if (!ref) continue;
+        // The death is bookkeeping and happens for every destroyed ref. The
+        // *report* is for the model, so it lists only refs the model was
+        // actually shown — naming refs it never held is pure token waste, and
+        // on a first-step replace that was most of the list.
+        const known = wasEmitted(ref);
+        reg.markDead(ref);
+        if (known) gone.push(ref);
       }
 
       ops.push({ op: 'replace', ref: reg.ensureRef(n), subtree: n, gone });

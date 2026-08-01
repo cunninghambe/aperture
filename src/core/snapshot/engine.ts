@@ -154,6 +154,8 @@ export interface ObserveOptions {
   budgetTokens?: number;
   /** True when this observation follows an agent action, so changes are signal. */
   afterAction?: boolean;
+  /** Render `… N more` runs in full. Only meaningful on a full snapshot. */
+  expand?: boolean;
 }
 
 /**
@@ -199,6 +201,7 @@ export async function observe(
     const text = renderFull(snap, {
       budgetTokens: opts.budgetTokens,
       registry: st.registry,
+      expand: opts.expand,
     });
     st.last = snap;
     st.lastFullLines = text.split('\n').length;
@@ -265,6 +268,7 @@ export async function observe(
     const text = renderFull(snap, {
       budgetTokens: opts.budgetTokens,
       registry: st.registry,
+      expand: opts.expand,
     });
     st.last = snap;
     st.lastFullLines = text.split('\n').length;

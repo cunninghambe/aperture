@@ -22,6 +22,15 @@ export interface RenderOptions {
   /** Soft cap on rendered tokens. Lower tiers degrade before higher ones. */
   budgetTokens?: number;
   registry?: RefRegistry;
+  /**
+   * Render collapsed `… N more` runs in full.
+   *
+   * Off by default: collapsing repetition is most of the token saving on a
+   * catalogue page. On demand it is the only way to obtain refs for items the
+   * elision hides — and the only way to obtain a complete ground truth for
+   * anything comparing the diff stream against the page.
+   */
+  expand?: boolean;
 }
 
 const DEFAULT_BUDGET = 2000;
@@ -51,7 +60,11 @@ export function renderFull(snap: Snapshot, opts: RenderOptions = {}): string {
   out.push('');
 
   const body: string[] = [];
-  renderNode(snap.root, 0, body, opts.registry, snap.seq);
+  renderNode(snap.root, 0, body, {
+    reg: opts.registry,
+    seq: snap.seq,
+    expand: opts.expand === true,
+  });
 
   // Budget enforcement degrades by dropping offscreen detail before it ever
   // truncates mid-structure — a half-emitted subtree is worse than an honest
@@ -80,19 +93,25 @@ export function renderFull(snap: Snapshot, opts: RenderOptions = {}): string {
   return out.join('\n');
 }
 
+interface RenderCtx {
+  reg: RefRegistry | undefined;
+  seq: string;
+  /** Suppress run collapsing entirely; every child gets its own line. */
+  expand: boolean;
+}
+
 function renderNode(
   n: SnapshotNode,
   depth: number,
   out: string[],
-  reg: RefRegistry | undefined,
-  seq: string,
+  ctx: RenderCtx,
 ): void {
   // The root is a container, not content.
   if (depth > 0 || n.role !== 'generic') {
     const line = renderLine(n, depth);
     if (line !== null) {
       out.push(line);
-      if (reg && n.ref) reg.markEmitted(n.ref, seq);
+      if (ctx.reg && n.ref) ctx.reg.markEmitted(n.ref, ctx.seq);
     }
   }
 
@@ -102,9 +121,21 @@ function renderNode(
   let i = 0;
   while (i < kids.length) {
     const run = sameShapeRunLength(kids, i);
-    if (run >= COLLAPSE_RUN) {
+    if (!ctx.expand && run >= COLLAPSE_RUN) {
+      // Collapsing a run that is bringing a previously-dead, previously-emitted
+      // ref back to life would revive it silently — the model has already
+      // deleted that ref and would have no line to restore it from. Such a run
+      // pays for its own re-announcement and renders in full.
+      if (runOwesReannounce(kids, i + COLLAPSE_SHOW, i + run, ctx.reg)) {
+        for (let k = 0; k < run; k++) {
+          renderNode(kids[i + k]!, childDepth, out, ctx);
+        }
+        i += run;
+        continue;
+      }
+
       for (let k = 0; k < COLLAPSE_SHOW; k++) {
-        renderNode(kids[i + k]!, childDepth, out, reg, seq);
+        renderNode(kids[i + k]!, childDepth, out, ctx);
       }
       const rest = run - COLLAPSE_SHOW;
       const shape = describeShape(kids[i]!);
@@ -115,9 +146,34 @@ function renderNode(
       i += run;
       continue;
     }
-    renderNode(kids[i]!, childDepth, out, reg, seq);
+    renderNode(kids[i]!, childDepth, out, ctx);
     i++;
   }
+}
+
+/**
+ * Does any item about to be elided carry a ref that owes the model a full line?
+ *
+ * Only the elided tail is examined: the first COLLAPSE_SHOW items are rendered
+ * either way. Refs the model has never been shown never owe anything, so a
+ * fresh page still collapses exactly as before.
+ */
+function runOwesReannounce(
+  kids: SnapshotNode[],
+  from: number,
+  to: number,
+  reg: RefRegistry | undefined,
+): boolean {
+  if (!reg) return false;
+  for (let i = from; i < to; i++) {
+    const stack: SnapshotNode[] = [kids[i]!];
+    while (stack.length) {
+      const n = stack.pop()!;
+      if (n.ref && reg.needsReannounce(n.ref)) return true;
+      for (const c of n.children) stack.push(c);
+    }
+  }
+  return false;
 }
 
 /** One line of the tree, or null for nodes that carry nothing worth a line. */
@@ -226,7 +282,9 @@ function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string
     }
     case 'add': {
       const lines: string[] = [];
-      renderNode(op.subtree, 1, lines, reg, seq);
+      // Diffs are the production stream and stay collapsed; `expand` is an
+      // explicit, opt-in request on a full snapshot.
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: false });
       const where = op.after ? `after ${op.after}` : `under ${op.parent}`;
       return `+ ${where}:\n${lines.join('\n')}`;
     }
@@ -237,7 +295,7 @@ function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string
       return `> ${op.ref} moved ${op.after ? `after ${op.after}` : `into ${op.parent}`}`;
     case 'replace': {
       const lines: string[] = [];
-      renderNode(op.subtree, 1, lines, reg, seq);
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: false });
       // Naming the refs the replace destroyed is what stops the model going on
       // believing in elements that no longer exist — the phantom refs the
       // fidelity check caught. A replace that reports only what it created is

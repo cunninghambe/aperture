@@ -163,5 +163,17 @@ export interface RefEntry {
   state: 'live' | 'dead';
   /** Whether this node has ever been rendered to the model. */
   emitted: boolean;
+  /**
+   * The model was shown this ref and then told it died. Until the ref is
+   * rendered in full again, naming it is not enough for the model to act on.
+   *
+   * A ref can come back from the dead — `ensureRef` revives a key that
+   * reappears, which is what makes tabbed UIs behave — and a revival hidden
+   * inside a collapsed `… N more` run is a *silent* one: the model deleted the
+   * ref, was never shown it again, and a later `~ eN` or a `gone: eN` would
+   * name an element it no longer holds. The renderer refuses to collapse a run
+   * containing a ref in this state.
+   */
+  needsReannounce: boolean;
   lastSeenSeq: string;
 }

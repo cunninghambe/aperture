@@ -52,6 +52,76 @@ function snapshot(root: SnapshotNode, s = '1.0'): Snapshot {
   };
 }
 
+/** Mirrors engine.ts `isAddressable` — note that listitem is NOT addressable. */
+const ADDRESSABLE = new Set<string>([
+  'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio',
+  'slider', 'tab', 'menuitem', 'iframe', 'scrollable', 'dialog', 'list',
+  'table', 'form', 'region', 'nav', 'main',
+]);
+
+/** What engine.ts does before every diff: refs assigned over the whole tree. */
+function assignRefs(n: SnapshotNode, reg: RefRegistry): void {
+  if (ADDRESSABLE.has(n.role)) reg.ensureRef(n);
+  for (const c of n.children) assignRefs(c, reg);
+}
+
+function refsIn(n: SnapshotNode, out: string[] = []): string[] {
+  if (n.ref) out.push(n.ref);
+  for (const c of n.children) refsIn(c, out);
+  return out;
+}
+
+/** A product list: the shape that collapses, and the shape the bench drives. */
+function catalogue(n: number, prefix: string): SnapshotNode {
+  return listPage(Array.from({ length: n }, (_, i) => `${prefix}${i}`));
+}
+
+/** The same page, with the item order given explicitly by key stem. */
+function listPage(stems: string[]): SnapshotNode {
+  const items = stems.map((stem) =>
+    k('listitem', stem, undefined, {
+      children: [
+        k('link', `${stem}l`, `Product ${stem}`, { href: `/p/${stem}` }),
+        k('button', `${stem}b`, 'Add to cart'),
+      ],
+      shape: 'link,button',
+    }),
+  );
+  return k('main', 'mroot', undefined, {
+    children: [k('list', 'catalogue', 'results', { children: items, shape: 'listitem' })],
+  });
+}
+
+function render(ops: ReturnType<typeof diffSnapshots>['ops'], reg: RefRegistry): string {
+  return renderDiff(
+    { seq: '1.1', baseSeq: '1.0', ops, suppressed: 0, unreadChanges: 0 },
+    reg,
+  );
+}
+
+/**
+ * Verbatim output of `catalogue(8, 'g')` from the renderer as it stood before
+ * `expand` existed (captured from git HEAD, not from the current code). The
+ * production stream is not allowed to move.
+ */
+const GOLDEN_COLLAPSED = [
+  'FULL SNAPSHOT #3.0 — replaces all prior state for this page',
+  'page "Example" https://example.com/',
+  '',
+  'main e1',
+  '  list e2 "results"',
+  '    listitem',
+  '      link e3 "Product g0" /p/g0',
+  '      button e4 "Add to cart"',
+  '    listitem',
+  '      link e5 "Product g1" /p/g1',
+  '      button e6 "Add to cart"',
+  '    listitem',
+  '      link e7 "Product g2" /p/g2',
+  '      button e8 "Add to cart"',
+  '    … 5 more listitems (link/button "Add to cart") — read e2',
+].join('\n');
+
 // -- ref identity -----------------------------------------------------------
 
 describe('RefRegistry', () => {
@@ -112,7 +182,7 @@ describe('fuzzyRescue', () => {
   const lost = {
     ref: 'e1', key: 'x', frameId: 0, role: 'button' as Role,
     name: 'Apply coupon', href: undefined, rect: [10, 10, 100, 30] as [number, number, number, number],
-    state: 'dead' as const, emitted: true, lastSeenSeq: '1.0',
+    state: 'dead' as const, emitted: true, needsReannounce: true, lastSeenSeq: '1.0',
   };
 
   it('recovers an element whose label barely changed', () => {
@@ -335,6 +405,106 @@ describe('renderDiff', () => {
       ops: [{ op: 'update', ref: 'e26', delta: { value: '94110' } }],
     });
     expect(out).toContain('diff from #7.4');
+  });
+});
+
+// -- collapse, ground truth, and revival --------------------------------------
+
+/**
+ * These four cover the failure that made `bench:fidelity rerender` report six
+ * phantom refs. The refs were real; the *ground truth* was lossy, because the
+ * reference snapshot collapsed the run they lived in. Everything a checker
+ * compares the diff stream against has to be complete, or it indicts a
+ * faithful engine.
+ */
+describe('collapsed runs', () => {
+  it('hides refs behind the elision by default and reveals every one on expand', () => {
+    const reg = new RefRegistry();
+    const root = catalogue(6, 'c');
+    assignRefs(root, reg);
+
+    const plain = renderFull(snapshot(root), { registry: reg });
+    expect(plain).toMatch(/… 3 more listitems/);
+
+    // Every ref in the tree is live in the registry; expand must account for
+    // all of them, or a checker built on this output invents phantoms.
+    const expanded = renderFull(snapshot(root), { expand: true, registry: reg });
+    for (const ref of refsIn(root)) {
+      expect(expanded).toMatch(new RegExp(`\\b${ref}\\b`));
+    }
+    expect(expanded).not.toMatch(/… \d+ more/);
+  });
+
+  it('never names a ref as gone and renders it in the same op', () => {
+    const reg = new RefRegistry();
+    const before = catalogue(10, 'old');
+    const after = catalogue(10, 'new');
+    assignRefs(before, reg);
+    renderFull(snapshot(before), { registry: reg });
+    assignRefs(after, reg);
+
+    const { ops } = diffSnapshots(before, after, reg, {
+      wasEmitted: (r) => reg.wasEmitted(r),
+    });
+    const out = render(ops, reg);
+
+    const head = /^! e\d+ replaced \(gone: ([^)]+)\):$/m.exec(out);
+    expect(head).not.toBeNull();
+    const gone = new Set(head![1]!.trim().split(/\s+/));
+    expect(gone.size).toBeGreaterThan(0);
+
+    const lines = out.split('\n');
+    const subtree = lines.slice(lines.findIndex((l) => l.startsWith('! ')) + 1);
+    const rendered = new Set<string>();
+    for (const line of subtree) {
+      for (const m of line.matchAll(/\b(e\d+)\b/g)) rendered.add(m[1]!);
+    }
+    for (const g of gone) expect(rendered.has(g)).toBe(false);
+  });
+
+  it('re-announces a revived ref rather than burying it in a collapsed run', () => {
+    // Fails before the needsReannounce fix: r comes back inside the elided
+    // tail, so the model — which deleted r when it was told `gone: r` — is
+    // never given a line to restore it from, and the next `~ r` names an
+    // element it does not hold.
+    const reg = new RefRegistry();
+
+    const a = catalogue(12, 'p');
+    assignRefs(a, reg);
+    renderFull(snapshot(a, '1.0'), { registry: reg });
+    const r = reg.byKeyLookup('p0l')!.ref;
+    expect(reg.wasEmitted(r)).toBe(true); // p0 is among the three shown
+
+    // The list rebuilds with two unrelated items: a replace that kills r.
+    const b = listPage(['q0', 'q1']);
+    assignRefs(b, reg);
+    const bOut = render(
+      diffSnapshots(a, b, reg, { wasEmitted: (x) => reg.wasEmitted(x) }).ops,
+      reg,
+    );
+    expect(bOut).toMatch(new RegExp(`gone:[^)]*\\b${r}\\b`));
+    expect(reg.needsReannounce(r)).toBe(true);
+
+    // The list comes back, with r's item at index 4 — inside the elided tail.
+    const c = listPage(['q0', 'q1', 'p2', 'p3', 'p0', 'p1', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']);
+    assignRefs(c, reg);
+    const cOut = render(
+      diffSnapshots(b, c, reg, { wasEmitted: (x) => reg.wasEmitted(x) }).ops,
+      reg,
+    );
+
+    expect(cOut).toMatch(new RegExp(`^\\s*link ${r} `, 'm'));
+    expect(cOut).not.toMatch(/… \d+ more/);
+    expect(reg.needsReannounce(r)).toBe(false);
+  });
+
+  it('renders a collapsing list byte-identically to the pre-fix output', () => {
+    // Guards the whole point of the change: `expand` is opt-in, so the
+    // production stream must not have moved a single character.
+    const reg = new RefRegistry();
+    const root = catalogue(8, 'g');
+    assignRefs(root, reg);
+    expect(renderFull(snapshot(root, '3.0'), { registry: reg })).toBe(GOLDEN_COLLAPSED);
   });
 });
 

@@ -81,8 +81,27 @@ function applyObservation(model, text) {
   return model;
 }
 
-/** Ground truth from a fresh full snapshot. */
+/**
+ * Ground truth from a fresh full snapshot.
+ *
+ * The truth snapshot must be taken with `expand:true`. A default snapshot
+ * collapses runs of same-shape siblings into `… 3 more listitems`, so the refs
+ * behind the elision are absent from the truth map while being perfectly real
+ * on the page — and every one of them is then reported as a phantom. That bug
+ * cost a day and indicted an engine that was correct; the guard below is here
+ * so it cannot happen twice.
+ */
 function truthFrom(text) {
+  if (text.includes('more lines beyond budget') || /^\s*… \d+ more /m.test(text)) {
+    console.error(
+      'ground truth incomplete — cannot judge phantoms.\n' +
+        'The reference snapshot was elided (collapsed run or budget cut), so\n' +
+        'refs that exist on the page are missing from it. Raise budgetTokens\n' +
+        'or fix expand:true; do NOT interpret the result as phantom refs.',
+    );
+    process.exit(2);
+  }
+
   const truth = new Map();
   for (const line of text.split('\n')) {
     const m = /^\s*\w+ (e\d+) "([^"]*)"(?: ="([^"]*)")?/.exec(line);
@@ -122,12 +141,30 @@ applyObservation(model, await call('browser_snapshot', { mode: 'full' }));
 let observedTokens = 0;
 for (const [ref, value] of FIELDS) {
   const out = await call('browser_act', { action: 'type', ref, text: value });
+
+  // A step that never ran must not be scored. Scenario refs are positional and
+  // assume a FRESH browser session: ref numbers keep counting up per tab, so a
+  // second scenario in the same session types into refs that no longer exist,
+  // every action fails, no diffs are produced — and the run reports a perfect
+  // GREEN off an empty model. A false green here is worse than any red.
+  if (/could not be acted on|is not a known element/.test(out)) {
+    console.error(
+      `step "${ref}" did not run — the browser rejected the ref:\n${out.trim().slice(0, 200)}\n\n` +
+        'Run ONE scenario per browser session, against a freshly started Aperture.',
+    );
+    process.exit(3);
+  }
+
   observedTokens += Math.ceil(out.length / 4);
   applyObservation(model, out);
 }
 
-// Ground truth, never shown to the "agent" above.
-const truth = truthFrom(await call('browser_snapshot', { mode: 'full' }));
+// Ground truth, never shown to the "agent" above. Expanded and generously
+// budgeted: the model side above is the production stream being measured, this
+// side only has to be complete.
+const truth = truthFrom(
+  await call('browser_snapshot', { mode: 'full', expand: true, budgetTokens: 20000 }),
+);
 
 let checked = 0;
 let wrongValue = 0;
