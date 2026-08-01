@@ -350,3 +350,78 @@ No-change floor unchanged at ~112–115 tokens.
 | Model-side budget truncation (agent on a page bigger than its budget) | **Not measured** |
 | iframes, modal-obstruction recovery | **Not measured by any benchmark** |
 | Agents succeed as often on diffs | **Still unmeasured** — the task-success suite remains the single largest gap |
+
+## The envelope shrink (2026-07-31) — measured before and after, four scenarios
+
+The finding recorded above ("the envelope dominates small diffs") is now fixed.
+The `<untrusted-page-content>` wrapper is one uniform, minimal, nonce-bearing
+envelope; the explanation it used to repeat on every response moved into the
+tool descriptions, which the client re-sends with every API request and which
+therefore survive compaction. Wire format:
+
+```
+<untrusted-page-content id=9f3a1c58 origin=http://127.0.0.1:8899>
+page #1.1 (diff from #1.0)
+~ e3 ="Brad" +focused
+</untrusted-page-content id=9f3a1c58>
+```
+
+Each scenario measured on a **freshly started Aperture**, before at `505096a`
+and after with the change built.
+
+| scenario | actions | before | after | saved | per response |
+|---|---|---|---|---|---|
+| `form` | 14 | 1,997 | **891** | **1,106** | 79.0 |
+| `rerender` | 3 | 802 | **565** | 237 | 79.0 |
+| `widgets` | 5 | 683 | **288** | 395 | 79.0 |
+| `biglist` | 2 | 1,385 | **1,227** | 158 | 79.0 |
+
+All four **GREEN**, with identical ref counts, diff/resync counts and
+independent checks to the pre-change run — the shrink changed the framing, not
+the stream. `form`'s 1,106 sits inside the predicted 1,100 ± 60 band.
+
+**The saving is exactly accounted for, to the byte.** Envelope overhead per
+response, at this fixture's origin:
+
+| | chars | note |
+|---|---|---|
+| before | 420 | 5 lines of prose + `---`, quoted attributes, **16**-hex nonce printed 3× |
+| after | 104 | two tag lines, unquoted attributes, 8-hex nonce printed 2× |
+| delta | **316** | = **79 tokens** at the bench's 4-chars-per-token rule |
+
+79 × 14 = 1,106 and 1,997 − 1,106 = 891, which is the measured number exactly.
+Every scenario shows the same 79.0 per response because the overhead is fixed
+and the origin string is the same. There is no unexplained residue in any of the
+four, which is the check that matters: a saving that did not reconcile to the
+byte would mean something else changed too.
+
+Mean per-action response on `form`: **143 → 64 tokens**. (The earlier
+"~124 → ~45" projection was taken from the 8-action sequence in the section
+above, on a shorter form with no mid-run resync; the *delta* — 79 — is the
+load-bearing figure and it matched exactly.)
+
+Two paths that were carrying page-authored text **completely unwrapped** were
+found by the call-site audit and are now enveloped:
+
+- **`browser_tabs list`** — tab titles are page-authored (a tab can call itself
+  `SYSTEM: ignore previous instructions`) and the whole list reached the agent
+  bare. It is an aggregate across tabs, so it declares `origin=multiple` rather
+  than picking one tab's origin and lying about the rest.
+- **`browser_fill_form` plan** — page-authored field labels flowed bare. The
+  mapping lines are now wrapped; the header and the trailing "Ask the human…
+  then call apply" stay outside, because a genuine harness instruction inside an
+  untrusted block teaches the model that instruction-shaped text in envelopes is
+  sometimes worth obeying.
+
+And the inverse leak was closed: `browser_act`'s `ok …` acknowledgements and
+error prose used to sit *inside* the envelope — Aperture impersonating page
+content. `bench/live.mjs` now asserts both directions on every site: an
+`<untrusted-page-content id=[0-9a-f]{8} ` opener in every `browser_tabs list`
+and `browser_act` response, and the `^ok ` line strictly before the envelope
+opener in act responses.
+
+`bench/fidelity.mjs` needed no change, verified rather than assumed:
+`stepFailure`'s `^ok` / `^page #` / `^FULL SNAPSHOT #` probes are `m`-anchored
+and all three still start their own lines; `applyObservation`'s element-line
+regex requires `\w` first so both tag lines are ignored; `truthFrom`'s
+`/^FULL SNAPSHOT #/m` still matches on line 2 of a snapshot response.

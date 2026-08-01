@@ -360,8 +360,14 @@ one-time passcode, and invisible text in screenshots steering a vision model.
 This is not patchable at the model layer.
 
 Aperture's response is structural: **every tool result carrying page text is
-wrapped in an `<untrusted-page-content>` envelope** that states the boundary at
-the point of consumption. The snapshot format reinforces it — all page-authored
+wrapped in an `<untrusted-page-content>` envelope** whose delimiters carry a
+fresh per-call random nonce that is stripped from the body — so the closing tag
+cannot occur inside the content no matter what the page writes, by construction
+rather than by the nonce staying secret. What the envelope *means* is stated in
+the tool descriptions, not repeated in every response: clients re-send tool
+descriptions on every request, so that explanation survives context compaction.
+Harness speech never appears inside an envelope, and page bytes never appear
+outside one. The snapshot format reinforces it — all page-authored
 text is quoted and control/bidi characters are stripped, so a page cannot emit
 text that parses as snapshot structure or forge a `FULL SNAPSHOT` header.
 

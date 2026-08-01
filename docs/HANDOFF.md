@@ -2,7 +2,7 @@
 
 ## Current state — all benchmarks green, and this time the green is guarded
 
-187 tests pass. The browser runs, the MCP server works, `browser_act` closes
+200 tests pass. The browser runs, the MCP server works, `browser_act` closes
 the act-observe loop, and Claude Code can drive it end to end.
 
 ```
@@ -130,9 +130,19 @@ must round-trip, a clicked checkbox must read `checked`.
 1. **Task-success benchmark** — diff mode vs re-dump mode over a fixed task
    set, scoring completion **and wrong-element actions**. Everything else on
    this list is smaller than this.
-2. **Shorten the `<untrusted-page-content>` envelope on continuation
-   responses** — ~109 tokens against ~15-token payloads; caps small-page
-   ratio at 2.2×.
+2. ~~**Shorten the `<untrusted-page-content>` envelope on continuation
+   responses**~~ — **DONE 2026-07-31.** Landed as one *uniform* minimal
+   envelope rather than a first/continuation pair: the explanation moved into
+   the tool descriptions, which the client re-sends every request and which
+   therefore survive compaction, where a "have I explained this yet" flag on
+   the server would be wrong after compaction, after a reconnect, and with two
+   clients. Overhead 420 → 104 chars, **79 tokens saved per response**;
+   `form` 1,997 → 891 (−1,106), all four scenarios still GREEN and the saving
+   reconciles to the byte. The audit also found two paths carrying page text
+   **entirely unwrapped** — `browser_tabs list` and `browser_fill_form`'s plan
+   — and the inverse leak, `browser_act` putting its own `ok …` and error
+   prose *inside* the envelope. See `bench/RESULTS.md` and the four invariants
+   in `docs/design/security.md`.
 3. **`select` action** for browser_act, then restore `option` to the
    addressable set.
 4. **Vault fill path** — unblocked since the consent dialog exists.

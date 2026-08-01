@@ -41,6 +41,83 @@ not by review discipline.
 | `google.com.evil.com`, `paypaI.com` | Registrable-domain comparison in punycode; confusable check at record creation |
 | Exfiltrate via the page's own `fetch()` | **Not preventable and not in scope** — that origin already has the credential |
 
+## The untrusted-content envelope: four invariants (2026-07-31)
+
+Every tool result carrying page-derived text is wrapped by `src/mcp/envelope.ts`:
+
+```
+<untrusted-page-content id=9f3a1c58 origin=https://news.ycombinator.com>
+{body}
+</untrusted-page-content id=9f3a1c58>
+```
+
+**1. The true closing delimiter cannot occur in the body, by construction.**
+The delimiter contains the nonce; the nonce is stripped from the body before
+wrapping. This does not depend on the nonce being secret — hand an attacker the
+nonce and the literal closer he writes still comes out as
+`</untrusted-page-content id=>`. The stripping is case-**insensitive** on
+purpose: a forged `ID=9F3A1C58` is not byte-equal to the real closer, so a
+byte-exact strip would leave it in the body where a model doing fuzzy matching
+may well accept it as the end of the block. `test/envelope.test.ts` asserts this
+against a known nonce and as a property over thousands of adversarial bodies.
+
+**2. The nonce is per-call, 32-bit, CSPRNG** — `crypto.randomBytes(4)`, never
+`Math.random`, never derived from content, clock, or counter. Two consequences.
+The strip cannot be aimed as an edit gadget: an attacker cannot get chosen text
+deleted from a body because he cannot predict what will be deleted. And no
+response teaches him anything about the next one. Per-call costs nothing over
+per-session — the nonce prints in both tags either way, so its *lifetime* has no
+token cost. Its *length* was the cost lever, and that is why it is 8 hex and not
+32.
+
+**3. The envelope's meaning lives in the tool descriptions, not in the
+transcript.** There is one uniform envelope form — no verbose-first,
+terse-after variant. The explanation is `ENVELOPE_LEGEND` (in
+`browser_snapshot`'s description) and `ENVELOPE_POINTER` (on every other
+page-bearing tool). Tool descriptions are re-sent by the client on **every** API
+request, so compaction can delete every envelope the agent has ever seen and the
+rule is still there. Contrast the snapshot system, which genuinely needs its
+in-band `FULL SNAPSHOT` reset header because snapshot state lives *in the
+transcript* and compaction can destroy the base a diff refers to. A
+verbose-first scheme would need server-side "have I explained this yet?" state,
+and that state is wrong after compaction, wrong after a reconnect, and wrong
+whenever two clients share one Aperture.
+
+**4. Harness speech never inside an envelope; page bytes never outside one.**
+The second half is the subtler one, and it was violated: `browser_act` wrapped
+its own `ok …` acknowledgements and error prose *inside* the envelope —
+Aperture impersonating page content, the exact confusion the envelope exists to
+prevent, inverted. Teaching an agent that instruction-shaped text inside an
+envelope is sometimes legitimate makes the envelope worthless. Acknowledgements,
+errors, and next-step instructions are now outside; only rendered page
+representation (including the `page #…` / `FULL SNAPSHOT #…` headers, which are
+Aperture's framing *of* page content) is inside. The same reasoning keeps
+`browser_fill_form`'s "Ask the human… then call apply" outside the block while
+the page-authored field labels go in.
+
+Two named residuals, stated rather than papered over:
+
+- **`quote()`-capped obstructor ids.** `browser_act`'s obstruction error
+  interpolates `r.obstructor` — built from the obstructing element's own
+  `tagName` and `id`, so page-authored — into harness prose that deliberately
+  sits outside the envelope. `quote()` is the cap: it strips control and bidi
+  characters, collapses newlines, truncates, and escapes the delimiters, so the
+  worst a page achieves is a strange quoted string inside a sentence that is
+  visibly Aperture's.
+- **Preload reason strings are NOT all literals — checked, and the design's
+  assumption was wrong.** `src/preload/page.ts` has seven `reason:` sites. Three
+  are fixed vocabulary (`gone`, `not-visible`); **four interpolate
+  `err.message`** (lines 42, 95, 162, 193). Of these, the walk failure lands
+  *inside* the envelope (engine.ts renders it as the observation) and is
+  therefore harmless; the resolve, read, and fill failures land *outside* it, in
+  `browser_act`, `browser_read`, and `browser_fill_form` error prose. Those
+  messages come from native DOM calls made in an **isolated world**, whose
+  builtins and prototypes the page cannot monkeypatch and whose element wrappers
+  do not expose page-defined accessors — so the page cannot currently choose the
+  string. That is a property of Chromium's world isolation, not a construction
+  like invariant 1, and it is the weaker of the two guarantees. Narrowing these
+  to a fixed vocabulary is the honest fix and is not done.
+
 ## Why origin mismatch has no override
 
 The agent is precisely the component we have declared manipulable. A `force`

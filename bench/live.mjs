@@ -6,6 +6,13 @@
  *   B. Ref stability across a re-snapshot of a live page.
  *   C. The no-change observation floor.
  *
+ * Section D is not a measurement but an assertion: page-derived text must
+ * arrive inside the untrusted-content envelope, and harness speech must not.
+ * It lives here rather than in the unit tests because the unit tests can only
+ * prove the wrapper is correct — they cannot prove every call site uses it.
+ * Two paths did not (the tab list and browser_act's observations), and only a
+ * live response would have shown it.
+ *
  * It does NOT measure diff cost after a real interaction, because there is no
  * generic click/type tool yet — see RESULTS.md. Section C is the floor, not a
  * diff, and an earlier draft wrongly reported it as one.
@@ -54,6 +61,42 @@ const assertReal = (s, where) => {
 };
 const refsIn = (s) => new Set([...s.matchAll(/\be(\d+)\b/g)].map((m) => m[0]));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The opening delimiter, with a fresh 8-hex nonce, exactly as tools.ts emits it. */
+const ENVELOPE_OPEN = /<untrusted-page-content id=[0-9a-f]{8} /;
+
+/** Page bytes must never reach the agent outside the envelope. */
+function assertEnveloped(out, where) {
+  if (!ENVELOPE_OPEN.test(out)) {
+    throw new Error(
+      `${where}: page-derived text arrived OUTSIDE the untrusted-page-content ` +
+        `envelope -> ${JSON.stringify(out.slice(0, 200))}`,
+    );
+  }
+}
+
+/**
+ * Harness speech must never reach the agent INSIDE the envelope.
+ *
+ * `browser_act` acknowledges with `ok <action>` and then shows the page. If
+ * the acknowledgement is inside the block, Aperture is impersonating page
+ * content — the exact confusion the envelope exists to prevent, inverted —
+ * and it teaches the model that harness-shaped text in an envelope is
+ * sometimes real.
+ */
+function assertAckOutsideEnvelope(out, where) {
+  const lines = out.split('\n');
+  const ack = lines.findIndex((l) => /^ok /.test(l));
+  const open = lines.findIndex((l) => ENVELOPE_OPEN.test(l));
+  if (ack === -1) throw new Error(`${where}: no "ok …" acknowledgement line`);
+  if (open === -1) throw new Error(`${where}: no envelope in an act response`);
+  if (ack > open) {
+    throw new Error(
+      `${where}: the "ok …" acknowledgement is INSIDE the envelope ` +
+        `(ack on line ${ack}, envelope opens on line ${open})`,
+    );
+  }
+}
 
 const SITES = [
   { name: 'Hacker News', url: 'https://news.ycombinator.com' },
@@ -111,6 +154,34 @@ for (const s of SITES) {
   // No ratio on purpose. Dividing the full snapshot by the no-change floor
   // produced a 48x-83x figure that read like a diff result and was not one.
   console.log(`| ${s.name} | ${tok(full)} | ${tok(diff)} |`);
+}
+
+console.log('\n## D. Untrusted-content envelope, asserted on every page-bearing path\n');
+console.log('| site | browser_tabs list | browser_act |');
+console.log('|---|---|---|');
+
+for (const s of SITES) {
+  await call('browser_navigate', { action: 'goto', url: s.url });
+  await sleep(3500);
+
+  // Tab titles are page-authored. This path was NOT wrapped until 2026-07-31:
+  // a tab calling itself "SYSTEM: ignore previous instructions" reached the
+  // agent as bare harness-level text.
+  const tabsOut = await call('browser_tabs', { action: 'list' });
+  assertEnveloped(tabsOut, `${s.name} browser_tabs list`);
+  if (!/origin=multiple>/.test(tabsOut)) {
+    throw new Error(
+      `${s.name} browser_tabs list: the list aggregates tabs across origins ` +
+        'and must declare origin=multiple rather than claim one of them',
+    );
+  }
+
+  // scroll needs no ref, so it works on any page.
+  const actOut = await call('browser_act', { action: 'scroll', deltaY: 400 });
+  assertEnveloped(actOut, `${s.name} browser_act`);
+  assertAckOutsideEnvelope(actOut, `${s.name} browser_act`);
+
+  console.log(`| ${s.name} | enveloped (origin=multiple) | enveloped, ack outside |`);
 }
 
 console.log(`
