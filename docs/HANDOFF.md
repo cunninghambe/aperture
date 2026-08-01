@@ -80,6 +80,48 @@ npm run bench:task -- --tasks cart-adjust --n 2 # a pilot
 npm run bench:task                              # the full preregistered suite
 ```
 
+### Running the scored suite in phases
+
+400 episodes is six-odd hours, so it is resumable. Every scored episode is
+appended to `bench/task/results/episodes.jsonl` (gitignored) as it completes,
+keyed by `(task, arm, runIndex, codeVersion, model)`; a later invocation skips
+what is already on record and runs only the rest. The verdict is always
+computed over the WHOLE accumulated store — the phases are how episodes get
+gathered, not how they get scored, because five partial runs that each score
+their own rows give five underpowered verdicts and no result.
+
+```bash
+npm run bench:task -- --plan     # a concrete phase plan, waves of N. Starts nothing.
+npm run bench:task -- --n 5      # phase: 100 episodes
+npm run bench:task -- --n 20     # phase: only the missing 300
+npm run bench:task -- --report   # the pooled verdict. Runs no episodes, needs no port.
+```
+
+**The integrity guard is the part that matters.** Accumulating across sessions
+is valid only if the thing under test did not change between them, so every
+episode is stamped with a content hash of the product source, the built
+artifacts in `out/`, every fixture, the task definitions, the arm-forcing rule,
+the prompt and the verdict thresholds — content hashes, not the git SHA, so an
+uncommitted edit moves them. If the store holds episodes that disagree with the
+current tree, the run **refuses to aggregate (exit 6)**, names the field and the
+files that moved, and says how many episodes are affected. It refuses *before*
+starting Aperture, so a mid-cohort edit costs nothing to discover.
+
+There is deliberately no override. `--new-cohort` archives the old store under a
+timestamp and starts a fresh one; nothing is discarded and nothing is pooled
+across versions. `bench/task/results/episodes.cohort.json` records the file
+table the episodes on record were produced from, which is what makes the
+refusal a diagnosis rather than a hash mismatch.
+
+Every phase also prints an advisory: running tallies per arm, per-task coverage,
+and a plain statement of what the current sample can support (at N=5/task only a
+~19pp drop is distinguishable from the ±5pp margin; PARITY is not reachable
+until roughly the full preregistered sample). If a catastrophic regression is
+already unambiguous — success-delta CI entirely below −25pp — it says so loudly,
+so nobody burns six more hours confirming a disaster. **None of it changes the
+verdict rule**: PARITY/REGRESSION/INCONCLUSIVE are computed exactly as
+preregistered, over whatever is on record.
+
 Others: `npm run bench` (synthetic diff model), `npm run bench:live`
 (real-site sizes and ref stability). Results in `bench/RESULTS.md`.
 

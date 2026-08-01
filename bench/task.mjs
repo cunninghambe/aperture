@@ -38,27 +38,63 @@
  * - `browser_read` is withheld. innerText re-reads would let the agent route
  *   around diff bookkeeping and dilute the variable under test.
  *
+ * RUNNING IT IN PHASES
+ *
+ * 400 episodes is six-odd hours, so the suite is resumable. Every scored
+ * episode is appended to `bench/task/results/episodes.jsonl` as it completes,
+ * keyed by (task, arm, runIndex, codeVersion, model); a later invocation skips
+ * every combination already on record and runs only what is missing. The
+ * verdict is computed over the WHOLE accumulated store, not over one phase —
+ * five partial runs that each score their own rows give five underpowered
+ * verdicts and no result.
+ *
+ * That is only sound if the thing under test did not change between phases, so
+ * every episode is stamped with a content hash of the product source, the built
+ * artifacts, the fixtures, the task definitions, the arm-forcing rule, the
+ * prompts and the verdict thresholds. A run that finds a stamp it does not
+ * recognise REFUSES to aggregate (exit 6) and names what moved. There is no
+ * override; `--new-cohort` archives the old store and starts a fresh one.
+ *
  * USAGE
+ *   npm run bench:task -- --plan              what to run, in what order. No infra.
  *   npm run bench:task -- --selftest          G1+G2 only. Spends NO API budget.
  *   npm run bench:task -- --tasks a,b --n 2   a small scored pilot
- *   npm run bench:task                        the full preregistered suite
+ *   npm run bench:task -- --n 5               phase 1: 5 runs of every task
+ *   npm run bench:task -- --n 20              phase 2: only the missing 15
+ *   npm run bench:task -- --report            score the store, run nothing
+ *   npm run bench:task -- --new-cohort --n 5  archive the store, start again
  *
  * EXIT CODES — nonzero must never be read as "roughly green"
  *   0 PARITY · 1 REGRESSION · 2 INCONCLUSIVE · 3 INFRA · 4 VACUOUS · 5 SELFTEST
+ *   6 INTEGRITY — the store holds episodes from a different experiment
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { TASKS, FIXTURES, taskById } from './tasks.mjs';
 import { startCollector, settle, COLLECTOR_PORT } from './lib/collector.mjs';
-import { startProxy, PROXY_PORT } from './lib/proxy.mjs';
-import { propDiffCI, meanDiffCI, wilson, smallestDetectableDrop, fmtPct, fmtSigned } from './lib/stats.mjs';
+import { startProxy, PROXY_PORT, ARM_DEFINITION } from './lib/proxy.mjs';
+import { propDiffCI, meanDiffCI, mean, wilson, smallestDetectableDrop, fmtPct, fmtSigned } from './lib/stats.mjs';
+import {
+  SUITE_VERSION,
+  appendEpisode,
+  archiveStore,
+  buildIdentity,
+  checkIntegrity,
+  cohortPathFor,
+  defaultStorePath,
+  episodeKey,
+  loadCohort,
+  loadStore,
+  stampEpisode,
+  writeCohort,
+} from './lib/store.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const FIXTURE_DIR = join(ROOT, 'bench', 'fixtures');
@@ -66,13 +102,41 @@ const FIXTURE_PORT = 8899;
 const APERTURE_PORT = 8817;
 const BASE = `http://127.0.0.1:${FIXTURE_PORT}`;
 
-export const EXIT = { PARITY: 0, REGRESSION: 1, INCONCLUSIVE: 2, INFRA: 3, VACUOUS: 4, SELFTEST: 5 };
+export const EXIT = {
+  PARITY: 0,
+  REGRESSION: 1,
+  INCONCLUSIVE: 2,
+  INFRA: 3,
+  VACUOUS: 4,
+  SELFTEST: 5,
+  INTEGRITY: 6,
+};
 
 // The verdict rule, written down before the first scored run and not touched
 // since. Both must hold for PARITY.
 const PARITY_SUCCESS_MARGIN = -0.05; // success-delta CI lower bound >= this
 const PARITY_WRONG_MARGIN = 0.2; // wrong-element-delta CI upper bound <= this
 const N_FLOOR = 5;
+const N_PREREGISTERED = 20; // per task, per arm
+
+/**
+ * Stamped onto every episode and compared on resume. The thresholds are the
+ * verdict; an episode scored under different ones is not poolable with these,
+ * and this is the field that says so out loud.
+ */
+const VERDICT_RULE = {
+  successMargin: PARITY_SUCCESS_MARGIN,
+  wrongMargin: PARITY_WRONG_MARGIN,
+  nFloor: N_FLOOR,
+};
+
+// The pilot's measured per-episode figures, used only to estimate how long a
+// phase will take before there is enough of a store to measure it from.
+const PILOT_USD_PER_EPISODE = 0.0925;
+const PILOT_SEC_PER_EPISODE = 20;
+
+/** A catastrophe is worth saying out loud early. It changes NO verdict. */
+const CATASTROPHE_THRESHOLD = -0.25;
 
 const SYSTEM_PROMPT = [
   'You are operating a web browser to complete a task for a user.',
@@ -97,8 +161,9 @@ const SYSTEM_PROMPT = [
 
 function parseArgs(argv) {
   const out = {
-    selftest: false, n: 20, tasks: null, arms: ['diff', 'redump'],
+    selftest: false, n: N_PREREGISTERED, tasks: null, arms: ['diff', 'redump'],
     model: 'claude-sonnet-5', keepAlive: false, verbose: false,
+    report: false, plan: false, newCohort: false, store: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -109,8 +174,23 @@ function parseArgs(argv) {
     else if (a === '--model') out.model = argv[++i];
     else if (a === '--keep-alive') out.keepAlive = true;
     else if (a === '--verbose') out.verbose = true;
+    else if (a === '--report') out.report = true;
+    else if (a === '--plan') out.plan = true;
+    else if (a === '--new-cohort') out.newCohort = true;
+    else if (a === '--store') out.store = resolve(argv[++i]);
     else if (a.startsWith('--')) throw new Error(`unknown flag: ${a}`);
   }
+  if (out.report && out.selftest) throw new Error('--report and --selftest do nothing together');
+  if (out.report && out.plan) throw new Error('--report and --plan do nothing together');
+  // Scoping the report would be cherry-picking: the pooled verdict is over the
+  // whole cohort or it is not the preregistered verdict. Refused rather than
+  // supported-with-a-caveat, because caveats get screenshotted off.
+  if (out.report && out.tasks) {
+    throw new Error(
+      '--report scores the whole store — that is the point of it. Drop --tasks.',
+    );
+  }
+  if (!Number.isInteger(out.n) || out.n < 1) throw new Error(`--n must be a positive integer, got ${out.n}`);
   return out;
 }
 
@@ -273,7 +353,7 @@ async function navigate(proxy, fixture) {
 }
 
 /** One episode: navigate, run a driver, then judge from the witness alone. */
-async function runEpisode({ proxy, collector, task, arm, driver, index }) {
+async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
   collector.reset();
   const ep = proxy.newEpisode({ arm, maxSteps: task.maxSteps, allowed: task.allowed, taskId: task.id });
   await navigate(proxy, task.fixture);
@@ -308,7 +388,10 @@ async function runEpisode({ proxy, collector, task, arm, driver, index }) {
   return {
     task: task.id,
     arm,
-    index,
+    // Half of the resume key. An episode is identified by which repetition it
+    // is, so a phase that asks for N=20 can tell runs 0-4 (already on record)
+    // from runs 5-19 (not yet).
+    runIndex,
     loaded,
     success,
     wrongElement,
@@ -464,7 +547,7 @@ async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
     byTask[task.id] = {};
     for (const arm of arms) {
       const r = await runEpisode({
-        proxy, collector, task, arm, index: 0, driver: scriptedDriver(proxy, task),
+        proxy, collector, task, arm, runIndex: 0, driver: scriptedDriver(proxy, task),
       });
       byTask[task.id][arm] = r;
       if (r.driverError) {
@@ -592,19 +675,448 @@ function bail(code, title, lines) {
 }
 
 // ---------------------------------------------------------------------------
+// Phases — the plan, the resume arithmetic, and the progress advisory
+// ---------------------------------------------------------------------------
+
+const rel = (p) => {
+  const r = relative(ROOT, p).replace(/\\/g, '/');
+  return r.startsWith('..') ? p.replace(/\\/g, '/') : r;
+};
+
+function fmtDuration(sec) {
+  if (sec < 90) return `${Math.round(sec)}s`;
+  const m = Math.round(sec / 60);
+  if (m < 90) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * What one episode costs, measured from the store once there is enough of it to
+ * measure from and taken from the pilot before that. An estimate that says
+ * where it came from is one a human can discount correctly.
+ */
+function perEpisode(rows) {
+  const scored = rows.filter((r) => r.costUsd > 0 && r.durationMs > 0);
+  if (scored.length < 10) {
+    return { usd: PILOT_USD_PER_EPISODE, sec: PILOT_SEC_PER_EPISODE, source: 'the pilot' };
+  }
+  return {
+    usd: scored.reduce((a, r) => a + r.costUsd, 0) / scored.length,
+    sec: scored.reduce((a, r) => a + r.durationMs, 0) / scored.length / 1000,
+    source: `${scored.length} episodes on record`,
+  };
+}
+
+/**
+ * The episode list a phase is asking for, WAVE-MAJOR: run 3 of every task
+ * before run 4 of any.
+ *
+ * The order is the whole point. A phase that dies halfway through — a laptop
+ * sleeping, a rate limit, a Ctrl-C — leaves even coverage across the task set
+ * rather than four finished tasks and six untouched ones, and the per-task
+ * table stays comparable at every point on the way up.
+ */
+function targetsFor(tasks, arms, n) {
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    for (const task of tasks) for (const arm of arms) out.push({ task, arm, runIndex: k });
+  }
+  return out;
+}
+
+function splitByStore(targets, storedKeys, identity) {
+  const todo = [];
+  const done = [];
+  for (const t of targets) {
+    const key = episodeKey({
+      task: t.task.id,
+      arm: t.arm,
+      runIndex: t.runIndex,
+      codeVersion: identity.codeVersion,
+      model: identity.model,
+    });
+    (storedKeys.has(key) ? done : todo).push(t);
+  }
+  return { todo, done };
+}
+
+const WAVES = [1, 5, 10, 15, N_PREREGISTERED];
+
+function printPlan({ rows, storePath, identity, opts }) {
+  const est = perEpisode(rows);
+  const perWave = TASKS.length * 2;
+  const total = perWave * N_PREREGISTERED;
+
+  console.log('='.repeat(72));
+  console.log('SUGGESTED PHASE PLAN');
+  console.log('='.repeat(72));
+  console.log(
+    `\nThe full preregistered suite is ${TASKS.length} tasks x 2 arms x N=${N_PREREGISTERED} = ${total} episodes,\n` +
+      `about ${fmtDuration((total * est.sec)).padEnd(1)} and $${(total * est.usd).toFixed(2)} at ${est.sec.toFixed(0)}s and $${est.usd.toFixed(4)} per episode (from ${est.source}).`,
+  );
+
+  console.log('\nSplit it by N in waves, not by task:');
+  console.log('  A partial run across ALL ten tasks is far more informative than a complete');
+  console.log('  run of two. Ten tasks at N=5 already shows you which tasks separate the arms');
+  console.log('  and whether the whole thing is heading for the G10 ceiling; two tasks at N=20');
+  console.log('  tells you a great deal about two tasks. The runner iterates wave-major for');
+  console.log('  the same reason, so an interrupted phase also leaves even coverage.');
+
+  const row = (phase, cmd, add, cum, sec, usd) =>
+    console.log(
+      `  ${phase.padEnd(7)} ${cmd.padEnd(38)} ${String(add).padStart(5)} ${String(cum).padStart(6)} ` +
+        `${fmtDuration(sec).padStart(8)} ${('$' + usd.toFixed(2)).padStart(8)}`,
+    );
+  console.log('');
+  console.log(`  ${'phase'.padEnd(7)} ${'command'.padEnd(38)} ${'new'.padStart(5)} ${'total'.padStart(6)} ${'time'.padStart(8)} ${'cost'.padStart(8)}`);
+  console.log('  ' + '-'.repeat(76));
+  let prev = 0;
+  WAVES.forEach((n, i) => {
+    const cum = perWave * n;
+    const add = cum - prev;
+    prev = cum;
+    row(String(i + 1), `npm run bench:task -- --n ${n}`, add, cum, add * est.sec, add * est.usd);
+  });
+  row('final', 'npm run bench:task -- --report', 0, prev, 0, 0);
+
+  console.log('\nEach phase is idempotent: it runs only what the store is missing, so re-running');
+  console.log('one costs nothing, and an interrupted one resumes exactly where it stopped.');
+  console.log('The verdict is computed over the whole accumulated store every time — the');
+  console.log('phases are how the episodes are gathered, not how they are scored.');
+
+  console.log('\nBefore any of it, and it spends nothing:');
+  console.log('  npm run bench:task -- --selftest');
+  console.log('\nIf the engine, a fixture, a prompt or the arm rule changes part-way through,');
+  console.log('the next phase will refuse to pool (exit 6) rather than average two systems.');
+  console.log('Starting over after a deliberate change:');
+  console.log('  npm run bench:task -- --new-cohort --n 1');
+
+  console.log(`\nStore: ${rel(storePath)}`);
+  if (!rows.length) {
+    console.log('  empty — nothing has been run yet.');
+  } else {
+    const matching = rows.filter(
+      (r) => r.codeVersion === identity.codeVersion && r.model === identity.model,
+    ).length;
+    console.log(`  ${rows.length} episode(s) on record, ${matching} of them under the current codeVersion.`);
+    const present = new Set(rows.map((r) => r.task));
+    const perTaskArm = {};
+    for (const r of rows) perTaskArm[`${r.task}|${r.arm}`] = (perTaskArm[`${r.task}|${r.arm}`] ?? 0) + 1;
+    const minRuns = Math.min(...TASKS.map((t) => Math.min(perTaskArm[`${t.id}|diff`] ?? 0, perTaskArm[`${t.id}|redump`] ?? 0)));
+    console.log(`  ${present.size}/${TASKS.length} tasks touched; every task has at least ${minRuns} run(s) in both arms.`);
+    const nextWave = WAVES.find((n) => n > minRuns);
+    if (nextWave) console.log(`  Next suggested phase: npm run bench:task -- --n ${nextWave}`);
+    else console.log('  The preregistered sample is complete. Next: npm run bench:task -- --report');
+  }
+  if (opts.tasks) {
+    console.log(`\n(--tasks was given; the plan above is for the full suite regardless, because a`);
+    console.log(' verdict over a subset is not the preregistered verdict.)');
+  }
+  return 0;
+}
+
+/**
+ * The smallest per-arm sample at which the success interval would clear the
+ * parity margin, IF the observed rates held. Advice about how much further
+ * there is to go, not a stopping rule.
+ *
+ * Returns null for "not inside the cap", which is NOT the same as "never" — a
+ * true delta of −4.0pp against a −5.0pp margin needs an interval half-width
+ * under 1pp and so needs thousands of episodes per arm. Reporting that as
+ * "impossible" would be a different claim from the true one, so the caller
+ * distinguishes the two.
+ */
+const PARITY_SEARCH_CAP = 5000;
+
+function parityReachableAt(pd, pu, cap = PARITY_SEARCH_CAP) {
+  for (let n = 5; n <= cap; n += 5) {
+    if (propDiffCI(Math.round(pd * n), n, Math.round(pu * n), n).lo >= PARITY_SUCCESS_MARGIN) return n;
+  }
+  return null;
+}
+
+/**
+ * Printed after every phase. Two jobs: say where the sample is, and say plainly
+ * what it can and cannot support yet — because "5/5 in both arms" reads like a
+ * result to everyone who has not thought about the interval.
+ *
+ * It is ADVISORY. It computes nothing the verdict uses and changes no
+ * threshold. The PARITY/REGRESSION/INCONCLUSIVE rule below runs exactly as it
+ * did before this block existed.
+ */
+function progressAdvisory(allRows, phaseRows, opts) {
+  const diff = summarise(allRows, 'diff');
+  const redump = summarise(allRows, 'redump');
+  const present = [...new Set(allRows.map((r) => r.task))];
+
+  console.log('\n' + '='.repeat(72));
+  console.log('PROGRESS — advisory. Nothing in this block changes the verdict rule.');
+  console.log('='.repeat(72));
+
+  if (phaseRows && phaseRows.length) {
+    const pd = summarise(phaseRows, 'diff');
+    const pu = summarise(phaseRows, 'redump');
+    console.log(
+      `\nthis phase : ${phaseRows.length} episode(s) · diff ${pd.successes}/${pd.n} · ` +
+        `re-dump ${pu.successes}/${pu.n} · $${(pd.cost + pu.cost).toFixed(4)}`,
+    );
+  }
+
+  const line = (name, s) =>
+    `  ${name.padEnd(8)} ${String(s.successes).padStart(4)}/${String(s.n).padEnd(5)} success ${fmtPct(s.n ? s.successes / s.n : 0).padStart(6)}   ` +
+    `${mean(s.wrong).toFixed(3)} wrong-el/run   $${s.cost.toFixed(2)}`;
+  console.log('\non record, pooled across every phase:');
+  console.log(line('diff', diff));
+  console.log(line('re-dump', redump));
+  console.log(
+    `  ${present.length}/${TASKS.length} tasks touched · ` +
+      `${(diff.n / Math.max(1, present.length)).toFixed(1)} runs per task per arm`,
+  );
+
+  console.log('\ncoverage (runs on record, diff / re-dump, target N per task per arm):');
+  for (const t of TASKS) {
+    const d = allRows.filter((r) => r.task === t.id && r.arm === 'diff').length;
+    const u = allRows.filter((r) => r.task === t.id && r.arm === 'redump').length;
+    const bar = '#'.repeat(Math.min(N_PREREGISTERED, Math.min(d, u))).padEnd(N_PREREGISTERED, '.');
+    console.log(`  ${t.id.padEnd(20)} ${String(d).padStart(3)} / ${String(u).padEnd(3)}  ${bar}`);
+  }
+
+  const sD = wilson(diff.successes, diff.n);
+  const sU = wilson(redump.successes, redump.n);
+  const perTask = diff.n / Math.max(1, present.length);
+
+  console.log('\nCan this sample support a verdict yet?');
+  if (diff.n < N_FLOOR || redump.n < N_FLOOR) {
+    console.log(
+      `  No. ${diff.n}/${redump.n} episodes per arm is below the hard floor of ${N_FLOOR} (G8). This exercises`,
+    );
+    console.log('  the loop; it is not a measurement, and the run will exit INCONCLUSIVE.');
+  } else {
+    const mde = smallestDetectableDrop(diff.n, redump.n, sU.p, PARITY_SUCCESS_MARGIN);
+    console.log(
+      `  At ${diff.n}/${redump.n} episodes per arm — about N=${perTask.toFixed(1)}/task/arm over ${present.length}/${TASKS.length} tasks —`,
+    );
+    console.log(
+      `  and an observed re-dump rate of ${fmtPct(sU.p)}, the smallest true drop this sample can`,
+    );
+    console.log(
+      `  distinguish from the ${fmtSigned(PARITY_SUCCESS_MARGIN)} parity margin is about ${fmtPct(mde)}. Anything smaller than`,
+    );
+    console.log('  that is inside the noise, however clean the percentages look.');
+    const need = parityReachableAt(sD.p, sU.p);
+    const gap = sD.p - sU.p;
+    if (gap <= PARITY_SUCCESS_MARGIN) {
+      console.log(
+        `  The observed delta itself, ${fmtSigned(gap)}, is already at or past the ${fmtSigned(PARITY_SUCCESS_MARGIN)} margin. At`,
+      );
+      console.log('  these rates no sample size produces PARITY; more episodes buy precision about');
+      console.log('  a gap, not a pass.');
+    } else if (need === null) {
+      console.log(
+        `  The observed gap of ${fmtSigned(gap)} sits close enough to the ${fmtSigned(PARITY_SUCCESS_MARGIN)} margin that the interval`,
+      );
+      console.log(
+        `  would not fit inside it within ${PARITY_SEARCH_CAP} episodes per arm at these rates. Reaching`,
+      );
+      console.log('  PARITY here is not a matter of finishing the planned phases.');
+    } else if (need > diff.n) {
+      console.log(
+        `  If these rates hold, the success interval would clear the margin at about ${need}`,
+      );
+      console.log(`  episodes per arm. You have ${diff.n}.`);
+    } else {
+      console.log('  The success interval already clears the parity margin at this sample size.');
+    }
+  }
+  console.log(
+    `  The preregistered design is N=${N_PREREGISTERED}/task/arm over all ${TASKS.length} tasks = ` +
+      `${TASKS.length * N_PREREGISTERED} episodes per arm.`,
+  );
+
+  // Early stopping, stated as advice and nothing else. If the diff arm has
+  // already fallen off a cliff, six more hours buys a tighter interval around a
+  // disaster that is already unambiguous.
+  if (diff.n >= N_FLOOR && redump.n >= N_FLOOR) {
+    const sCI = propDiffCI(diff.successes, diff.n, redump.successes, redump.n);
+    if (sCI.hi < CATASTROPHE_THRESHOLD) {
+      console.log('\n' + '!'.repeat(72));
+      console.log('! CATASTROPHIC REGRESSION IS ALREADY UNAMBIGUOUS AT THIS SAMPLE SIZE.');
+      console.log('!'.repeat(72));
+      console.log(
+        `  success delta ${fmtSigned(sCI.delta)}, 95% CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}] — the ENTIRE interval is`,
+      );
+      console.log(
+        `  below ${fmtSigned(CATASTROPHE_THRESHOLD)}. More episodes will tighten that interval, not move it.`,
+      );
+      console.log('  Finishing the remaining phases would spend hours and dollars confirming a');
+      console.log('  result you already have. Stopping here is a legitimate choice.');
+      console.log('');
+      console.log('  This is ADVICE ONLY. The verdict printed below is still computed by the');
+      console.log('  preregistered rule over whatever is on record, unchanged.');
+    }
+  }
+}
+
+function bailIntegrity(integrity, storePath) {
+  console.log('\n' + '='.repeat(72));
+  console.log('INTEGRITY GUARD — REFUSING TO POOL THESE EPISODES');
+  console.log('='.repeat(72));
+  console.log('\nThe store holds episodes produced under a different experiment from the one');
+  console.log('this invocation describes. Pooling them would average two systems into a single');
+  console.log('number with a tight interval that looks exactly like a result and is not one.');
+  for (const b of integrity.blocks) {
+    console.log(`\n  ${b.title}`);
+    for (const l of b.lines) console.log(l);
+  }
+  console.log('\nNothing has been run, nothing has been changed, and nothing has been discarded.');
+  console.log('\nWhat to do, in order of preference:');
+  console.log('  1. Put the code back the way it was and run again.');
+  console.log(`     ${rel(cohortPathFor(storePath))}`);
+  console.log('     records the exact file table the episodes on record were produced from.');
+  console.log('  2. If the change is meant to stand, start a fresh cohort:');
+  console.log('       npm run bench:task -- --new-cohort --n <N>');
+  console.log(`     which renames ${rel(storePath)} with a timestamp — the old`);
+  console.log('     episodes are kept, they just stop being pooled with the new ones.');
+  console.log('\nThere is deliberately no flag that pools them anyway.');
+  console.log(`\nRESULT: INTEGRITY (exit ${EXIT.INTEGRITY})`);
+  return EXIT.INTEGRITY;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const tasks = opts.tasks ? opts.tasks.map(taskById) : TASKS;
+  const storePath = opts.store ?? defaultStorePath(ROOT);
+
+  // Computed before anything is started, because it is what decides whether
+  // this invocation may touch the store at all.
+  const identity = buildIdentity({
+    root: ROOT,
+    model: opts.model,
+    systemPrompt: SYSTEM_PROMPT,
+    tasks: TASKS,
+    verdictRule: VERDICT_RULE,
+  });
+
+  const mode = opts.plan
+    ? 'PLAN (prints the phase plan, starts nothing)'
+    : opts.report
+      ? 'REPORT ONLY (scores the store, runs no episodes)'
+      : opts.selftest
+        ? 'SELFTEST (G1+G2 only, no API budget)'
+        : `scored, target N=${opts.n}/task/arm, arms=${opts.arms.join('+')}`;
 
   console.log('# Task-success benchmark — diffs vs full re-dumps\n');
   console.log(`tasks   : ${tasks.length} (${tasks.map((t) => t.id).join(', ')})`);
   console.log(`fixtures: ${FIXTURES.length}`);
-  console.log(`mode    : ${opts.selftest ? 'SELFTEST (G1+G2 only, no API budget)' : `scored, N=${opts.n}/task/arm, arms=${opts.arms.join('+')}`}`);
+  console.log(`mode    : ${mode}`);
   console.log(`model   : ${opts.model}`);
-  console.log(`prompt  : sha256 ${createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 16)}\n`);
+  console.log(`prompt  : sha256 ${createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 16)}`);
+  console.log('\nidentity — stamped on every stored episode; a mismatch refuses to pool:');
+  console.log(`  suiteVersion : ${identity.suiteVersion}`);
+  console.log(`  codeVersion  : ${identity.codeVersion}   (content hash over ${identity.files.length} files: src/core/snapshot, src/mcp, src/preload, fixtures, bench libs)`);
+  console.log(`  buildVersion : ${identity.buildVersion}   (out/main, out/preload — the code that actually runs)`);
+  console.log(
+    `  git          : ${identity.gitSha ?? 'not a git tree'} · watched files ${identity.dirtyWatched ? 'DIRTY (uncommitted edits)' : 'clean'} · tree ${identity.treeDirty ? 'dirty' : 'clean'}`,
+  );
+  console.log(`  verdictRule  : ${JSON.stringify(identity.verdictRule)}`);
+  console.log('');
+
+  if (opts.plan) {
+    const { rows } = loadStore(storePath);
+    return printPlan({ rows, storePath, identity, opts });
+  }
+
+  // ---- the store, and the guard over it ---------------------------------
+  if (opts.newCohort) {
+    const moved = archiveStore(storePath);
+    if (moved.length) {
+      console.log('--new-cohort: the previous cohort has been ARCHIVED, not deleted —');
+      for (const m of moved) console.log(`  ${rel(m)}`);
+    } else {
+      console.log('--new-cohort: there was no existing store to archive.');
+    }
+    console.log('');
+  }
+
+  const { rows: stored, malformed } = loadStore(storePath);
+  const cohort = loadCohort(storePath);
+  console.log(`store   : ${rel(storePath)} — ${stored.length} episode(s) on record`);
+
+  if (opts.selftest) {
+    // Deliberately exempt: the selftest scores nothing, writes nothing, and has
+    // to stay usable precisely when the engine is mid-edit — which is exactly
+    // when the integrity guard would be firing.
+    console.log('          (--selftest neither reads nor writes the store, so the integrity');
+    console.log('           guard is not applied to it)');
+  } else {
+    const integrity = checkIntegrity({
+      rows: stored,
+      malformed,
+      cohort,
+      identity,
+      armDefinitions: ARM_DEFINITION,
+    });
+    if (!integrity.ok) return bailIntegrity(integrity, storePath);
+    if (stored.length) {
+      console.log('          integrity OK — every episode on record was produced by THIS experiment');
+    }
+  }
+  console.log('');
+
+  // ---- report only: no ports, no Aperture, no budget ---------------------
+  if (opts.report) {
+    if (!stored.length) {
+      return bail(EXIT.INCONCLUSIVE, 'THE STORE IS EMPTY — there is nothing to report.', [
+        `No episodes at ${rel(storePath)}.`,
+        'Run a phase first: npm run bench:task -- --n 1',
+      ]);
+    }
+    const present = TASKS.filter((t) => stored.some((r) => r.task === t.id));
+    progressAdvisory(stored, null, opts);
+    return report(stored, opts, present);
+  }
+
+  // ---- what this phase is actually going to run --------------------------
+  const targets = targetsFor(tasks, opts.arms, opts.n);
+  const storedKeys = new Set(stored.map(episodeKey));
+  const { todo, done } = splitByStore(targets, storedKeys, identity);
+
+  if (!opts.selftest) {
+    const est = perEpisode(stored);
+    console.log(
+      `this phase asks for ${targets.length} episode(s) — ${tasks.length} task(s) x ${opts.arms.length} arm(s) x N=${opts.n}`,
+    );
+    console.log(`  already on record, SKIPPING : ${done.length}`);
+    console.log(
+      `  to run now                  : ${todo.length}` +
+        (todo.length
+          ? `   (est. ${fmtDuration(todo.length * est.sec)}, $${(todo.length * est.usd).toFixed(2)} — from ${est.source})`
+          : ''),
+    );
+    if (todo.length) {
+      const byTask = {};
+      for (const t of todo) byTask[t.task.id] = (byTask[t.task.id] ?? 0) + 1;
+      console.log('  per task (to run / already on record, both arms):');
+      for (const t of tasks) {
+        const have = done.filter((d) => d.task.id === t.id).length;
+        console.log(`    ${t.id.padEnd(20)} ${String(byTask[t.id] ?? 0).padStart(4)} to run · ${String(have).padStart(4)} on record`);
+      }
+      console.log(`  order: wave-major — run k of every task before run k+1 of any.`);
+    }
+    console.log('');
+
+    if (todo.length === 0) {
+      console.log('NOTHING TO RUN. Every combination this phase asks for is already on record.');
+      console.log('Aperture was not started; no API budget was spent.');
+      const present = TASKS.filter((t) => stored.some((r) => r.task === t.id));
+      progressAdvisory(stored, [], opts);
+      return report(stored, opts, present);
+    }
+  }
 
   if (await portIsOpen(APERTURE_PORT)) {
     return bail(EXIT.INFRA, 'PORT 8817 IS ALREADY IN USE.', [
@@ -634,6 +1146,29 @@ async function main() {
       port: PROXY_PORT,
     });
 
+    // The exact bytes of the three tool descriptions the agent is shown. Two of
+    // them are written in the proxy (covered by codeVersion), but
+    // browser_snapshot's is FORWARDED VERBATIM from the running Aperture — so
+    // it can change without a single watched file changing, and it carries the
+    // snapshot format legend the whole experiment runs on. Checked here, which
+    // is the first moment it can be known and still before any budget is spent.
+    const toolsHash = createHash('sha256')
+      .update(proxy.toolSurfaceFingerprint())
+      .digest('hex')
+      .slice(0, 16);
+    console.log(`tool surface: sha256 ${toolsHash}\n`);
+    if (!opts.selftest) {
+      const live = checkIntegrity({
+        rows: stored,
+        malformed: [],
+        cohort,
+        identity,
+        armDefinitions: ARM_DEFINITION,
+        toolsHash,
+      });
+      if (!live.ok) return (code = bailIntegrity(live, storePath));
+    }
+
     // ---- G1 -------------------------------------------------------------
     console.log('G1 null-agent — every predicate must be FALSE on an untouched page');
     const g1 = await guardG1({ proxy, collector, tasks });
@@ -659,28 +1194,48 @@ async function main() {
     }
 
     // ---- scored run -----------------------------------------------------
-    const rows = [];
-    const total = tasks.length * opts.n * opts.arms.length;
+    //
+    // Each episode is appended to the store the moment it finishes, before the
+    // next one starts. A phase that dies at episode 197 has 196 episodes on
+    // disk and resumes from 197; buffering to the end would throw away hours to
+    // a laptop going to sleep.
+    const cohortFile = writeCohort(storePath, identity, {
+      toolsHash,
+      armDefinitions: ARM_DEFINITION,
+    });
+    console.log(`cohort   : ${rel(cohortFile)}`);
+    console.log(`writing  : ${rel(storePath)}  (one line per episode, as it completes)\n`);
+
+    const phaseRows = [];
     let i = 0;
-    for (const task of tasks) {
-      for (let k = 0; k < opts.n; k++) {
-        for (const arm of opts.arms) {
-          i++;
-          const r = await runEpisode({
-            proxy, collector, task, arm, index: k, driver: agentDriver(proxy, task, opts),
-          });
-          rows.push(r);
-          console.log(
-            `[${String(i).padStart(3)}/${total}] ${task.id.padEnd(20)} ${arm.padEnd(7)} ` +
-              `${r.success ? 'PASS' : 'fail'}  wrong=${r.wrongElement} steps=${r.steps} ` +
-              `obs=${r.kinds.full}F/${r.kinds.diff}D/${r.kinds.nochange}N/${r.kinds.other}? · ${r.obsChars}ch · $${r.costUsd.toFixed(4)} · ${(r.durationMs / 1000).toFixed(0)}s` +
-              (r.driverError ? `  ERROR: ${r.driverError.slice(0, 80)}` : ''),
-          );
-        }
-      }
+    for (const t of todo) {
+      i++;
+      const r = await runEpisode({
+        proxy, collector, task: t.task, arm: t.arm, runIndex: t.runIndex,
+        driver: agentDriver(proxy, t.task, opts),
+      });
+      const row = stampEpisode(r, identity, ARM_DEFINITION, toolsHash);
+      appendEpisode(storePath, row);
+      phaseRows.push(row);
+      stored.push(row);
+      console.log(
+        `[${String(i).padStart(3)}/${todo.length}] run${String(t.runIndex).padStart(3)} ${t.task.id.padEnd(20)} ${t.arm.padEnd(7)} ` +
+          `${r.success ? 'PASS' : 'fail'}  wrong=${r.wrongElement} steps=${r.steps} ` +
+          `obs=${r.kinds.full}F/${r.kinds.diff}D/${r.kinds.nochange}N/${r.kinds.other}? · ${r.obsChars}ch · $${r.costUsd.toFixed(4)} · ${(r.durationMs / 1000).toFixed(0)}s` +
+          (r.driverError ? `  ERROR: ${r.driverError.slice(0, 80)}` : ''),
+      );
     }
 
-    code = report(rows, opts, tasks);
+    console.log(
+      `\nPHASE COMPLETE — ${phaseRows.length} episode(s) run, ${stored.length} on record at ${rel(storePath)}`,
+    );
+
+    // The verdict is over the WHOLE store, not over this phase. Scoring one
+    // phase at a time is the exact failure this feature exists to remove: five
+    // underpowered verdicts instead of one properly-powered one.
+    const present = TASKS.filter((t) => stored.some((r) => r.task === t.id));
+    progressAdvisory(stored, phaseRows, opts);
+    code = report(stored, opts, present);
     return code;
   } finally {
     if (proxy) await proxy.close().catch(() => {});
@@ -697,6 +1252,10 @@ function report(rows, opts, tasks) {
   console.log('\n' + '='.repeat(72));
   console.log('RESULTS');
   console.log('='.repeat(72));
+  console.log(
+    `pooled over ${rows.length} episode(s) on record — every phase of this cohort, not just\n` +
+      'the most recent one. The verdict rule below is the preregistered one, unchanged.',
+  );
 
   console.log('\nPer task (success diff / re-dump):');
   for (const t of tasks) {

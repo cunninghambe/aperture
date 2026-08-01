@@ -52,6 +52,26 @@ import { settle } from './collector.mjs';
 export const PROXY_PORT = 8896;
 
 /**
+ * The arm, written down in prose so an episode on disk carries the rule it was
+ * produced under and a phased run can refuse to pool episodes made under a
+ * different one.
+ *
+ * This is the CLAIM. The two `ep.arm === 'redump'` lines below are the
+ * ENFORCEMENT, and they are what actually runs — so the prose is checked the
+ * only way prose can be: this file is inside the benchmark's `codeVersion`
+ * hash, so the two cannot drift apart without every stamp moving.
+ */
+export const ARM_DEFINITION = {
+  diff:
+    'browser_act: no observe override — Aperture returns its default, a diff against ' +
+    'the state the agent already holds. browser_snapshot: mode forwarded as the agent asked.',
+  redump:
+    'browser_act: observe="full" injected at the proxy on every call. ' +
+    'browser_snapshot: mode="full" forced at the proxy, so a voluntary snapshot ' +
+    'cannot come back as a diff.',
+};
+
+/**
  * Arm-neutral, but no weaker than the product's own words.
  *
  * The first version of this said "you do not need to call browser_snapshot
@@ -214,6 +234,8 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
 
     const forwarded = { ...args };
     // THE ARM. Nothing else in the whole apparatus differs between the two.
+    // Stated in prose as ARM_DEFINITION at the top of this file, which is what
+    // gets stamped onto every stored episode.
     if (ep.arm === 'redump') forwarded.observe = 'full';
 
     const text = await upstream('browser_act', forwarded);

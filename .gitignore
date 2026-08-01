@@ -11,3 +11,9 @@ coverage/
 userdata/
 *.vault
 .aperture-token
+
+# The task-success benchmark's accumulating episode store. Measurements, not
+# source: they belong to whoever ran them, they are large, and a cohort that
+# followed a checkout onto a different machine would be pooled with episodes
+# from a build it never ran on.
+bench/task/results/
