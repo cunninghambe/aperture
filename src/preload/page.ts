@@ -1,5 +1,10 @@
 import { ipcRenderer } from 'electron';
 import { walk } from '@core/snapshot/walker.js';
+import {
+  describe as describeOption,
+  matchOption,
+  type OptionInfo,
+} from '@core/snapshot/selectOption.js';
 
 /**
  * Preload injected into every web page. Hostile territory.
@@ -179,6 +184,12 @@ function composedContains(ancestor: Element, node: Element): boolean {
  * identity index that acting uses. `browser_read`'s `ref` parameter used to
  * be accepted and silently ignored — the whole document came back, and the
  * agent had no way to know.
+ *
+ * A native `<select>` is the one element whose `innerText` is worthless: it
+ * concatenates every option label with no marker for which one is selected,
+ * no values, and no groups. Since the snapshot deliberately renders a long
+ * select as `[51 options]` and nothing else, this scoped read is the ONLY way
+ * to discover what is in it — so it gets a real listing instead.
  */
 ipcRenderer.on(
   'aperture:read',
@@ -188,7 +199,170 @@ ipcRenderer.on(
     try {
       const el = index.get(req.key);
       if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
-      reply({ ok: true, text: el.innerText });
+      reply({
+        ok: true,
+        text: el instanceof HTMLSelectElement ? describeSelect(el) : el.innerText,
+      });
+    } catch (err) {
+      reply({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+    }
+  },
+);
+
+/** Every option of a select, with its group, value, and selected state. */
+function optionsOf(el: HTMLSelectElement): OptionInfo[] {
+  return Array.from(el.options).map((o, index) => {
+    const parent = o.parentElement;
+    const info: OptionInfo = { text: o.text, value: o.value, index };
+    // `o.disabled` is false for an option inside a disabled <optgroup>, even
+    // though the option is unusable — the group's state has to be folded in.
+    if (o.disabled || (parent instanceof HTMLOptGroupElement && parent.disabled)) {
+      info.disabled = true;
+    }
+    if (parent instanceof HTMLOptGroupElement && parent.label) info.group = parent.label;
+    return info;
+  });
+}
+
+/**
+ * The option list, formatted for an agent that is about to choose one.
+ *
+ * `>` marks the current selection, which is the first thing worth knowing.
+ * Optgroups are passive: shown so the agent understands the list, never
+ * accepted as part of a match — qualified `"group > label"` queries are a
+ * deliberate deferral, not an oversight.
+ */
+function describeSelect(el: HTMLSelectElement): string {
+  const opts = optionsOf(el);
+  const selected = Array.from(el.selectedOptions).map((o) => o.text.trim());
+  const head =
+    `native select${el.multiple ? ' (multi-select)' : ''} · ${opts.length} options · ` +
+    (selected.length ? `selected: ${selected.map((s) => `"${s}"`).join(', ')}` : 'nothing selected');
+
+  const lines = [head, 'Choose one with browser_act action:"select".', ''];
+  let group: string | undefined;
+  for (const [i, o] of opts.entries()) {
+    if (o.group !== group) {
+      group = o.group;
+      if (group) lines.push(`  ${group}`);
+    }
+    const mark = el.options[i]!.selected ? '>' : ' ';
+    lines.push(`${mark} ${describeOption({ ...o, group: undefined })}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Choose an option in a native `<select>`.
+ *
+ * WHY THE PROTOTYPE SETTER ON THE OPTION, AND NOT `select.value = x`
+ *
+ * React instruments the *instance* `value` property of a form control to track
+ * what it last rendered. Assigning through `select.value` therefore updates
+ * React's own cached value first; when the `change` event arrives React
+ * compares the two, sees no difference, deduplicates the event, never calls
+ * `onChange`, and the next render snaps the controlled component back to its
+ * old state. Mutating the OPTION's `selected` bypasses that instrumentation
+ * entirely: the tracker goes stale, so the dispatched `change` reads as a
+ * genuine user change. This is the path Playwright and Puppeteer have used
+ * against the production web for years.
+ *
+ * MEASURED, NOT ASSUMED — AND THE MEASUREMENT IS NARROWER THAN THE ARGUMENT
+ *
+ * That argument is about a MAIN-WORLD write. This code runs in the preload's
+ * isolated world, and the two worlds hold separate JS wrappers for the same
+ * DOM node, so a page's own `Object.defineProperty(node, 'value', …)` — which
+ * is exactly how React's value tracker is installed — is simply not on the
+ * object this file touches. Measured against
+ * `test/fixtures/selects.html`, whose controlled select counts writes through
+ * its instrumented instance property: after `select` actions that visibly
+ * committed, the counter read **0**, and a deliberately regressed build using
+ * `el.value = …` also read 0 and also committed.
+ *
+ * So the honest statement is: the React-dedup failure does not reproduce from
+ * an isolated world, and the fixture's controlled select does not, on its own,
+ * discriminate the two mechanisms. The prototype setter is kept anyway, for
+ * three reasons that do not depend on the world boundary:
+ *
+ *   1. It is correct in a main-world context too, so this stays right if
+ *      Aperture ever injects differently or runs with contextIsolation off.
+ *   2. `el.value = v` selects the FIRST option with that value. When two
+ *      options share a value — a real and common pattern — it silently
+ *      chooses the wrong one, and the agent named a LABEL. The fixture's
+ *      duplicate-value select makes that difference observable, and the
+ *      `selects` bench scenario fails RED on a regression to `el.value`.
+ *   3. It is the only mechanism that expresses "this option, by index", which
+ *      is what the matcher decided.
+ *
+ * The setter is taken from THIS isolated world's `HTMLOptionElement`
+ * prototype, so a page that monkeypatches its own builtins cannot intercept or
+ * redirect the write.
+ *
+ * WHY NOT CDP, A POPUP, OR KEYBOARD INPUT
+ *
+ * `act.ts` sends everything through CDP because synthesized events are
+ * untrusted and detectable — that reasoning is about input dispatch, where a
+ * trusted path exists. For a native dropdown none does: the popup is a
+ * separate OS window outside the WebContents, arrow keys on a closed select
+ * are platform-divergent (Windows changes the value, macOS opens the popup),
+ * and whether CDP key events even reach an open native popup in Electron is
+ * unverified. So `select` is state-mutation-plus-notification — the same class
+ * as `aperture:fill` — and it lives on this IPC path with it.
+ */
+ipcRenderer.on(
+  'aperture:select',
+  (_event, req: { requestId: string; key: string; option: string }) => {
+    const reply = (payload: unknown): void =>
+      ipcRenderer.send('aperture:select-result', req.requestId, payload);
+
+    try {
+      const el = index.get(req.key);
+      if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
+      if (!(el instanceof HTMLSelectElement)) {
+        return reply({ ok: false, reason: 'not-a-select', tag: el.tagName });
+      }
+
+      const opts = optionsOf(el);
+      const m = matchOption(opts, req.option);
+      if (!m.ok) {
+        return reply({
+          ok: false,
+          reason: m.reason,
+          total: opts.length,
+          multiple: el.multiple,
+          ...(m.reason === 'ambiguous' ? { tier: m.tier, candidates: m.candidates } : {}),
+          ...(m.reason === 'no-match' ? { suggestions: m.suggestions } : {}),
+          ...(m.reason === 'disabled' ? { label: m.label } : {}),
+        });
+      }
+
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLOptionElement.prototype,
+        'selected',
+      )?.set;
+      if (!setter) return reply({ ok: false, reason: 'no-setter' });
+
+      const previous = Array.from(el.selectedOptions).map((o) => o.text.trim());
+      // Replace semantics, stated in the result rather than implied: a
+      // multi-select is cleared first, so the outcome is exactly the one
+      // option named. Adding to an existing selection is deferred, and
+      // silently doing one when the agent asked for the other is the kind of
+      // difference nobody notices until a form is submitted.
+      if (el.multiple) for (const o of Array.from(el.options)) setter.call(o, false);
+      setter.call(el.options[m.index]!, true);
+
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+
+      reply({
+        ok: true,
+        label: el.options[m.index]!.text.trim(),
+        value: el.options[m.index]!.value,
+        tier: m.tier,
+        multiple: el.multiple,
+        total: opts.length,
+        previous,
+      });
     } catch (err) {
       reply({ ok: false, reason: err instanceof Error ? err.message : String(err) });
     }

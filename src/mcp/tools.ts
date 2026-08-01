@@ -12,6 +12,7 @@ import {
   keyForRef,
   redactFreeText,
   requestRead,
+  requestSelect,
   taintedValues,
   requestFill,
   stateFor,
@@ -70,6 +71,9 @@ Snapshot format (indentation = containment):
   "..."         accessible name        ="..."  current value
   /path         link destination       hN      heading level N
   bare words    states: checked disabled required expanded selected modal
+  [N options]   a NATIVE <select> with N options — and nothing else ever
+                emits this. Choose one with browser_act action:"select";
+                browser_read with its ref lists them all.
   NxM           table dims; cells joined with |
   "... K more"  collapsed repetition — browser_snapshot expand:true for refs
   #E.n          page state id (epoch.step)
@@ -332,6 +336,10 @@ export function registerBrowserTools(
       description:
         'Readable article text for the page or a region, with boilerplate ' +
         'stripped. Use for reading; use browser_snapshot for acting.\n\n' +
+        'Given the ref of a native <select> (the ones that show "[N options]") ' +
+        'this returns the option list instead — labels, values, groups, and ' +
+        'which one is selected. That is the intended way to see inside a long ' +
+        'dropdown; snapshots deliberately do not enumerate them.\n\n' +
         ENVELOPE_POINTER,
       inputSchema: z.object({
         tabId: z.string().optional(),
@@ -503,18 +511,26 @@ export function registerBrowserTools(
     {
       title: 'Act on the page',
       description:
-        'Click, type, hover, scroll, or press a key, then observe what ' +
-        'changed.\n\n' +
+        'Click, type, hover, scroll, press a key, or choose a dropdown ' +
+        'option, then observe what changed.\n\n' +
         'The result is a DIFF against the page state you already hold — ' +
         'typically 40-150 tokens rather than a full re-read. That is the whole ' +
         'point: do not call browser_snapshot after every action.\n\n' +
         'Input is dispatched as real browser input, so framework handlers, ' +
         'native widgets and validation behave exactly as they do for a human.\n\n' +
+        'DROPDOWNS. action:"select" is for NATIVE <select> elements — the ones ' +
+        'rendered with "[N options]", which nothing else ever shows. Name the ' +
+        'option in `option`, by its exact label (preferred) or its value; ' +
+        'browser_read on the ref lists them. A near-miss or an ambiguous name ' +
+        'is refused with the candidates rather than guessed at. Anything ' +
+        'WITHOUT "[N options]" is a custom widget however much it looks like a ' +
+        'dropdown: drive it with click, exactly as you would any other — click ' +
+        'the combobox, then click the option.\n\n' +
         'If a ref has gone stale you get a targeted error naming what is there ' +
         'now, so you can recover without re-reading the whole page.\n\n' +
         ENVELOPE_POINTER,
       inputSchema: z.object({
-        action: z.enum(['click', 'type', 'hover', 'scroll', 'key', 'clear']),
+        action: z.enum(['click', 'type', 'hover', 'scroll', 'key', 'clear', 'select']),
         ref: z
           .string()
           .optional()
@@ -524,6 +540,14 @@ export function registerBrowserTools(
           .string()
           .optional()
           .describe('For key: Enter, Tab, Escape, Backspace, ArrowDown, …'),
+        option: z
+          .string()
+          .optional()
+          .describe(
+            'For select: the option to choose, by exact label or by value. ' +
+              'Native <select> only. On a multi-select this REPLACES the ' +
+              'current selection; adding to it is not supported.',
+          ),
         deltaY: z
           .number()
           .optional()
@@ -532,14 +556,37 @@ export function registerBrowserTools(
           .boolean()
           .default(false)
           .describe('For type: press Enter afterwards.'),
+        observe: z
+          .enum(['diff', 'full'])
+          .default('diff')
+          .describe(
+            'How to report the result: "diff" (default) returns what changed; ' +
+              '"full" returns a complete snapshot.',
+          ),
         tabId: z.string().optional(),
       }),
     },
-    async ({ action, ref, text: textArg, key, deltaY, submit, tabId }) => {
+    async ({
+      action,
+      ref,
+      text: textArg,
+      key,
+      option,
+      deltaY,
+      submit,
+      observe: observeArg,
+      tabId,
+    }) => {
       const t = tabs();
       const id = tabId ?? t.active;
       if (!id) return text('error: no active tab');
       const wc = t.webContents(id);
+
+      // `observe:"full"` rides the existing opts.full path — the same one
+      // browser_snapshot mode:"full" and a post-navigation invalidation use.
+      // There is no second engine branch to keep in step, and no way for the
+      // two report styles to describe the page differently.
+      const wantFull = observeArg === 'full';
 
       // Actions that do not target an element.
       if (action === 'scroll' || action === 'key') {
@@ -552,7 +599,10 @@ export function registerBrowserTools(
             return text(`error: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-        const { text: obs } = await observe(id, wc, { afterAction: true });
+        const { text: obs } = await observe(id, wc, {
+          afterAction: true,
+          full: wantFull,
+        });
         // `ok scroll` is Aperture speaking; the observation is the page. The
         // acknowledgement used to sit inside the envelope, which taught the
         // agent that harness-shaped text can legitimately appear there.
@@ -573,11 +623,99 @@ export function registerBrowserTools(
       // cares about it — clear any volatility suppression it accumulated.
       agentTouched(id, key2);
 
+      // `select` never reaches resolveRef, and that is deliberate. It needs no
+      // coordinates (there is nothing to click), so it needs no hit-test:
+      // there is no click to land on an overlay instead. It is a state
+      // mutation plus a notification, the same class as the vault fill path,
+      // and it lives on that IPC channel rather than the CDP input one.
+      if (action === 'select') {
+        if (option === undefined) return text('error: option required for select');
+        const sel = await requestSelect(wc, key2, option);
+        // Declared out here, not inside the failure branch. `origin` is a DOM
+        // global, so a reference to it in the success path type-checks against
+        // the DOM lib and then throws ReferenceError in the main process at
+        // runtime — green tsc, green unit tests, and every successful select
+        // failing the moment it is measured.
+        const origin = safeOrigin(t.info(id)?.url ?? '');
+
+        if (!sel.ok) {
+          switch (sel.reason) {
+            case 'gone': {
+              const { text: obs } = await observe(id, wc, { full: wantFull });
+              return text(
+                `error: ${ref} could not be acted on (gone).\n` +
+                  'The page as it stands now:\n' +
+                  untrusted(origin, obs),
+              );
+            }
+            case 'not-a-select':
+              // The distinction is the whole reason `[N options]` exists, so
+              // the error restates it rather than just refusing.
+              return text(
+                `error: ${ref} is a <${(sel.tag ?? 'element').toLowerCase()}>, not a ` +
+                  'native <select>, and only native selects take action:"select". ' +
+                  'If it is a custom dropdown, drive it with click: click it to ' +
+                  'open, then click the option you want. Native selects are the ' +
+                  'only elements rendered with "[N options]".',
+              );
+            case 'ambiguous':
+              // Candidate labels are page-authored, so the list goes inside the
+              // envelope; the instruction about what to do next is Aperture's
+              // and stays outside it.
+              return text(
+                `error: ${quote(option)} matches ${sel.candidates?.length ?? 0} options ` +
+                  `on ${ref} and Aperture will not guess between them. Name one exactly:\n` +
+                  untrusted(origin, (sel.candidates ?? []).join('\n')) +
+                  '\nCall browser_read with this ref for the full list.',
+              );
+            case 'no-match':
+              return text(
+                `error: no option on ${ref} is called ${quote(option)} ` +
+                  `(${sel.total ?? 0} options). Nearest by name:\n` +
+                  untrusted(origin, (sel.suggestions ?? []).join('\n')) +
+                  '\nCall browser_read with this ref for the full list. Option ' +
+                  'names are matched exactly, not approximately.',
+              );
+            case 'disabled':
+              return text(
+                `error: option ${quote(sel.label ?? option)} on ${ref} is disabled, ` +
+                  'so a human could not choose it either.',
+              );
+            case 'empty':
+              return text(`error: ${ref} has no options to choose from.`);
+            default:
+              return text(`error: select on ${ref} failed (${sel.reason}).`);
+          }
+        }
+
+        const { text: obs } = await observe(id, wc, {
+          afterAction: true,
+          actedKey: key2,
+          full: wantFull,
+        });
+        // Replace semantics said aloud. A multi-select that silently kept its
+        // other selections — or silently dropped them — is a difference the
+        // agent cannot see in a diff that reports one value.
+        const multiNote = sel.multiple
+          ? `\n(${ref} is a multi-select. This REPLACED its previous selection` +
+            (sel.previous.length
+              ? ` of ${sel.previous.length}: ${sel.previous.map((p) => quote(p)).join(', ')}`
+              : '') +
+            '. Adding to a selection is not supported.)'
+          : '';
+        // The chosen label is page-authored and sits in harness prose, so it is
+        // quoted — same treatment as the obstruction error's `obstructor`.
+        return text(
+          `ok select ${ref} → ${quote(sel.label)}${multiNote}\n` +
+            untrusted(origin, obs),
+        );
+      }
+
       const r = await resolveRef(wc, key2);
       if (!r.ok) {
         // Targeted recovery rather than "something went wrong": tell the agent
         // what it can do next without re-reading the entire page.
-        const { text: obs } = await observe(id, wc);
+        const { text: obs } = await observe(id, wc, { full: wantFull });
         // The error and the "here is what to look at" framing are Aperture's;
         // only the observation is the page's.
         return text(
@@ -630,6 +768,7 @@ export function registerBrowserTools(
       const { text: obs } = await observe(id, wc, {
         afterAction: true,
         actedKey: key2,
+        full: wantFull,
       });
       return text(
         `ok ${action} ${ref}\n` +

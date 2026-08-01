@@ -64,6 +64,19 @@ export function diffSnapshots(
   walk(oldRoot, newRoot);
   return { ops, suppressed, unreadChanges: unread.length, unread };
 
+  /**
+   * A ref for this node, or null when it must never have one.
+   *
+   * `ensureRef` allocates on demand, so every call site in this file is a
+   * place a synthetic node — a walker-manufactured `option` for a native
+   * `<select>`, with no element behind it in the page-side index — could be
+   * handed a ref that no action can ever resolve. There is no such thing as a
+   * harmless one: the agent sees it in a diff and calls `browser_act` on it.
+   */
+  function refIfReal(n: SnapshotNode): string | null {
+    return n.synthetic ? null : reg.ensureRef(n);
+  }
+
   function walk(o: SnapshotNode, n: SnapshotNode): void {
     const delta = propDelta(o, n);
     if (delta) {
@@ -71,7 +84,12 @@ export function diffSnapshots(
       // still get reported — only content churn is suppressed.
       const contentOnly =
         delta.statesOn === undefined && delta.statesOff === undefined;
-      if (contentOnly && isVolatile(n.key)) {
+      if (n.synthetic) {
+        // A synthetic option flipping `selected` is not lost information: it is
+        // the same fact as the parent select's `="…"` value update, which is
+        // emitted on a ref that resolves. Naming it separately would cost a ref
+        // that cannot.
+      } else if (contentOnly && isVolatile(n.key)) {
         suppressed++;
       } else {
         const ref = reg.ensureRef(n);
@@ -144,6 +162,12 @@ export function diffSnapshots(
     );
 
     let anchor: SnapshotNode | null = null;
+    // An anchor is a ref the model is told to position against, so a synthetic
+    // one is no anchor at all — `after: null` degrades to "under the parent",
+    // which is true.
+    const anchorRef = (): string | null =>
+      anchor && !anchor.synthetic ? reg.refOf(anchor) : null;
+
     for (const nk of n.children) {
       const ok = remaining.get(nk.key);
       if (ok) {
@@ -151,12 +175,13 @@ export function diffSnapshots(
         walk(ok, nk);
         // Only items outside the stable subsequence actually moved, so
         // "one row jumped to the top" is a single op, not twenty.
-        if (!stable.has(nk.key)) {
+        const moved = !stable.has(nk.key) ? refIfReal(nk) : null;
+        if (moved) {
           ops.push({
             op: 'move',
-            ref: reg.ensureRef(nk),
+            ref: moved,
             parent: reg.ensureRef(n),
-            after: anchor ? reg.refOf(anchor) : null,
+            after: anchorRef(),
           });
         }
         anchor = nk;
@@ -165,18 +190,21 @@ export function diffSnapshots(
 
       const movedFromElsewhere = oldByKey.get(nk.key);
       if (movedFromElsewhere) {
-        ops.push({
-          op: 'move',
-          ref: reg.ensureRef(nk),
-          parent: reg.ensureRef(n),
-          after: anchor ? reg.refOf(anchor) : null,
-        });
+        const ref = refIfReal(nk);
+        if (ref) {
+          ops.push({
+            op: 'move',
+            ref,
+            parent: reg.ensureRef(n),
+            after: anchorRef(),
+          });
+        }
         walk(movedFromElsewhere, nk);
       } else {
         ops.push({
           op: 'add',
           parent: reg.ensureRef(n),
-          after: anchor ? reg.refOf(anchor) : null,
+          after: anchorRef(),
           subtree: nk,
         });
       }
@@ -186,11 +214,41 @@ export function diffSnapshots(
     // Anything left unmatched is gone — unless it turned up elsewhere in the
     // new tree, in which case the move op was already emitted at its
     // destination and reporting a removal here would be a lie.
-    for (const [key, gone] of remaining) {
+    for (const [key, removed] of remaining) {
       if (newByKey.has(key)) continue;
-      const ref = gone.ref ?? reg.byKeyLookup(key)?.ref;
+      const ref = removed.ref ?? reg.byKeyLookup(key)?.ref;
       if (!ref) continue;
-      ops.push({ op: 'remove', ref, role: gone.role, label: gone.name });
+
+      // A removal destroys a SUBTREE, and until this loop reported only its
+      // root. Every ref underneath stayed live in the registry and alive in
+      // the model — phantom refs, the exact failure `replace`'s `gone` list
+      // exists to prevent, reachable through the commonest interaction there
+      // is: closing a dropdown or dismissing a dialog. It went unnoticed
+      // because no descendant used to carry a ref in any scenario; `option`
+      // becoming addressable (for custom ARIA listboxes) makes it routine.
+      //
+      // Same discipline as `replace`: the death is bookkeeping and applies to
+      // every destroyed ref, but the REPORT lists only refs the model was
+      // actually shown, because naming refs it never held is pure token cost.
+      const gone: string[] = [];
+      for (const k of keysOf(removed)) {
+        if (k === key) continue;
+        // A key that survives elsewhere in the new tree did not die with it.
+        if (newByKey.has(k)) continue;
+        const r = reg.byKeyLookup(k)?.ref;
+        if (!r) continue;
+        const known = wasEmitted(r);
+        reg.markDead(r);
+        if (known) gone.push(r);
+      }
+
+      ops.push({
+        op: 'remove',
+        ref,
+        role: removed.role,
+        label: removed.name,
+        ...(gone.length ? { gone } : {}),
+      });
       reg.markDead(ref);
     }
   }

@@ -683,13 +683,183 @@ describe('one addressable set (drift regression)', () => {
     expect(root.children[1]!.ref).toBeDefined();
   });
 
-  it('does not give options refs, because no action can use one', () => {
+  it('gives a REAL option a ref, because a click can use one', () => {
+    // The `role="option"` of a custom ARIA listbox is an ordinary visible
+    // element. It was collateral damage of excluding `option` wholesale.
     const reg = new RefRegistry();
-    const root = k('combobox', 'sel', 'State', {
-      children: [k('option', 'o1', 'VIC')],
+    const root = k('list', 'listbox', 'Colours', {
+      children: [k('option', 'o1', 'Red')],
     });
     assignRefs(root, reg);
     expect(root.ref).toBeDefined();
-    expect(root.children[0]!.ref).toBeUndefined();
+    expect(root.children[0]!.ref).toBeDefined();
+  });
+
+  it('never gives a SYNTHETIC option a ref, because no action can resolve one', () => {
+    // The walker manufactures these to enumerate a short native <select>.
+    // There is no element behind them in the page-side index, so a ref would
+    // be bait: the agent would see it and act on it, and the act would always
+    // fail. This is the trap that re-adding `option` to ADDRESSABLE creates.
+    const reg = new RefRegistry();
+    const root = k('combobox', 'sel', 'State', {
+      optionCount: 2,
+      children: [
+        k('option', 'o1', 'VIC', { synthetic: true }),
+        k('option', 'o2', 'NSW', { synthetic: true }),
+      ],
+    });
+    assignRefs(root, reg);
+    expect(root.ref).toBeDefined();
+    expect(refsIn(root)).toEqual([root.ref]);
+  });
+
+  it('does not resurrect a synthetic ref even when the registry knows the key', () => {
+    // assignRefs re-attaches refs for keys the registry has seen (the
+    // wasEmitted-deadlock fix). Synthetic nodes must be excluded from THAT
+    // branch too, or a key that was once real comes back as a live ref.
+    const reg = new RefRegistry();
+    const real = k('option', 'o1', 'Red');
+    assignRefs(k('list', 'lb', 'Colours', { children: [real] }), reg);
+    expect(real.ref).toBeDefined();
+
+    const again = k('option', 'o1', 'Red', { synthetic: true });
+    assignRefs(k('combobox', 'sel', 'Size', { children: [again] }), reg);
+    expect(again.ref).toBeUndefined();
+  });
+});
+
+describe('synthetic option nodes in diffs', () => {
+  const select = (selectedIndex: number, syn = true) =>
+    k('combobox', 'sel', 'Size', {
+      optionCount: 2,
+      value: selectedIndex === 0 ? 'Small' : 'Large',
+      children: [
+        k('option', 'o1', 'Small', { synthetic: syn, states: selectedIndex === 0 ? State.Selected : 0 }),
+        k('option', 'o2', 'Large', { synthetic: syn, states: selectedIndex === 1 ? State.Selected : 0 }),
+      ],
+    });
+
+  it('reports the select value change without minting a ref for the option', () => {
+    // `ensureRef` allocates on demand, so every call site in diff.ts is a
+    // place a synthetic node could be handed a ref. The flag has to be
+    // honoured at all of them, not just in assignRefs.
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, { children: [select(0)] });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, { children: [select(1)] });
+
+    const { ops } = diffSnapshots(before, after, reg);
+    const out = render(ops, reg);
+
+    expect(out).toContain('="Large"');
+    // Two refs exist on this page: main and the select. Not four — and the
+    // registry must not know the option keys at all, since `ensureRef` is
+    // what would have created them.
+    expect(refsIn(after)).toEqual([reg.byKeyLookup('sel')!.ref]);
+    expect(reg.byKeyLookup('o1')).toBeUndefined();
+    expect(reg.byKeyLookup('o2')).toBeUndefined();
+    for (const op of ops) {
+      if (op.op === 'update' || op.op === 'move' || op.op === 'remove') {
+        expect(['e1', 'e2']).toContain(op.ref);
+      }
+    }
+  });
+
+  it('does not name a synthetic node as a move anchor', () => {
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [
+        k('option', 'a', 'A', { synthetic: true }),
+        k('button', 'b', 'B'),
+        k('button', 'c', 'C'),
+      ],
+    });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, {
+      children: [
+        k('option', 'a', 'A', { synthetic: true }),
+        k('button', 'c', 'C'),
+        k('button', 'b', 'B'),
+      ],
+    });
+
+    const { ops } = diffSnapshots(before, after, reg);
+    for (const op of ops) {
+      if (op.op === 'move' || op.op === 'add') {
+        expect(op.after === null || op.after?.startsWith('e')).toBe(true);
+      }
+    }
+    // The synthetic node still holds no ref after a diff that walked past it.
+    expect(reg.byKeyLookup('a')).toBeUndefined();
+  });
+});
+
+describe('a removed subtree names the refs that died inside it', () => {
+  it('lists descendants the model was shown, so a closed dropdown leaves no phantoms', () => {
+    // Reporting only the top of a removed subtree leaves every ref underneath
+    // alive in the model — the phantom-ref failure, reachable by the commonest
+    // interaction there is: closing a dropdown.
+    const reg = new RefRegistry();
+    const open = k('main', 'm', undefined, {
+      children: [
+        k('button', 'btn', 'Colour: none'),
+        k('list', 'lb', 'Colours', {
+          children: [k('option', 'red', 'Red'), k('option', 'blue', 'Blue')],
+        }),
+      ],
+    });
+    assignRefs(open, reg);
+    const shown = new Set(refsIn(open));
+
+    const closed = k('main', 'm', undefined, {
+      children: [k('button', 'btn', 'Colour: Red')],
+    });
+
+    const { ops } = diffSnapshots(open, closed, reg, {
+      wasEmitted: (r) => shown.has(r),
+    });
+    const removal = ops.find((o) => o.op === 'remove');
+    expect(removal).toBeDefined();
+    if (removal?.op !== 'remove') throw new Error('unreachable');
+    expect(removal.gone).toEqual([reg.byKeyLookup('red')?.ref, reg.byKeyLookup('blue')?.ref]);
+
+    const line = render(ops, reg);
+    expect(line).toMatch(/- e\d+ removed \(was: list "Colours"\) \(gone: e\d+ e\d+\)/);
+  });
+
+  it('does not name refs the model was never shown', () => {
+    const reg = new RefRegistry();
+    const open = k('main', 'm', undefined, {
+      children: [k('list', 'lb', 'Colours', { children: [k('option', 'red', 'Red')] })],
+    });
+    assignRefs(open, reg);
+    const closed = k('main', 'm', undefined, { children: [] });
+
+    const { ops } = diffSnapshots(open, closed, reg, { wasEmitted: () => false });
+    const removal = ops.find((o) => o.op === 'remove');
+    if (removal?.op !== 'remove') throw new Error('unreachable');
+    expect(removal.gone).toBeUndefined();
+  });
+
+  it('does not declare a ref dead when it moved out of the removed subtree', () => {
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [
+        k('list', 'lb', 'Colours', { children: [k('option', 'red', 'Red')] }),
+        k('region', 'side', 'Chosen'),
+      ],
+    });
+    assignRefs(before, reg);
+    const shown = new Set(refsIn(before));
+    const redRef = reg.byKeyLookup('red')!.ref;
+
+    const after = k('main', 'm', undefined, {
+      children: [k('region', 'side', 'Chosen', { children: [k('option', 'red', 'Red')] })],
+    });
+
+    const { ops } = diffSnapshots(before, after, reg, { wasEmitted: (r) => shown.has(r) });
+    const removal = ops.find((o) => o.op === 'remove');
+    if (removal?.op !== 'remove') throw new Error('unreachable');
+    expect(removal.gone ?? []).not.toContain(redRef);
   });
 });

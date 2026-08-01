@@ -37,7 +37,7 @@
  * Label targeting also makes the run self-checking: if the diff stream fails
  * to deliver a label update, the next step cannot even resolve its target.
  *
- * Usage: node bench/fidelity.mjs <token> [form|rerender|widgets|biglist]
+ * Usage: node bench/fidelity.mjs <token> [form|rerender|widgets|biglist|selects]
  *
  * Exit codes — anything nonzero must never be read as "roughly green":
  *   0  GREEN
@@ -139,9 +139,16 @@ function applyObservation(model, text) {
       continue;
     }
 
+    // A removal destroys a SUBTREE: `- e3 removed (was: list "Colours")
+    // (gone: e8 e9)`. The gone list names the refs that died inside it, which
+    // no reader can infer — nothing else in the stream says what the removed
+    // node contained. Same rule as `replace`'s gone list, on the path that
+    // closes a dropdown or dismisses a dialog.
     const rm = /^- (e\d+) removed/.exec(line);
     if (rm) {
       model.delete(rm[1]);
+      const inside = /\(gone: ([^)]*)\)/.exec(line);
+      if (inside) for (const r of inside[1].trim().split(/\s+/)) model.delete(r);
       continue;
     }
 
@@ -302,6 +309,82 @@ const SCENARIOS = {
     ],
     expect: { minRefs: 60, minDiffs: 1, resync: true },
   },
+
+  // Dropdowns, both kinds. Four native <select>s driven by `select`, then a
+  // custom ARIA combobox driven by clicks — the distinction the `[N options]`
+  // marker exists to make, exercised on one page.
+  //
+  // Two steps carry the mechanism argument, and it is worth knowing which
+  // carries what, because the obvious answer is wrong:
+  //
+  //   "Delivery slot" has two options with the SAME value and different
+  //   labels. `el.value = 'am'` can only ever select the first of them, so
+  //   naming the second is the step that fails RED on a regression to the
+  //   naive write. This is the discriminating case.
+  //
+  //   "Order status" is instrumented the way React instruments a controlled
+  //   select and reasserts its state every 150ms. It does NOT discriminate the
+  //   two mechanisms — measured: Aperture writes from an isolated world, where
+  //   the page's instance-level instrumentation is not on the object it
+  //   touches, so both mechanisms commit and its write counter stays 0. What
+  //   it does catch is a mechanism that fails to make a controlled component
+  //   commit at all: the step delay is longer than the interval, so anything
+  //   uncommitted is visibly snapped back before the next step.
+  //
+  // Closing the custom combobox removes a subtree holding four live refs.
+  // Without the `gone` list on the remove op they stay alive in the model —
+  // four phantoms, from the commonest interaction on the web.
+  selects: {
+    url: `${BASE}/selects.html`,
+    stepDelayMs: 400,
+    steps: [
+      { do: 'select', label: 'Size', option: 'Large' },
+      // Tier 1 must win outright. "United States Minor Outlying Islands" is on
+      // this list, and a prefix-first matcher makes "United States"
+      // permanently ambiguous.
+      { do: 'select', label: 'Country', option: 'United States' },
+      // Both "Morning" options carry value "am"; only the option setter can
+      // reach the second one.
+      { do: 'select', label: 'Delivery slot', option: 'Morning Wednesday' },
+      { do: 'select', label: 'Order status', option: 'Committed' },
+      // Replace semantics: two options were selected, one is now.
+      { do: 'select', label: 'Toppings', option: 'Olives' },
+      { do: 'click', label: 'Colour: none', expectState: ['expanded', true] },
+      { do: 'click', label: 'Red', expectState: ['selected', true] },
+      { do: 'click', label: 'Colour: Red' },
+    ],
+    expect: { minRefs: 7, minDiffs: 7 },
+    // The marker contract, checked against the stream itself rather than
+    // inferred: every native select says how many options it has, and the
+    // custom combobox — which looks like a dropdown in every other respect —
+    // must not, because that marker is the agent's only discriminator.
+    checkInitial(text) {
+      const problems = [];
+      for (const want of ['[4 options]', '[51 options]', '[3 options]', '[6 options]']) {
+        // "[3 options]" appears twice on this page (Delivery slot, Order
+        // status); one occurrence is enough to prove the marker is emitted.
+        if (!text.includes(want)) {
+          problems.push(`native select marker ${want} missing from the initial snapshot`);
+        }
+      }
+      const custom = text.split('\n').find((l) => l.includes('"Colour: none"'));
+      if (!custom) problems.push('the custom ARIA combobox is not in the initial snapshot');
+      else if (/\[\d+ options\]/.test(custom)) {
+        problems.push(`the custom combobox claims to be native: ${custom.trim()}`);
+      }
+      // Synthetic option nodes must be listed and must NOT carry refs.
+      const synthetic = text.split('\n').filter((l) => /^\s*option (?!e\d)/.test(l));
+      if (synthetic.length < 4) {
+        problems.push('the 4-option select did not enumerate its options');
+      }
+      for (const l of text.split('\n')) {
+        if (/^\s*option e\d+ "(Small|Medium|Large|Extra large)"/.test(l)) {
+          problems.push(`a synthetic option was given a ref no action can resolve: ${l.trim()}`);
+        }
+      }
+      return problems;
+    },
+  },
 };
 
 const which = process.argv[3] ?? 'form';
@@ -337,7 +420,7 @@ function resolveTarget(model, step) {
 function stepFailure(out) {
   if (!out || !out.trim()) return 'empty response from the server';
   if (/could not be acted on|is not a known element|^error:|\nerror:/m.test(out)) return out.trim().slice(0, 300);
-  if (!/^ok (click|type|hover|scroll|key|clear)/m.test(out)) return 'no ok-acknowledgement in response';
+  if (!/^ok (click|type|hover|scroll|key|clear|select)/m.test(out)) return 'no ok-acknowledgement in response';
   if (!/^(page #|FULL SNAPSHOT #)/m.test(out)) return 'no observation followed the action';
   if (/\(no visible change\)/.test(out)) {
     return 'action produced no observable change — this scenario expects every step to change the page';
@@ -347,7 +430,15 @@ function stepFailure(out) {
 
 console.log(`# Diff fidelity — scenario "${which}"\n`);
 
-await call('browser_navigate', { action: 'goto', url: scenario.url });
+// The cache-buster is not decoration. Electron caches fixture responses (the
+// dev server sends max-age), and a run against a STALE fixture measures a page
+// nobody is looking at while printing a verdict about the one on disk. Caught
+// live: an edited fixture's new element was absent from every snapshot until
+// the URL changed.
+await call('browser_navigate', {
+  action: 'goto',
+  url: `${scenario.url}?benchrun=${Date.now()}`,
+});
 await sleep(2500);
 
 const model = new Map();
@@ -358,6 +449,11 @@ if (!/^FULL SNAPSHOT #/m.test(initial)) {
 }
 applyObservation(model, initial);
 console.log(`initial full snapshot: ${model.size} refs tracked`);
+
+// Claims about the stream that are true of the FIRST snapshot or of nothing —
+// the native-vs-custom marker among them. Collected as problems so they land
+// in the same RED as everything else.
+const initialProblems = scenario.checkInitial ? scenario.checkInitial(initial) : [];
 
 let observedTokens = 0;
 let diffSteps = 0;
@@ -371,7 +467,9 @@ for (const [i, step] of scenario.steps.entries()) {
   const args =
     step.do === 'type'
       ? { action: 'type', ref, text: step.text }
-      : { action: step.do, ref };
+      : step.do === 'select'
+        ? { action: 'select', ref, option: step.option }
+        : { action: step.do, ref };
   const out = await call('browser_act', args);
 
   const failure = stepFailure(out);
@@ -394,7 +492,26 @@ for (const [i, step] of scenario.steps.entries()) {
 
   if (step.do === 'type') typed.set(ref, step.text);
   if (step.do === 'clear') typed.set(ref, '');
-  if (step.expectState) stateChecks.push([ref, step.expectState[0], step.expectState[1], step.label]);
+  // Same independent check as typing, and it is the one that decides the
+  // select mechanism: the bench asked for this option, so the field must read
+  // it back — in the model AND, via the comparison below, on the real page
+  // after the controlled component has had time to reassert itself.
+  if (step.do === 'select') typed.set(ref, step.option);
+  // Evaluated NOW, against the model as it stood one step after the action —
+  // not at the end of the run. A scenario that flips a state and then flips it
+  // back (opening a dropdown, then closing it) is a legitimate thing to
+  // measure, and an end-of-run assertion would call the correct final state a
+  // failure while silently accepting a stream that never delivered the flip.
+  if (step.expectState) {
+    const [want, expected] = step.expectState;
+    stateChecks.push([
+      ref,
+      want,
+      expected,
+      step.label,
+      model.get(ref)?.states.has(want) ?? false,
+    ]);
+  }
 
   console.log(
     `step ${String(i + 1).padStart(2)} ${step.do.padEnd(5)} "${step.label}" -> ${ref}  ` +
@@ -445,7 +562,7 @@ let wrongValue = 0;
 let wrongLabel = 0;
 let wrongRole = 0;
 let wrongState = 0;
-const problems = [];
+const problems = [...initialProblems];
 
 for (const [ref, believed] of model) {
   const actual = truth.get(ref);
@@ -487,11 +604,15 @@ for (const [ref, want] of typed) {
   const got = model.get(ref)?.value;
   if (got !== want) {
     wrongValue++;
-    problems.push(`${ref}: bench typed "${want}" but the diff stream delivered value "${got ?? '(nothing)'}"`);
+    problems.push(`${ref}: bench set "${want}" but the diff stream delivered value "${got ?? '(nothing)'}"`);
   }
+  // No separate "and the page agrees" check is needed: this one pins the
+  // model to what the bench asked for, and the comparison above pins the model
+  // to the page. A write that was reported and then undone — the controlled
+  // select snapping back — fails one of the two whichever way the stream
+  // reports it.
 }
-for (const [ref, state, expected, label] of stateChecks) {
-  const has = model.get(ref)?.states.has(state) ?? false;
+for (const [ref, state, expected, label, has] of stateChecks) {
   if (has !== expected) {
     wrongState++;
     problems.push(`${ref} ("${label}"): bench made "${state}" ${expected} but the stream delivered ${has}`);
@@ -509,6 +630,13 @@ console.log(`WRONG LABELS                : ${wrongLabel}`);
 console.log(`WRONG ROLES                 : ${wrongRole}`);
 console.log(`WRONG STATE FLAGS           : ${wrongState}`);
 console.log(`refs on page agent never saw: ${missed.length} (elision/budget — reported, not scored)`);
+// Named, not just counted. "2 refs you never saw" is unactionable; knowing
+// they are two paragraphs of text is the difference between a shrug and a
+// diagnosis.
+for (const r of missed.slice(0, 8)) {
+  const e = truth.get(r);
+  console.log(`    ${r} ${e.role} "${e.label}"${e.value ? ` ="${e.value}"` : ''}`);
+}
 console.log(`steps: ${scenario.steps.length} (${diffSteps} diffs, ${fullSteps} full resyncs)`);
 if (scenario.expect.suppression) {
   console.log(`volatility suppression note : ${sawSuppression ? 'seen' : 'NOT SEEN'}`);

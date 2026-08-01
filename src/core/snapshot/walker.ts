@@ -70,16 +70,23 @@ export interface WalkContext {
  * (engine's lacked banner/contentinfo, so those landmarks never received refs
  * even though the walker indexed them for acting). One list, one truth.
  *
- * `option` is deliberately absent: no ref was ever assigned to one (the
- * engine's copy lacked it), and a ref would be a lie anyway — a native
- * dropdown is OS-rendered, so clicking an option by coordinates cannot work.
- * Selects need a dedicated `select` action on browser_act; until that exists,
- * giving options refs would bait agents into actions that always fail.
+ * `option` was absent until the `select` action existed, because a ref on one
+ * was a lie: a native dropdown is OS-rendered, so no click at coordinates can
+ * reach its options. It is back now, and it earns its place from the OTHER
+ * kind of option — the `role="option"` element of a custom ARIA combobox,
+ * which is an ordinary visible DOM node and is driven by exactly the same
+ * click as any other widget.
+ *
+ * The native case is still a lie, and it is guarded rather than special-cased
+ * here: the walker does not emit real option nodes for a native `<select>`, it
+ * emits `synthetic` ones, and `synthetic` nodes never receive a ref. See
+ * `SnapshotNode.synthetic`.
  */
 export const ADDRESSABLE = new Set<Role>([
   'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio',
   'slider', 'tab', 'menuitem', 'iframe', 'scrollable', 'dialog',
   'list', 'table', 'form', 'region', 'nav', 'main', 'banner', 'contentinfo',
+  'option',
 ]);
 
 export function isAddressableRole(role: Role): boolean {
@@ -228,20 +235,35 @@ function visit(
   }
 
   if (el instanceof HTMLSelectElement) {
-    // Enumerating 51 US states costs more than telling the agent there are 51.
-    if (el.options.length <= 4) {
-      node.children = Array.from(el.options).map((o) => ({
-        role: 'option' as Role,
-        name: o.text,
-        key: `${node.key}|opt|${o.value}`,
-        states: o.selected ? State.Selected : 0,
-        frameId: ctx.frameId,
-        rect,
-        children: [],
-      }));
-    } else {
-      node.optionCount = el.options.length;
-    }
+    // EVERY native select carries its option count, enumerated or not. That
+    // marker is the agent's only way to tell a native select (which needs the
+    // `select` action) from a custom ARIA combobox (which needs `click`), and
+    // a discriminator that only appears on long lists discriminates nothing.
+    node.optionCount = el.options.length;
+
+    // Enumerating 51 US states costs more than telling the agent there are 51;
+    // `browser_read` on the ref returns the full list when it is wanted. Short
+    // lists are cheap enough to inline, and inlining them is what makes a
+    // four-option select answerable without a second call.
+    //
+    // Either way the real <option> nodes the recursion produced are dropped:
+    // they are OS-rendered, no click can reach them, and leaving them in the
+    // tree meant a 51-option select rendered 51 useless lines.
+    node.children =
+      el.options.length <= 4
+        ? Array.from(el.options).map((o, i) => ({
+            role: 'option' as Role,
+            name: o.text,
+            // Manufactured, so never given a ref — see SnapshotNode.synthetic.
+            // The index is in the key because two options may share a value.
+            synthetic: true,
+            key: `${node.key}|opt${i}|${o.value}`,
+            states: o.selected ? State.Selected : 0,
+            frameId: ctx.frameId,
+            rect,
+            children: [],
+          }))
+        : [];
   }
 
   // Only DATA tables get flattened into pipe-joined rows. A table containing
@@ -657,6 +679,12 @@ function valueOf(el: HTMLElement): string | undefined {
   }
   if (el instanceof HTMLTextAreaElement) return truncate(el.value);
   if (el instanceof HTMLSelectElement) {
+    // A multi-select showing only its first selected option is a lie the agent
+    // cannot detect: it would read `="Olives"` on a field holding two values
+    // and have no way to know. All of them, comma-joined and truncated.
+    if (el.multiple) {
+      return truncate(Array.from(el.selectedOptions).map((o) => o.text).join(', '));
+    }
     return el.selectedOptions[0]?.text ?? '';
   }
   return undefined;

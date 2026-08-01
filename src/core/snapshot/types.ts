@@ -72,8 +72,28 @@ export interface SnapshotNode {
   dims?: { rows: number; cols: number };
   /** Table rows pre-flattened to cell text, so the renderer can pipe-join. */
   rows?: string[][];
-  /** Number of options on a select, when not enumerated inline. */
+  /**
+   * Number of options on a native `<select>`.
+   *
+   * Set on EVERY native select, enumerated inline or not. It is the agent's
+   * only discriminator between a native select (drive with `browser_act`
+   * `select`) and a custom ARIA combobox (drive with `click`), and nothing
+   * else in the renderer emits `[N options]`.
+   */
   optionCount?: number;
+  /**
+   * This node was manufactured by the walker and has no element behind it.
+   *
+   * True only for the `option` children the walker synthesizes to enumerate a
+   * small native `<select>`. They exist so the agent can read four options
+   * without a second call — but the page-side index has no entry for them, so
+   * a ref would name something no action could ever resolve. `option` is an
+   * addressable role again (custom ARIA listbox options are real, clickable
+   * elements); this flag is what keeps that from handing out refs which are
+   * guaranteed to fail. Honoured in `registry.assignRefs` and at every
+   * `ensureRef` site in `diff.ts`.
+   */
+  synthetic?: boolean;
   /**
    * The field's own `autocomplete` token. Kept out of the rendered text (it
    * costs tokens and the agent does not need it) but carried on the node,
@@ -119,7 +139,22 @@ export interface PropDelta {
 export type DiffOp =
   | { op: 'update'; ref: string; delta: PropDelta }
   | { op: 'add'; parent: string; after: string | null; subtree: SnapshotNode }
-  | { op: 'remove'; ref: string; role: Role; label?: string }
+  | {
+      op: 'remove';
+      ref: string;
+      role: Role;
+      label?: string;
+      /**
+       * Refs INSIDE the removed subtree that died with it.
+       *
+       * Naming only the top of a removed subtree leaves the model believing in
+       * every ref underneath — the same phantom-ref failure the `replace` op's
+       * `gone` list was added to close, on the path that closes a dropdown or
+       * dismisses a dialog. A reader cannot infer it: nothing in the stream
+       * tells it what the removed node contained.
+       */
+      gone?: string[];
+    }
   | { op: 'move'; ref: string; parent: string; after: string | null }
   /**
    * Regional fallback. When most of a container turned over, one replace is

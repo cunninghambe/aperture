@@ -98,6 +98,10 @@ function wireOnce(): void {
     pending.get(requestId)?.(payload as WalkPayload);
     pending.delete(requestId);
   });
+  ipcMain.on('aperture:select-result', (_e, requestId: string, payload: unknown) => {
+    pending.get(requestId)?.(payload as WalkPayload);
+    pending.delete(requestId);
+  });
 }
 
 export function stateFor(tabId: string): TabSnapshotState {
@@ -445,6 +449,67 @@ export async function requestRead(
     });
 
     wc.send('aperture:read', { requestId, key });
+  });
+}
+
+/**
+ * The shape the page-side select handler replies with.
+ *
+ * Failure carries the material for a useful error — how many options there
+ * are, which ones were candidates, which ones are near — because "no such
+ * option" on a 51-option list the agent cannot see is a dead end.
+ */
+export type SelectResult =
+  | {
+      ok: true;
+      label: string;
+      value: string;
+      tier: number;
+      multiple: boolean;
+      total: number;
+      previous: string[];
+    }
+  | {
+      ok: false;
+      reason: string;
+      tag?: string;
+      total?: number;
+      multiple?: boolean;
+      tier?: number;
+      candidates?: string[];
+      suggestions?: string[];
+      label?: string;
+    };
+
+/**
+ * Choose an option in a native `<select>`, in the page's isolated world.
+ *
+ * Deliberately NOT on the CDP input path in `act.ts`: there is no trusted
+ * input path to a native dropdown, because its popup is an OS window outside
+ * the WebContents. See the handler in `src/preload/page.ts` for the full
+ * argument, including why the option's prototype setter is what makes React
+ * accept the change.
+ */
+export async function requestSelect(
+  wc: WebContents,
+  key: string,
+  option: string,
+  timeoutMs = 5000,
+): Promise<SelectResult> {
+  wireOnce();
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pending.delete(requestId);
+      resolve({ ok: false, reason: 'select timed out' });
+    }, timeoutMs);
+
+    pending.set(requestId, (payload) => {
+      clearTimeout(timer);
+      resolve(payload as unknown as SelectResult);
+    });
+
+    wc.send('aperture:select', { requestId, key, option });
   });
 }
 

@@ -121,9 +121,17 @@ export class RefRegistry {
  * Re-attaching the ref means the next full snapshot renders it, marks it
  * emitted, and unlocks its diff channel — a full re-read now actually heals
  * the blind spot instead of leaving it.
+ *
+ * Synthetic nodes are excluded from BOTH cases. `option` became an addressable
+ * role when the `select` action landed, which is right for a custom ARIA
+ * listbox — those options are real elements — and would otherwise hand out
+ * refs for the option nodes the walker manufactures to enumerate a native
+ * `<select>`. Those have no entry in the page-side index, so every action on
+ * one would fail: exactly the guaranteed-failing bait that keeping `option`
+ * out of the addressable set used to prevent.
  */
 export function assignRefs(root: SnapshotNode, reg: RefRegistry): void {
-  if (isAddressableRole(root.role) || reg.byKeyLookup(root.key)) {
+  if (!root.synthetic && (isAddressableRole(root.role) || reg.byKeyLookup(root.key))) {
     reg.ensureRef(root);
   }
   for (const c of root.children) assignRefs(c, reg);

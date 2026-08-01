@@ -334,9 +334,14 @@ function renderOp(
       const where = op.after ? `after ${op.after}` : `under ${op.parent}`;
       return `+ ${where}:\n${lines.join('\n')}`;
     }
-    case 'remove':
-      // The label rides along so the agent never has to look up what it lost.
-      return `- ${op.ref} removed${op.label ? ` (was: ${op.role} ${quote(op.label)})` : ''}`;
+    case 'remove': {
+      // The label rides along so the agent never has to look up what it lost,
+      // and `gone` names the refs that died INSIDE it — without that line a
+      // closed dropdown leaves its options alive in the model forever.
+      const was = op.label ? ` (was: ${op.role} ${quote(op.label)})` : '';
+      const inside = op.gone && op.gone.length ? ` (gone: ${op.gone.join(' ')})` : '';
+      return `- ${op.ref} removed${was}${inside}`;
+    }
     case 'move':
       return `> ${op.ref} moved ${op.after ? `after ${op.after}` : `into ${op.parent}`}`;
     case 'replace': {

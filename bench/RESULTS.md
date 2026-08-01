@@ -425,3 +425,79 @@ opener in act responses.
 and all three still start their own lines; `applyObservation`'s element-line
 regex requires `\w` first so both tag lines are ignored; `truthFrom`'s
 `/^FULL SNAPSHOT #/m` still matches on line 2 of a snapshot response.
+
+---
+
+# Update 2026-07-31: the `select` action, and two things the bench was hiding
+
+`browser_act action:"select"` landed, `option` became an addressable role
+behind a `synthetic` guard, and `browser_act` gained `observe: 'diff'|'full'`.
+A fifth fidelity scenario, `selects`, drives four native `<select>`s and a
+custom ARIA combobox on one page.
+
+```
+bench:fidelity form       GREEN   18/18 refs · 13 diffs + 1 forced resync · 897 tokens/14 actions
+bench:fidelity rerender   GREEN   17/17 refs · 0 phantoms through full DOM teardowns
+bench:fidelity widgets    GREEN   6/6 refs · clock suppressed · shadow-DOM click
+bench:fidelity biglist    GREEN   71/71 refs · 70 refs die and revive · size-cap resync fired
+bench:fidelity selects    GREEN   7/7 refs · 8 diffs · 464 tokens/8 actions
+```
+
+Each on a freshly started Aperture, one scenario per launch.
+
+## The mechanism argument was measured, and it is narrower than it looked
+
+The design's reason for mutating `HTMLOptionElement.prototype.selected` rather
+than assigning `select.value` is React's value tracker: React instruments the
+element's **instance** `value` property, so a write through it updates React's
+cache, the `change` event is deduplicated, and the controlled component snaps
+back. `test/fixtures/selects.html` reproduces that instrumentation exactly and
+re-asserts its state every 150ms.
+
+**It does not discriminate the two mechanisms, and the first `selects` green
+was not evidence that it did.** A deliberately regressed build using
+`el.value = …` passed the scenario. The reason is the world boundary: Aperture
+writes from the preload's isolated world, which holds a different JS wrapper
+for the same DOM node, so the page's `Object.defineProperty(node, 'value', …)`
+is not on the object being written. Measured directly — the fixture counts
+writes through its instrumented instance property, and it read **0** after
+selects that visibly committed, under *both* mechanisms.
+
+The decision stands (it is correct in a main world, it is what Playwright and
+Puppeteer do, and it survives any future change of injection point), but the
+fixture now carries a case that discriminates for a reason that does not depend
+on the world boundary: **two options sharing one `value` with different
+labels**. `el.value = 'am'` can only ever select the first of them. The
+regressed build now fails:
+
+```
+- e4: bench set "Morning Wednesday" but the diff stream delivered value "Morning Tuesday"
+RESULT: RED — diffs do not describe the real page
+```
+
+The initially-selected option is deliberately the one NOT sharing that value:
+with a morning option pre-selected, the naive write produces no page change at
+all and the bench exits 3 ("step did not run") instead of naming the wrong
+option it landed on.
+
+## Electron was serving a stale fixture
+
+Editing a fixture and re-running the bench measured the **old page**. The dev
+server sends `max-age=3600`, Electron cached it, and a new element added to
+`selects.html` was absent from every snapshot until the URL changed. Nothing in
+the output said so — the run looked normal and printed a verdict.
+
+`fidelity.mjs` now appends `?benchrun=<timestamp>` to the navigation URL, and
+the documented server command uses `-c-1`. This is the cheapest false-green
+vector found so far: it needs no bug at all, only an edit.
+
+## Two smaller harness fixes
+
+- **`expectState` is evaluated one step after its action**, not at the end of
+  the run. A scenario that opens a dropdown and later closes it is legitimate;
+  an end-of-run assertion called the correct final state a failure while
+  accepting a stream that never delivered the flip.
+- **`applyObservation` consumes the `gone:` list on a `remove` op.** A removal
+  destroys a subtree, and the reader previously deleted only its root — every
+  ref underneath stayed alive in the model. Closing a dropdown is the commonest
+  way to hit it.

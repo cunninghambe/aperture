@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Select lab</title>
+  </head>
+  <body>
+    <main>
+      <h1>Select lab</h1>
+
+      <!-- 1. A short native select. Four options, so the snapshot enumerates
+           them inline as SYNTHETIC option nodes — which must never receive a
+           ref, because nothing in the page-side index backs them. -->
+      <p>
+        <label for="size">Size</label>
+        <select id="size" name="size">
+          <option value="s">Small</option>
+          <option value="m" selected>Medium</option>
+          <option value="l">Large</option>
+          <option value="xl">Extra large</option>
+        </select>
+      </p>
+
+      <!-- 2. A 51-option native select, so the snapshot renders "[51 options]"
+           and nothing else — discovery is browser_read on the ref.
+
+           It is a country list on purpose. "United States" and "United States
+           Minor Outlying Islands" are BOTH here: exact-tier matching must find
+           the first uniquely and never reach the prefix tier, where the two
+           are indistinguishable. Get the tier order wrong and the commonest
+           option on the list becomes unselectable. -->
+      <p>
+        <label for="country">Country</label>
+        <select id="country" name="country">
+          <option value="AU" selected>Australia</option>
+          <option value="AR">Argentina</option>
+          <option value="AT">Austria</option>
+          <option value="BE">Belgium</option>
+          <option value="BR">Brazil</option>
+          <option value="BG">Bulgaria</option>
+          <option value="CA">Canada</option>
+          <option value="CL">Chile</option>
+          <option value="CN">China</option>
+          <option value="CO">Colombia</option>
+          <option value="HR">Croatia</option>
+          <option value="CZ">Czechia</option>
+          <option value="DK">Denmark</option>
+          <option value="EG">Egypt</option>
+          <option value="EE">Estonia</option>
+          <option value="FI">Finland</option>
+          <option value="FR">France</option>
+          <option value="DE">Germany</option>
+          <option value="GR">Greece</option>
+          <option value="HU">Hungary</option>
+          <option value="IS">Iceland</option>
+          <option value="IN">India</option>
+          <option value="ID">Indonesia</option>
+          <option value="IE">Ireland</option>
+          <option value="IL">Israel</option>
+          <option value="IT">Italy</option>
+          <option value="JP">Japan</option>
+          <option value="KE">Kenya</option>
+          <option value="MY">Malaysia</option>
+          <option value="MX">Mexico</option>
+          <option value="NL">Netherlands</option>
+          <option value="NZ">New Zealand</option>
+          <option value="NG">Nigeria</option>
+          <option value="NO">Norway</option>
+          <option value="PE">Peru</option>
+          <option value="PH">Philippines</option>
+          <option value="PL">Poland</option>
+          <option value="PT">Portugal</option>
+          <option value="RO">Romania</option>
+          <option value="SG">Singapore</option>
+          <option value="ZA">South Africa</option>
+          <option value="KR">South Korea</option>
+          <option value="ES">Spain</option>
+          <option value="SE">Sweden</option>
+          <option value="CH">Switzerland</option>
+          <option value="TH">Thailand</option>
+          <option value="TR">Turkey</option>
+          <option value="UA">Ukraine</option>
+          <option value="GB">United Kingdom</option>
+          <option value="US">United States</option>
+          <option value="UM">United States Minor Outlying Islands</option>
+        </select>
+      </p>
+
+      <!-- 3. THE ONE THAT DISCRIMINATES THE MECHANISM.
+
+           Two options share a value and differ in label — an ordinary pattern
+           (two slots on the same shift, two branches of one carrier). The
+           agent names a LABEL, so only the second one satisfies the request.
+
+           `el.value = 'am'` selects the FIRST option with that value, always:
+           it cannot express "the second one". Mutating that option's
+           `selected` can. This is the difference the two mechanisms actually
+           have from an isolated world, so it is the one the bench measures.
+
+           The pm option starts selected on purpose. If a "morning" option were
+           already selected, the naive write would produce NO page change at
+           all and the bench would refuse to score the step (exit 3, "did not
+           run") instead of reporting the wrong option it landed on. Starting
+           elsewhere makes the failure a visible, specific wrong value. -->
+      <p>
+        <label for="slot">Delivery slot</label>
+        <select id="slot" name="slot">
+          <option value="am">Morning Tuesday</option>
+          <option value="am">Morning Wednesday</option>
+          <option value="pm" selected>Afternoon Tuesday</option>
+        </select>
+      </p>
+
+      <!-- 4. THE CONTROLLED SELECT.
+
+           Instrumented the way React instruments one: the `value` property is
+           shadowed on the INSTANCE and maintains a value tracker. A main-world
+           write through `select.value` updates the tracker first, so by the
+           time `change` fires the tracker already agrees with the DOM, the
+           event is deduplicated, the commit never happens, and the next
+           "render" — the interval below — snaps the field back within 150ms.
+
+           WHAT THIS DOES AND DOES NOT PROVE. Aperture writes from the
+           preload's ISOLATED world, which holds a different JS wrapper for the
+           same DOM node, so this instrumentation is not on the object it
+           touches at all. `instance value writes` below stays at 0 whichever
+           mechanism is used — measured, both ways. So this select does NOT
+           discriminate `option.selected` from `select.value`; #3 above does.
+
+           What it still proves, and no other case here does: that the events
+           Aperture dispatches make a controlled component COMMIT, and that the
+           new value survives the component re-asserting its own state on an
+           interval. A mechanism that skipped the events, or fired only
+           `change` where the app listens for `input`, snaps back here. -->
+      <p>
+        <label for="status">Order status</label>
+        <select id="status" name="status">
+          <option value="pending" selected>Pending</option>
+          <option value="committed">Committed</option>
+          <option value="archived">Archived</option>
+        </select>
+      </p>
+      <p id="status-echo">Committed state: pending</p>
+      <!-- Counts writes through the instrumented INSTANCE property. It is the
+           evidence for the paragraph above: if this ever reads anything but 0
+           after an Aperture select, the world boundary has moved and the
+           mechanism argument needs re-reading. -->
+      <p id="setter-probe">instance value writes: 0</p>
+
+      <!-- 5. A multi-select, starting with two options selected, so replace
+           semantics are observable: after one select there must be exactly
+           one. -->
+      <p>
+        <label for="toppings">Toppings</label>
+        <select id="toppings" name="toppings" multiple size="6">
+          <option value="mushrooms" selected>Mushrooms</option>
+          <option value="onions" selected>Onions</option>
+          <option value="olives">Olives</option>
+          <option value="capsicum">Capsicum</option>
+          <option value="anchovies">Anchovies</option>
+          <option value="pineapple">Pineapple</option>
+        </select>
+      </p>
+
+      <!-- 6. A custom ARIA combobox: no <select> anywhere, so no "[N options]"
+           marker, and it is driven by ordinary clicks. Its role="option"
+           elements are REAL, visible, clickable nodes — the reason `option` is
+           an addressable role again.
+
+           Closing it removes a subtree whose descendants hold refs, which is
+           the case that used to leave phantom refs in the model. -->
+      <p>
+        <button id="colourbtn" role="combobox" aria-expanded="false" aria-controls="colourlist">
+          Colour: none
+        </button>
+      </p>
+      <ul id="colourlist" role="listbox" aria-label="Colours" hidden>
+        <li role="option" data-testid="colour-red" aria-selected="false">Red</li>
+        <li role="option" data-testid="colour-green" aria-selected="false">Green</li>
+        <li role="option" data-testid="colour-blue" aria-selected="false">Blue</li>
+        <li role="option" data-testid="colour-black" aria-selected="false">Black</li>
+      </ul>
+    </main>
+
+    <script>
+      // -- 3. React-shaped controlled select ---------------------------------
+      (() => {
+        const sel = document.getElementById('status');
+        const echo = document.getElementById('status-echo');
+        const proto = Object.getOwnPropertyDescriptor(
+          HTMLSelectElement.prototype,
+          'value',
+        );
+
+        // The component's committed state, and the value tracker React keeps
+        // beside it to decide whether a change event is real.
+        let state = proto.get.call(sel);
+        let tracked = state;
+        let writes = 0;
+
+        Object.defineProperty(sel, 'value', {
+          configurable: true,
+          get() {
+            return proto.get.call(sel);
+          },
+          set(v) {
+            // Writing through the instance property updates the tracker, which
+            // is exactly what makes the following change event look like a
+            // no-op to the framework.
+            writes++;
+            document.getElementById('setter-probe').textContent =
+              'instance value writes: ' + writes;
+            tracked = v;
+            proto.set.call(sel, v);
+          },
+        });
+
+        sel.addEventListener('change', () => {
+          const current = proto.get.call(sel);
+          if (current === tracked) return; // deduplicated: onChange never runs
+          tracked = current;
+          state = current;
+          echo.textContent = 'Committed state: ' + state;
+        });
+
+        // The re-render. A controlled component reasserts what its state says,
+        // so anything that did not commit is undone within 150ms.
+        setInterval(() => {
+          proto.set.call(sel, state);
+        }, 150);
+      })();
+
+      // -- 5. Custom ARIA combobox ------------------------------------------
+      (() => {
+        const btn = document.getElementById('colourbtn');
+        const list = document.getElementById('colourlist');
+
+        const setOpen = (open) => {
+          btn.setAttribute('aria-expanded', String(open));
+          if (open) list.removeAttribute('hidden');
+          else list.setAttribute('hidden', '');
+        };
+
+        btn.addEventListener('click', () => {
+          setOpen(btn.getAttribute('aria-expanded') !== 'true');
+        });
+
+        for (const opt of list.querySelectorAll('[role="option"]')) {
+          opt.addEventListener('click', () => {
+            for (const o of list.querySelectorAll('[role="option"]')) {
+              o.setAttribute('aria-selected', String(o === opt));
+            }
+            btn.textContent = 'Colour: ' + opt.textContent.trim();
+            // Deliberately stays open. The step after this one closes it by
+            // clicking the combobox again, which is the subtree-removal case:
+            // four refs die inside a removed node.
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

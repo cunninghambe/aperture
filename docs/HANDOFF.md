@@ -10,6 +10,7 @@ bench:fidelity form       GREEN   18/18 refs · 13 diffs + 1 forced resync · ty
 bench:fidelity rerender   GREEN   17/17 refs · 0 phantoms through full DOM teardowns
 bench:fidelity widgets    GREEN   6/6 refs · clicks, +checked/+expanded, shadow DOM, clock suppressed
 bench:fidelity biglist    GREEN   71/71 refs · 70 refs die and revive · size-cap resync fired
+bench:fidelity selects    GREEN   7/7 refs · 4 native selects + a custom ARIA combobox
 ```
 
 This suite had already produced two false results that were believed for a
@@ -39,11 +40,14 @@ requirement — label targeting removed the failure mode, and exit 3 catches
 anything that still goes wrong.
 
 ```bash
-npx http-server test/fixtures -p 8899 --silent &
+# -c-1 is not optional: without it Electron caches the fixtures and an edited
+# fixture is measured in its OLD form, silently. fidelity.mjs also appends a
+# cache-busting query to the navigation URL for the same reason.
+npx http-server test/fixtures -p 8899 -c-1 --silent &
 npx electron . > /tmp/ap.log 2>&1 &
 sleep 15
 TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
-node bench/fidelity.mjs "$TOK" form      # or rerender | widgets | biglist
+node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects
 ```
 
 Others: `npm run bench` (synthetic diff model), `npm run bench:live`
@@ -119,8 +123,21 @@ must round-trip, a clicked checkbox must read `checked`.
   page is the production case and no scenario measures it.
 - **iframes and the modal-obstruction path** are claimed in the design and
   exercised by no benchmark or test.
-- **Selects are unactable** — there is no `select` action on `browser_act`;
-  agents cannot choose an option today.
+- **The `select` mechanism's headline justification does not reproduce from
+  here.** React's value tracker lives on the page's own wrapper for the DOM
+  node; the preload writes from an isolated world, which has a different
+  wrapper, so a naive `select.value = x` is *not* deduplicated the way it would
+  be from a main-world script. Measured both ways against the fixture's write
+  counter — 0 either time. The prototype-setter mechanism is kept on grounds
+  that survive that (main-world correctness, and it is the only way to select
+  one of two options sharing a `value`), and the `selects` scenario now fails
+  RED on a regression for that second reason. If Aperture ever injects into the
+  main world, re-read this.
+- **Multi-select is replace-only.** Adding to an existing selection is not
+  expressible; the result says so out loud rather than implying otherwise.
+- **Optgroups are passive** — shown in listings and errors, never matched.
+  `"group > label"` queries are deferred, so two same-labelled options in
+  different groups are distinguishable only by value.
 - Shadow-root focus is invisible to the walker (`document.activeElement` is
   the host, which gets pruned) — model and truth agree, so the bench cannot
   see it either. Cosmetic, but it is a known shared blind spot.
@@ -143,19 +160,43 @@ must round-trip, a clicked checkbox must read `checked`.
    — and the inverse leak, `browser_act` putting its own `ok …` and error
    prose *inside* the envelope. See `bench/RESULTS.md` and the four invariants
    in `docs/design/security.md`.
-3. **`select` action** for browser_act, then restore `option` to the
-   addressable set.
+3. ~~**`select` action** for browser_act, then restore `option` to the
+   addressable set.~~ — **DONE 2026-07-31.** Native `<select>` only, driven by
+   the isolated-world `HTMLOptionElement.prototype.selected` setter plus
+   `input`/`change` (no CDP, no popup, no keyboard). Custom ARIA comboboxes use
+   the existing `click`, which is what put `option` back in `ADDRESSABLE` —
+   guarded by a `synthetic` flag so the walker's manufactured option nodes for
+   a native select can never receive a ref, in `assignRefs` and at every
+   `ensureRef` site in `diff.ts`. Every native select now emits `[N options]`
+   (previously only when >4) because that marker is the agent's only
+   discriminator between the two kinds; `browser_read` on the ref lists them.
+   Matching is five exact-first tiers in `src/core/snapshot/selectOption.ts`,
+   with no edit distance anywhere: ambiguity at any tier errors with the
+   candidates rather than falling through, so `"United States"` resolves
+   uniquely and never meets `"United States Minor Outlying Islands"`.
+   `browser_act` also gained `observe: 'diff'|'full'` on the existing
+   `opts.full` path. Two false-green vectors were found in the process — see
+   `bench/RESULTS.md`.
 4. **Vault fill path** — unblocked since the consent dialog exists.
 5. **Web Bot Auth**, before the 2026-09-15 Cloudflare deadline the README
    cites.
 
 ## Method that has actually worked here
 
-Seven times now, something marked "working" was broken the moment it was
+Eight times now, something marked "working" was broken the moment it was
 measured end to end: the crash pipeline, the HN snapshot, the UA client hints,
-the benchmark harness twice, the fidelity ground truth, and this pass's
-volatility-in-act-loops + shadow-DOM clicks. Every time, the unit tests and
-the assumption agreed with each other, and only the real output disagreed.
+the benchmark harness twice, the fidelity ground truth, the
+volatility-in-act-loops + shadow-DOM clicks, and the `select` pass's
+first green (a stale cached fixture and a mechanism test with no teeth). Every
+time, the unit tests and the assumption agreed with each other, and only the
+real output disagreed.
+
+The `select` pass added a variant worth naming: **`tsc` agreed too.** The
+success path read a variable declared inside the failure branch and compiled
+clean, because `origin` is a DOM global — so the type checker bound it to
+`lib.dom` while the main process would have thrown `ReferenceError` on every
+successful select. A test that actually calls the handler is what caught it,
+and `test/act.test.ts` now holds that test.
 
 Instrument and compare against ground truth. Do not reason from the code
 alone, do not trust a verdict without the counts behind it — and when a
