@@ -114,8 +114,33 @@ describe('observation shape predicates', () => {
   it('classifies the three headers the engine emits', () => {
     expect(isFullSnapshot('FULL SNAPSHOT #2 — replaces all prior state for this page')).toBe(true);
     expect(isDiff('page #2.1 (diff from #2)')).toBe(true);
-    expect(isNoChange('page #2.1 (no visible change)')).toBe(true);
-    expect(isDiff('page #2.1 (no visible change)')).toBe(false);
+    // Both unchanged wordings, because one regex has to cover both: the engine
+    // says which KIND of nothing happened, and the bench only cares that it was
+    // nothing.
+    expect(isNoChange('page #2.1 (unchanged — the action caused no visible change)')).toBe(true);
+    expect(isNoChange('page #2.1 (unchanged — you already hold the current page)')).toBe(true);
+    expect(isDiff('page #2.1 (unchanged — you already hold the current page)')).toBe(false);
+  });
+
+  it('and the notes an unchanged observation can carry do not defeat it', () => {
+    expect(
+      isNoChange(
+        'page #2.1 (unchanged — you already hold the current page) ' +
+          '(2 live-region updates suppressed; 1 changes in regions you have not read)',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not classify the retired spelling, because nothing emits it now', () => {
+    // Deliberately the retired spelling, written plainly. This file is out of
+    // the release grep's scope precisely so this literal can stay readable:
+    // the tripwire covers src/ and bench/, where a resurrection would matter,
+    // and a stale *positive* assertion here would fail at runtime anyway,
+    // because nothing emits this string any more.
+    const retired = 'page #2.1 (no visible change)';
+    expect(isNoChange(retired)).toBe(false);
+    expect(isDiff(retired)).toBe(false);
+    expect(isFullSnapshot(retired)).toBe(false);
   });
 
   it('spots a budget-truncated observation', () => {

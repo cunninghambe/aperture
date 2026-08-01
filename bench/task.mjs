@@ -40,7 +40,7 @@
  *
  * RUNNING IT IN PHASES
  *
- * 400 episodes is six-odd hours, so the suite is resumable. Every scored
+ * 280 episodes is hours, not minutes, so the suite is resumable. Every scored
  * episode is appended to `bench/task/results/episodes.jsonl` as it completes,
  * keyed by (task, arm, runIndex, codeVersion, model); a later invocation skips
  * every combination already on record and runs only what is missing. The
@@ -120,15 +120,123 @@ const N_FLOOR = 5;
 const N_PREREGISTERED = 20; // per task, per arm
 
 /**
+ * The BOUNDED SECONDARY OUTCOME, preregistered for wave 2 — see
+ * WAVE2_PREREGISTRATION below for why it exists and why it is -10pp and not
+ * some number chosen after looking at the data.
+ */
+const SECONDARY_SUCCESS_BOUND = -0.1;
+
+// The interim rule's thresholds. They condition ONLY on pooled success levels,
+// never on the delta between the arms — that is what keeps the peek legitimate.
+const INTERIM_PILOT_N = 5;
+const INTERIM_CEILING = 0.98;
+const INTERIM_REDUMP_FLOOR = 0.7;
+
+/**
  * Stamped onto every episode and compared on resume. The thresholds are the
  * verdict; an episode scored under different ones is not poolable with these,
  * and this is the field that says so out loud.
+ *
+ * `secondaryBound` rides along for the same reason the margins do: it licenses
+ * a sentence, so an episode scored without it on record is not evidence for
+ * that sentence. Recording it here is what makes "preregistered" checkable
+ * rather than asserted.
  */
 const VERDICT_RULE = {
   successMargin: PARITY_SUCCESS_MARGIN,
   wrongMargin: PARITY_WRONG_MARGIN,
   nFloor: N_FLOOR,
+  secondaryBound: SECONDARY_SUCCESS_BOUND,
 };
+
+/**
+ * WAVE-2 PREREGISTRATION — written before a single wave-2 episode was run, and
+ * before the fixtures it describes had ever been driven by a language model.
+ *
+ * Wave 1 (ten tasks, N=5, 100 episodes) exited INCONCLUSIVE on G10: both arms
+ * scored 50/50 on every task with zero wrong-element actions. This is the
+ * design that replaces it, committed in advance so that what it licenses cannot
+ * be decided after the numbers are in.
+ *
+ * THE POWER TRAP, STATED BEFORE THE DATA
+ *
+ * At 140 episodes per arm and success rates around 85%, the half-width of the
+ * success-delta interval is about 8pp. The PARITY margin is -5pp. So once the
+ * tasks are hard enough to leave the ceiling — which is the entire point of
+ * wave 2 — **the interval cannot fit inside the parity margin at the
+ * preregistered N**, no matter what the truth is. A design with only
+ * PARITY/REGRESSION/INCONCLUSIVE therefore guarantees "INCONCLUSIVE, licenses
+ * nothing" in advance, and spends about $32 finding that out.
+ *
+ * That is why the secondary outcome below exists, why its bound is -10pp (above
+ * the ~8pp minimum detectable effect, so it is actually reachable), and why it
+ * is written here rather than proposed in the write-up afterwards. It does NOT
+ * change the verdict or the exit code: INCONCLUSIVE stays INCONCLUSIVE. It
+ * adds one sentence the run is allowed to say when the bound holds.
+ */
+export const WAVE2_PREREGISTRATION = {
+  tasks: [
+    'inbox-archive', 'wizard-submit', 'leaderboard-max',
+    'queue-positional', 'vault-code', 'catalog-revive', 'ledger-balance',
+  ],
+  n: N_PREREGISTERED, // per task, per arm — 140/arm, 280 episodes
+  model: 'claude-sonnet-5',
+  armsAndForcing: 'unchanged from wave 1 (ARM_DEFINITION in bench/lib/proxy.mjs)',
+  guards: 'G1-G11 unchanged, G10 (ceiling) unchanged',
+  primary:
+    'PARITY iff success-delta CI lower >= -5pp AND wrong-element-delta CI upper <= +0.2/run',
+  secondary:
+    'If the verdict is INCONCLUSIVE but the success-delta CI lower bound is >= -10pp ' +
+    'and the wrong-element bound holds, the licensed sentence is: "On this 7-task ' +
+    'bookkeeping-hard suite with claude-sonnet-5, no diff-bookkeeping penalty larger ' +
+    'than 10pp was found." Nothing stronger, and no exit code changes.',
+  interimRule:
+    `After the --n ${INTERIM_PILOT_N} wave, conditioning ONLY on pooled success levels and blind ` +
+    `to the arm delta: both arms >= ${Math.round(INTERIM_CEILING * 100)}% -> stop and invoke the Haiku ` +
+    `sensitivity contingency; re-dump arm < ${Math.round(INTERIM_REDUMP_FLOOR * 100)}% -> the tasks are too hard or ` +
+    'broken, fix them and --new-cohort; otherwise continue to N=20 and pool.',
+  haikuContingency:
+    'Same 7 tasks, --model claude-haiku-4-5, into its own store ' +
+    '(--store bench/task/results/episodes-haiku.jsonl; required anyway, since model is ' +
+    'in the episode identity). It licenses a sensitivity sentence only, never the ' +
+    'headline claim, and there is no flag that pools across models.',
+  estimatedCost: '280 episodes ~ $32 at wave-1 rates (the pilot wave ~ $8)',
+};
+
+function printPreregistration() {
+  const p = WAVE2_PREREGISTRATION;
+  console.log('='.repeat(72));
+  console.log('WAVE-2 PREREGISTRATION — fixed before any wave-2 episode was run');
+  console.log('='.repeat(72));
+  console.log(`  tasks     : ${p.tasks.join(', ')}`);
+  console.log(`  design    : N=${p.n}/task/arm (${p.tasks.length * p.n}/arm), model ${p.model}`);
+  console.log(`  arms      : ${p.armsAndForcing}`);
+  console.log(`  guards    : ${p.guards}`);
+  console.log(`  primary   : ${p.primary}`);
+  console.log('  secondary : bounded outcome at -10pp. At 140/arm and ~85% success the CI');
+  console.log('              half-width is ~8.4pp, so the -5pp PARITY rule requires observing');
+  console.log('              the diff arm AHEAD by >= +3.4pp — probability ~0.2 under true');
+  console.log('              parity. The primary is retained but is underpowered by');
+  console.log('              construction; the secondary exists so a true null has a');
+  console.log('              reachable, honestly-worded statement. No verdict, no exit code.');
+  console.log(`  interim   : ${p.interimRule}`);
+  console.log('');
+  // Printed with EVERY wave-2 verdict, whatever the outcome. A margin added
+  // after a failed run has to be visible to the reader, not buried in a design
+  // doc — otherwise the only people who know the rule moved are the people who
+  // moved it.
+  console.log('  MARGIN PROVENANCE (printed with every wave-2 verdict, always):');
+  console.log('    The -10pp secondary was added 2026-08-01, after wave 1 returned');
+  console.log('    INCONCLUSIVE and BEFORE any wave-2 episode was run. The primary -5pp');
+  console.log('    PARITY rule is unchanged from tier1.md 3 and is reported FIRST, always.');
+  console.log('    The secondary was chosen above the ~8.4pp MDE at 140/arm — i.e. chosen');
+  console.log('    for reachability, and that is stated rather than hidden. A');
+  console.log('    secondary-only result licenses exactly: "On this 7-task');
+  console.log('    bookkeeping-hard suite with claude-sonnet-5, no diff-bookkeeping');
+  console.log('    penalty larger than 10pp was found" — and NEVER the word "parity".');
+  console.log("    Wave 1's INCONCLUSIVE stands as recorded in the archived store.");
+  console.log('');
+}
 
 // The pilot's measured per-episode figures, used only to estimate how long a
 // phase will take before there is enough of a store to measure it from.
@@ -355,15 +463,50 @@ const TYPE_ROLES = new Set(['textbox', 'searchbox', 'combobox']);
  * acting on ref numbers that no longer existed. Resolving against the model
  * means a stream that fails to deliver a label update cannot even be scripted
  * through, so G2 fails loudly instead of quietly measuring nothing.
+ *
+ * `step.nth` (1-based) selects among several identically-labelled elements —
+ * `queue-positional` needs it, because seven rows with the same button label is
+ * the entire point of that fixture.
+ *
+ * ---------------------------------------------------------------------------
+ * CONSTRAINT, and it is not a style note: `nth` counts in MODEL INSERTION
+ * ORDER, which equals document order ONLY on a page that mutates by REMOVAL.
+ *
+ * The shadow model is a Map keyed by ref. A full snapshot inserts refs in
+ * document order, and `Map#delete` on the rows that die leaves the survivors in
+ * that order — so under removals-only mutation, "the 5th Approve in the model"
+ * is "the 5th Approve on the page". `applyObservation`, however, applies an
+ * `add` or a `replace` subtree by calling `model.set()`, which appends at the
+ * END regardless of where the element actually landed in the DOM. On a page
+ * that inserts or reorders rows, insertion order and document order diverge and
+ * `nth` silently starts naming the wrong element.
+ *
+ * This is not backstopped by a runtime check, because it cannot be: the stream
+ * carries no absolute positions to check against. It is backstopped by the
+ * experiment instead — the witness reports which element the page actually saw
+ * clicked, so a solver that targets the wrong row fails G2 loudly rather than
+ * quietly measuring nothing. Any future fixture that uses `nth` must be
+ * removals-only; queue.html says so in its own header comment.
+ * ---------------------------------------------------------------------------
  */
 function resolveLabel(model, step) {
   const roles = step.act === 'type' || step.act === 'clear' ? TYPE_ROLES : CLICK_ROLES;
   const hits = [...model.entries()].filter(([, e]) => e.label === step.label && roles.has(e.role));
+  const held = () =>
+    [...model.entries()].map(([r, e]) => `    ${r} ${e.role} "${e.label}"`).join('\n');
+  if (step.nth) {
+    if (hits.length >= step.nth) return { ref: hits[step.nth - 1][0] };
+    return {
+      error:
+        `"${step.label}" nth:${step.nth} — the model holds only ${hits.length} of them. Model holds:\n` +
+        held(),
+    };
+  }
   if (hits.length === 1) return { ref: hits[0][0] };
   return {
     error:
       `"${step.label}" resolves to ${hits.length} elements in the model (need exactly 1). Model holds:\n` +
-      [...model.entries()].map(([r, e]) => `    ${r} ${e.role} "${e.label}"`).join('\n'),
+      held(),
   };
 }
 
@@ -439,6 +582,16 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     // observation is the hole a diff could slip through unnoticed in the
     // re-dump arm, so they are surfaced rather than bucketed and forgotten.
     unclassified: ep.observations.filter((o) => o.kind === 'other').map((o) => ({ tool: o.tool, head: o.text.slice(0, 240) })),
+    // WHERE in the episode each observation happened, not just how many of
+    // each kind there were. `a:` is an act-embedded observation, `s:` a
+    // browser_snapshot the agent chose to spend a turn on.
+    //
+    // Wave 1 stored kind TOTALS only, so it could say the diff arm made 0.80
+    // voluntary observations per episode and could not say whether they were
+    // end-of-task verification or mid-task confusion — which is the difference
+    // between "the completeness guarantee was not believed" and "the model lost
+    // the page". Those want different fixes. A few bytes per episode closes it.
+    obsSeq: ep.observations.map((o) => (o.tool === 'browser_act' ? 'a' : 's') + ':' + o.kind),
     postResyncFailures: postResync,
     acts: ep.acts,
     diffStream: ep.observations.filter((o) => o.kind === 'diff' || o.kind === 'nochange').map((o) => o.text).join('\n'),
@@ -623,6 +776,29 @@ async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
               r.diffStream.split('\n').map((l) => '    ' + l).join('\n').slice(0, 2500),
           );
         }
+        // The companion to mustObserve, and a different question.
+        //
+        // mustObserve asks whether the winning CONTENT reached the agent
+        // through a diff. streamAssert asks whether the engine BEHAVIOUR the
+        // task claims to load actually engaged — `queue-positional` is built on
+        // the walker falling through to document-order ordinals on identical
+        // rows, and if it does not (a stray heading, a sibling the
+        // discriminator likes, an id that stopped looking generated) the
+        // fixture still solves, still matches its regex, and tests nothing.
+        // That is precisely the shape of failure this project keeps hitting:
+        // the unit tests and the assumption agree, and only the real output
+        // disagrees.
+        if (task.streamAssert) {
+          const why = task.streamAssert(r.diffStream);
+          if (why) {
+            problems.push(
+              `${task.id}: streamAssert FAILED — ${why}\n` +
+                '    The task does not exercise the engine behaviour it claims to.\n' +
+                '    ---- diff-only stream ----\n' +
+                r.diffStream.split('\n').map((l) => '    ' + l).join('\n').slice(0, 2500),
+            );
+          }
+        }
         if (r.kinds.diff === 0) {
           problems.push(`${task.id}: the diff arm produced no diffs at all.`);
         }
@@ -787,8 +963,8 @@ function printPlan({ rows, storePath, identity, opts }) {
   );
 
   console.log('\nSplit it by N in waves, not by task:');
-  console.log('  A partial run across ALL ten tasks is far more informative than a complete');
-  console.log('  run of two. Ten tasks at N=5 already shows you which tasks separate the arms');
+  console.log(`  A partial run across ALL ${TASKS.length} tasks is far more informative than a complete`);
+  console.log(`  run of two. ${TASKS.length} tasks at N=5 already shows you which tasks separate the arms`);
   console.log('  and whether the whole thing is heading for the G10 ceiling; two tasks at N=20');
   console.log('  tells you a great deal about two tasks. The runner iterates wave-major for');
   console.log('  the same reason, so an interrupted phase also leaves even coverage.');
@@ -1055,6 +1231,11 @@ async function main() {
   );
   console.log(`  verdictRule  : ${JSON.stringify(identity.verdictRule)}`);
   console.log('');
+
+  // Printed on every invocation that could produce or score a number. The
+  // selftest is exempt because it scores nothing and is run mid-edit, when
+  // reprinting the frozen design would suggest it had been re-examined.
+  if (!opts.selftest) printPreregistration();
 
   if (opts.plan) {
     const { rows } = loadStore(storePath);
@@ -1424,6 +1605,29 @@ function report(rows, opts, tasks) {
       'Per-task numbers above are directional colour, not findings.',
   );
 
+  // The preregistered interim rule, evaluated and printed rather than left for
+  // someone to apply from memory. It conditions ONLY on pooled success levels —
+  // never on the delta between the arms — which is the property that makes
+  // looking at the pilot legitimate instead of a peek that biases the stop.
+  const perTaskN = Math.min(diff.n, redump.n) / Math.max(1, tasks.length);
+  const branch =
+    sD.p >= INTERIM_CEILING && sU.p >= INTERIM_CEILING
+      ? `STOP — both arms are at or above ${fmtPct(INTERIM_CEILING)}. The suite is back on the ceiling; ` +
+        'invoke the preregistered Haiku sensitivity contingency (its own store).'
+      : sU.p < INTERIM_REDUMP_FLOOR
+        ? `FIX — the re-dump arm is below ${fmtPct(INTERIM_REDUMP_FLOOR)}. The tasks are too hard or broken; ` +
+          'repair them and start a fresh cohort.'
+        : `CONTINUE — pooled rates are off the ceiling and the re-dump arm is healthy. ` +
+          `Run out to N=${N_PREREGISTERED}/task/arm and pool.`;
+  console.log(
+    `\nInterim rule (preregistered; reads pooled success levels only, blind to the arm\n` +
+      `delta). At about N=${perTaskN.toFixed(1)}/task/arm — diff ${fmtPct(sD.p)}, re-dump ${fmtPct(sU.p)}:\n` +
+      `  ${branch}` +
+      (perTaskN < INTERIM_PILOT_N
+        ? `\n  (Advisory only below N=${INTERIM_PILOT_N}/task/arm; the rule is meant to be applied at the pilot wave.)`
+        : ''),
+  );
+
   // G8 — the hard floor on N.
   if (diff.n < N_FLOOR || redump.n < N_FLOOR) {
     return bail(EXIT.INCONCLUSIVE, 'G8: below the hard floor of N=5 per arm. This is a PILOT, not a result:', [
@@ -1461,10 +1665,40 @@ function report(rows, opts, tasks) {
       `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}] against a margin of +${PARITY_WRONG_MARGIN}`,
     ]);
   }
+  // The preregistered SECONDARY outcome. It is evaluated only here, on the
+  // INCONCLUSIVE path, because that is the only place it was ever meant to
+  // apply — and it changes neither the verdict nor the exit code, only what the
+  // run is permitted to say. Its bound was fixed in WAVE2_PREREGISTRATION
+  // before any wave-2 episode existed, for a reason spelled out there: at
+  // N=20/task/arm the -5pp parity margin is unreachable once the tasks are hard
+  // enough to be worth running, so a design without a bounded fallback
+  // guarantees this branch and licenses nothing from it.
+  const secondaryHolds = sCI.lo >= SECONDARY_SUCCESS_BOUND && wCI.hi <= PARITY_WRONG_MARGIN;
+  console.log('\nPreregistered secondary outcome:');
+  if (secondaryHolds) {
+    console.log(
+      `  Bound HOLDS — success-delta CI lower ${fmtSigned(sCI.lo)} >= ${fmtSigned(SECONDARY_SUCCESS_BOUND)}, and the\n` +
+        `  wrong-element CI upper ${wCI.hi.toFixed(3)} <= +${PARITY_WRONG_MARGIN}. The licensed sentence, in full:\n` +
+        `\n    "On this ${tasks.length}-task bookkeeping-hard suite with ${opts.model}, no\n` +
+        '     diff-bookkeeping penalty larger than 10pp was found."\n' +
+        '\n  Nothing stronger. It is not PARITY, it is not evidence of equivalence, and it\n' +
+        '  says nothing about other models, real websites, larger pages or longer tasks.',
+    );
+  } else {
+    console.log(
+      `  Bound does NOT hold — success-delta CI lower ${fmtSigned(sCI.lo)} against ${fmtSigned(SECONDARY_SUCCESS_BOUND)}, ` +
+        `wrong-element CI upper ${wCI.hi.toFixed(3)} against +${PARITY_WRONG_MARGIN}.\n` +
+        '  No secondary sentence is licensed either.',
+    );
+  }
+
   return bail(EXIT.INCONCLUSIVE, 'RESULT: INCONCLUSIVE — the intervals do not decide it:', [
     `success delta CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}], margin ${fmtSigned(PARITY_SUCCESS_MARGIN)}`,
     `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}], margin +${PARITY_WRONG_MARGIN}`,
-    'This licenses no README claim. More episodes, or a harder suite.',
+    secondaryHolds
+      ? 'The primary verdict is undecided; the preregistered secondary sentence above is the ' +
+        'only claim this run supports.'
+      : 'This licenses no README claim. More episodes, or a harder suite.',
   ]);
 }
 

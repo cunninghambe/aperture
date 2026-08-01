@@ -19,6 +19,7 @@
     "bench:fidelity": "node bench/fidelity.mjs",
     "bench:guards": "node bench/guards.mjs",
     "bench:task": "node bench/task.mjs",
+    "bench:size": "node bench/size.mjs",
     "bench:live": "node bench/live.mjs"
   },
   "build": {

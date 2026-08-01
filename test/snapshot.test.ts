@@ -15,6 +15,7 @@ import {
   renderDiff,
   renderFull,
   renderLine,
+  renderUnchanged,
   quote,
 } from '../src/core/snapshot/render.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
@@ -401,8 +402,11 @@ describe('renderDiff', () => {
 
   it('says so plainly when nothing visible happened', () => {
     const out = renderDiff({ seq: '4.2', baseSeq: '4.1', ops: [], suppressed: 0, unreadChanges: 0 });
-    expect(out).toContain('no visible change');
-    expect(estimateTokens(out)).toBeLessThan(15);
+    // Asserted against the exact bytes, not a substring: this line is a wire
+    // format the bench classifies with a regex, and "contains the word" would
+    // stay green through a rewording that broke the classifier.
+    expect(out).toBe('page #4.2 (unchanged — you already hold the current page)');
+    expect(estimateTokens(out)).toBeLessThan(20);
   });
 
   it('names the base seq so a compacted model can notice it lost the base', () => {
@@ -411,6 +415,54 @@ describe('renderDiff', () => {
       ops: [{ op: 'update', ref: 'e26', delta: { value: '94110' } }],
     });
     expect(out).toContain('diff from #7.4');
+  });
+});
+
+describe('renderUnchanged', () => {
+  it('tells a no-effect ACTION apart from a redundant SNAPSHOT', () => {
+    // Two different facts that used to render as the same bytes. After an
+    // action, "nothing changed" is a finding about the page; after a voluntary
+    // snapshot it is a receipt for a wasted turn.
+    expect(renderUnchanged('4.2', { afterAction: true })).toBe(
+      'page #4.2 (unchanged — the action caused no visible change)',
+    );
+    expect(renderUnchanged('4.2', { afterAction: false })).toBe(
+      'page #4.2 (unchanged — you already hold the current page)',
+    );
+  });
+
+  it('gives both variants the prefix the bench classifies on', () => {
+    // The bench reads this with /^page #\d+\.\d+ \(unchanged/m. If a wording
+    // change ever broke that, the observation would classify as `other` and
+    // silently corrupt the arm-purity guards rather than fail anything here.
+    const classify = /^page #\d+\.\d+ \(unchanged/m;
+    expect(renderUnchanged('12.7', { afterAction: true })).toMatch(classify);
+    expect(renderUnchanged('12.7', {})).toMatch(classify);
+  });
+
+  it('carries the notes the empty path used to throw away', () => {
+    // `unreadChanges` was hardcoded to 0 on this path, so a page whose only
+    // changes were in regions the model has never been shown reported nothing
+    // changed, with no caveat at all.
+    expect(
+      renderUnchanged('2.3', { afterAction: true, suppressed: 2, unreadChanges: 1 }),
+    ).toBe(
+      'page #2.3 (unchanged — the action caused no visible change) ' +
+        '(2 live-region updates suppressed; 1 changes in regions you have not read)',
+    );
+    expect(renderUnchanged('2.3', { unreadChanges: 1 })).toBe(
+      'page #2.3 (unchanged — you already hold the current page) ' +
+        '(1 changes in regions you have not read)',
+    );
+  });
+
+  it('is the ONLY spelling: renderDiff\'s empty branch delegates to it', () => {
+    // Two spellings of the same wire string drifted apart once already, in the
+    // shape predicates. This pins the delegation rather than the wording.
+    const empty = { seq: '9.1', baseSeq: '9.0', ops: [], suppressed: 3, unreadChanges: 2 };
+    expect(renderDiff(empty)).toBe(
+      renderUnchanged('9.1', { suppressed: 3, unreadChanges: 2 }),
+    );
   });
 });
 

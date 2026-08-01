@@ -944,3 +944,88 @@ actionable of the two:
 3. **Then re-run for correctness** on tasks that are not at ceiling.
 
 Item 1 is a product bug this benchmark found. That is the benchmark working.
+
+## Correction to the section above (2026-08-01, same day)
+
+**Mechanism 1 as written is wrong, and the error is mine.** The wave-1 section
+says the 18 `nochange` observations were act round trips, and proposes moving a
+no-delta result "into the act's own result, not a separate observation." It is
+already there. Checked against the episode store rather than against the
+write-up:
+
+```
+diff arm: pageActions = 186,  kinds.diff = 186   -> equal
+```
+
+Every act carried exactly one observation and every one of those was a diff.
+`attributions` is `{ok: 372}` — zero errors in either arm. The 72 fulls and 18
+nochange are **over and above** the acts: 50 fulls are the mandatory opener
+(5 runs x 10 tasks), leaving **40 agent-chosen `browser_snapshot` calls**.
+
+They are not spread evenly. Six of ten tasks took **zero**:
+
+| task | voluntary obs, diff arm | voluntary obs, re-dump arm |
+|---|---|---|
+| finder-cheapest | 14 | **6** |
+| cart-adjust | 13 | 0 |
+| inbox-archive | 10 | 0 |
+| settings-config | 3 | 0 |
+| other six | 0 | 0 |
+
+Two different causes, which the original write-up merged into one:
+
+- **`finder-cheapest` is structural, not defensive** — it is the only task where
+  the *re-dump* arm also snapshotted voluntarily, so the cause cannot be diff
+  bookkeeping. Diff subtrees render collapsed, so a filtered list arriving via a
+  `replace` can hide candidate prices behind `… N more`, and a correct agent
+  must then expand. That is an honest, permanent cost of the collapse design.
+- **`cart-adjust`, `inbox-archive`, `settings-config` are defensive.** All three
+  prompts assert a global invariant ("do not change anything else"). The agent
+  re-snapshots to verify a negative, which means it does not trust that anything
+  a diff omits is unchanged. **The completeness guarantee is real but never
+  stated to the model.**
+
+So the fix is not a wire-format change. It is teaching the guarantee in the tool
+descriptions, plus three genuine engine bugs found while confirming this:
+`nextDiffSeq()` advances on the empty path (unchanged observations hasten paid
+resyncs), `unreadChanges` is hardcoded to 0 (changes in never-rendered regions
+report as "no visible change" with no caveat), and the `navigated` check sits
+below the early return (a zero-op pushState reports no change).
+
+**What survives unchanged:** the INCONCLUSIVE verdict, the ceiling, and every
+number in the tables. **What does not survive at its stated scope: "diffs cost
+5.2% more here."** The pooled +5.2% is carried entirely by the four tasks with
+voluntary observations, and in the six with none the sign flips:
+
+| subset | diff $/ep | re-dump $/ep | delta | turns/ep |
+|---|---|---|---|---|
+| 6 tasks, zero voluntary obs | 0.1077 | 0.1123 | **−4.1%** (diff cheaper) | 8.40 vs 8.57 |
+| 4 tasks with voluntary obs | 0.1213 | 0.1004 | **+20.9%** | 8.85 vs 7.15 |
+
+The four contribute +$0.419 of gap, the six −$0.138; net +$0.281, so the four
+carry the whole inversion and then some. The turn excess is likewise entirely
+theirs (+34 turns vs −5). At the suite's sd ≈ $0.026/ep the six-task −$0.0046
+is ~0.7 SE from zero — indistinguishable from parity — while the four-task
++$0.0209 is ~2.5 SE. Within the four: cart-adjust +44.6%, inbox-archive +26.3%,
+finder +13.7%, settings −2.7%; the three defensive tasks alone (+$0.346) more
+than account for the net.
+
+So the pooled +5.2% survives as **arithmetic** and fails as a **finding**. The
+correctly scoped version: diff observation was not dearer per se on this suite;
+episodes became dearer exactly where the agent bought voluntary snapshots —
+three tasks with invariant-asserting prompts (defensive, the untaught
+completeness guarantee) and one with collapsed lists (structural, now retired).
+Where no voluntary snapshots occurred, diffs were cheaper on fewer turns.
+Whether any inversion survives the teaching fix is a wave-2 question.
+
+What also changes is *why* the extra turns happened — agent distrust of an
+untaught guarantee, not a round-trip design flaw.
+
+The lesson repeats one line up: the first correction fixed the mechanism and
+left the headline claim at a scope the data never supported. **Pooling hid a
+sign change.** A number that is right about the aggregate and wrong about every
+subset is not a finding, and this one was published twice before anyone split it.
+
+The general lesson is the one this suite keeps re-teaching: **the write-up was
+reasoned from the aggregate, and the aggregate was consistent with a story that
+the per-episode records refute.** Consistent is not the same as true.

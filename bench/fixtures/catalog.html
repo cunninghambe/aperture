@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Parts catalogue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Parts catalogue</h1>
+      <input
+        id="search"
+        name="search"
+        type="search"
+        data-bench="search"
+        aria-label="Search the catalogue"
+      />
+      <p data-count>12 parts</p>
+      <ul id="results"></ul>
+
+      <h2>Shortlist</h2>
+      <ul id="shortlist"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // L3 — DIE, REVIVE, DIE, with the deciding facts arriving only in diffs.
+      //
+      // Twelve rows, rebuilt from scratch on every keystroke. The first filter
+      // kills every ref in the list (12 children down to 4 is below diff.ts's
+      // REPLACE_MATCH_RATIO of 0.4 at span >= 8, so the whole list arrives as
+      // one `replace` that names what it destroyed). The second filter is a
+      // `type` on a field that already holds text, so Aperture clears it first:
+      // the unfiltered list revives inside a single act, and then dies again.
+      // The agent must act only on refs from the era it is actually in.
+      //
+      // Two design constraints held deliberately:
+      //
+      //   - Each filter matches exactly FOUR parts, one under COLLAPSE_RUN, so
+      //     the filtered list is never collapsed and every candidate price
+      //     arrives complete inside the diff. finder-cheapest's structural
+      //     expand-snapshot confound (a superlative hidden behind "… N more")
+      //     is a real cost of the collapse design, but it is not a BOOKKEEPING
+      //     cost, and importing it here would blur what this task measures.
+      //   - The cheapest part overall (Nylon spacer kit, $1.95) matches neither
+      //     filter. An agent that answers the superlative without respecting the
+      //     filter lands on an element outside `allowed`, and the witness says
+      //     so.
+      //
+      // The ORDER of this array is load-bearing twice over, and both reasons are
+      // about what the initial full snapshot gives away for free:
+      //
+      //   - The three rows COLLAPSE_SHOW renders before "… 9 more" are the three
+      //     parts that match NEITHER filter. So neither deciding price is in the
+      //     snapshot both arms start with — $4.25 and $5.15 can only arrive in a
+      //     diff, which is what makes `mustObserve` mean something here. (The
+      //     three that are visible are the cheapest parts on the page, so the
+      //     decoy is the part an agent actually sees.)
+      //   - Within each filtered set the cheapest is not first, so the answer is
+      //     a comparison rather than a glance at the top row.
+      var parts = [
+        { id: 'nylon-spacer-kit', name: 'Nylon spacer kit', price: 1.95 },
+        { id: 'brass-screw-pack', name: 'Brass screw pack', price: 2.1 },
+        { id: 'rubber-foot-pads', name: 'Rubber foot pads', price: 2.75 },
+        { id: 'steel-hinge', name: 'Steel hinge', price: 9.1 },
+        { id: 'oak-trim-strip', name: 'Oak trim strip', price: 11.25 },
+        { id: 'steel-bracket', name: 'Steel bracket', price: 4.25 },
+        { id: 'copper-washer-set', name: 'Copper washer set', price: 3.3 },
+        { id: 'oak-panel', name: 'Oak panel', price: 18.0 },
+        { id: 'steel-latch', name: 'Steel latch', price: 12.4 },
+        { id: 'oak-dowel', name: 'Oak dowel', price: 5.15 },
+        { id: 'steel-shelf-pin', name: 'Steel shelf pin', price: 6.8 },
+        { id: 'oak-knob', name: 'Oak knob', price: 7.9 },
+      ];
+
+      var shortlist = [];
+      var resultsEl = document.getElementById('results');
+      var shortlistEl = document.getElementById('shortlist');
+      // No id, so the count is keyed by its own content and its changes arrive
+      // as a remove plus an add. With a stable id the change would be a
+      // propDelta update on a ref the model has never been shown, and diff.ts
+      // routes those to `unread` — a permanent "changes in regions you have not
+      // read" note instead of the number.
+      var countEl = document.querySelector('p[data-count]');
+      var searchEl = document.getElementById('search');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function matches() {
+        var q = searchEl.value.trim().toLowerCase();
+        if (!q) return parts;
+        return parts.filter(function (p) {
+          return p.name.toLowerCase().indexOf(q) >= 0;
+        });
+      }
+
+      function render() {
+        var m = matches();
+        var rows = m.map(function (p) {
+          var li = document.createElement('li');
+          li.append(el('span', p.name));
+          li.append(el('span', '$' + p.price.toFixed(2)));
+          li.append(
+            el('button', 'Add ' + p.name + ' to shortlist', { 'data-bench': 'add:' + p.id }),
+          );
+          return li;
+        });
+        resultsEl.replaceChildren.apply(resultsEl, rows);
+        countEl.textContent = m.length + ' parts';
+
+        // The name goes in a <span>, not as the <li>'s own text. A listitem is
+        // a semantic container, so it takes only an EXPLICIT name — its own
+        // text node renders nowhere, and a shortlist of bare `listitem` lines
+        // tells the agent nothing about what it has shortlisted.
+        var picks = shortlist.map(function (n) {
+          var li = document.createElement('li');
+          li.append(el('span', n));
+          return li;
+        });
+        shortlistEl.replaceChildren.apply(shortlistEl, picks);
+      }
+
+      searchEl.addEventListener('input', render);
+
+      resultsEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench').split(':')[1];
+        for (var i = 0; i < parts.length; i++) {
+          if (parts[i].id === id && shortlist.indexOf(parts[i].name) < 0) {
+            shortlist.push(parts[i].name);
+          }
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return { query: searchEl.value, shortlist: shortlist.slice() };
+      });
+    </script>
+  </body>
+</html>

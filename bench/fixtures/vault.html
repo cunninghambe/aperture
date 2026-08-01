@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vault</title>
+  </head>
+  <body>
+    <main>
+      <h1>Vault</h1>
+      <div id="panel"></div>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // L2 + L3 — FORCED MID-TASK RESYNC over a page that dies four times.
+      //
+      // Sixteen page actions are required to solve this: reveal, begin, five
+      // toggles, continue, five toggles, continue, type, unlock. In the diff arm
+      // that is sixteen diff observations, and MAX_DIFFS_PER_EPOCH is 12 — so
+      // partway through, the engine stops diffing and restates the whole page.
+      // The model's world is replaced mid-task, and it has to carry a fact
+      // across that reset.
+      //
+      // The fact is the security code. It is revealed only by the first click,
+      // so it travels in a DIFF (both arms get the initial full snapshot for
+      // free, and it is not in it), and it is on NO panel after the first — so
+      // neither the forced resync nor any voluntary full snapshot can hand it
+      // back. Nothing on the page restates it. Either the model kept it or it
+      // cannot finish.
+      //
+      // Each panel is swapped with replaceChildren, so every ref from the
+      // previous panel is dead — L3, four times over.
+      //
+      // Toggles are bare inputs rather than label-wrapped rows on purpose: a
+      // node with no children has shape '' and `sameShapeRunLength` bails on a
+      // falsy shape, so five of them in a row can never be collapsed by
+      // COLLAPSE_RUN. Wrapped in <div>s they would be five same-shape siblings
+      // and two of the five would render as "… 2 more generics".
+      var CODE = 'VC-83QK';
+
+      var STAGE_ONE = ['alpha', 'bravo', 'charlie', 'delta', 'echo'];
+      var STAGE_TWO = ['foxtrot', 'golf', 'hotel', 'india', 'juliet'];
+
+      var state = {
+        panel: 1,
+        revealed: false,
+        toggles: {},
+        code: '',
+        unlocked: false,
+      };
+      STAGE_ONE.concat(STAGE_TWO).forEach(function (n) { state.toggles[n] = false; });
+
+      var panel = document.getElementById('panel');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function toggle(name) {
+        var input = el('input', null, {
+          type: 'checkbox',
+          'data-bench': 't:' + name,
+          'aria-label': 'Enable ' + name + ' safeguard',
+        });
+        input.checked = state.toggles[name] === true;
+        input.addEventListener('change', function () {
+          state.toggles[name] = input.checked;
+        });
+        return input;
+      }
+
+      function allOn(names) {
+        return names.every(function (n) { return state.toggles[n] === true; });
+      }
+
+      function render(note) {
+        var kids = [];
+        if (state.panel === 1) {
+          kids.push(el('h2', 'Access code'));
+          if (state.revealed) {
+            kids.push(el('p', 'Security code: ' + CODE));
+            kids.push(el('button', 'Begin', { 'data-bench': 'begin' }));
+          } else {
+            kids.push(el('button', 'Reveal code', { 'data-bench': 'reveal' }));
+          }
+        } else if (state.panel === 2) {
+          kids.push(el('h2', 'Stage one safeguards'));
+          STAGE_ONE.forEach(function (n) { kids.push(toggle(n)); });
+          kids.push(el('button', 'Continue to stage two', { 'data-bench': 'continue-2' }));
+        } else if (state.panel === 3) {
+          kids.push(el('h2', 'Stage two safeguards'));
+          STAGE_TWO.forEach(function (n) { kids.push(toggle(n)); });
+          kids.push(el('button', 'Continue to the vault', { 'data-bench': 'continue-3' }));
+        } else {
+          kids.push(el('h2', 'Unlock'));
+          var field = el('input', null, {
+            'data-bench': 'code',
+            'aria-label': 'Security code',
+          });
+          field.value = state.code;
+          field.addEventListener('input', function () {
+            state.code = field.value;
+          });
+          kids.push(field);
+          kids.push(el('button', 'Unlock', { 'data-bench': 'unlock' }));
+        }
+        if (note) kids.push(el('p', note));
+        panel.replaceChildren.apply(panel, kids);
+      }
+
+      panel.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench');
+        if (id === 'reveal') {
+          state.revealed = true;
+          render();
+        } else if (id === 'begin') {
+          state.panel = 2;
+          render();
+        } else if (id === 'continue-2') {
+          if (!allOn(STAGE_ONE)) {
+            render('All five stage one safeguards must be enabled.');
+            return;
+          }
+          state.panel = 3;
+          render();
+        } else if (id === 'continue-3') {
+          if (!allOn(STAGE_TWO)) {
+            render('All five stage two safeguards must be enabled.');
+            return;
+          }
+          state.panel = 4;
+          render();
+        } else if (id === 'unlock') {
+          if (state.code === CODE) {
+            state.unlocked = true;
+            render('Vault unlocked.');
+          } else {
+            render('Incorrect code.');
+          }
+        }
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          panel: state.panel,
+          revealed: state.revealed,
+          toggles: JSON.parse(JSON.stringify(state.toggles)),
+          code: state.code,
+          unlocked: state.unlocked,
+        };
+      });
+    </script>
+  </body>
+</html>

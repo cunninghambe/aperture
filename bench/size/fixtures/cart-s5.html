@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cart</title>
+  </head>
+  <body>
+    <main>
+      <h1>Your cart</h1>
+      <ul id="lines"></ul>
+      <p id="total">Total: $0.00</p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      var lines = [
+        { id: 'blue-widget', name: 'Blue Widget', price: 12.0, qty: 1 },
+        { id: 'desk-lamp', name: 'Desk Lamp', price: 34.5, qty: 2 },
+        { id: 'notebook', name: 'Notebook', price: 4.25, qty: 3 },
+        { id: 'usb-hub', name: 'USB Hub', price: 19.99, qty: 1 },
+      ];
+
+      var listEl = document.getElementById('lines');
+      var totalEl = document.getElementById('total');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function money(n) {
+        return '$' + n.toFixed(2);
+      }
+
+      function render() {
+        var rows = lines.map(function (l) {
+          var li = document.createElement('li');
+          li.append(el('span', l.name + ' at ' + money(l.price) + ' each'));
+          // The quantity lives in its own text node AND in nothing else. An
+          // agent that wants to know where a stepper has got to has to have
+          // read this line out of the stream.
+          li.append(el('span', 'Quantity: ' + l.qty));
+          li.append(el('button', 'Add one ' + l.name, { 'data-bench': 'inc:' + l.id }));
+          li.append(el('button', 'Remove one ' + l.name, { 'data-bench': 'dec:' + l.id }));
+          li.append(el('button', 'Delete ' + l.name + ' from cart', { 'data-bench': 'rm:' + l.id }));
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+        var t = lines.reduce(function (a, l) { return a + l.price * l.qty; }, 0);
+        totalEl.textContent = 'Total: ' + money(t);
+      }
+
+      listEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        var idx = -1;
+        for (var i = 0; i < lines.length; i++) if (lines[i].id === parts[1]) idx = i;
+        if (idx < 0) return;
+        if (parts[0] === 'inc') lines[idx].qty += 1;
+        else if (parts[0] === 'dec') lines[idx].qty = Math.max(0, lines[idx].qty - 1);
+        else if (parts[0] === 'rm') lines.splice(idx, 1);
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          lines: lines.map(function (l) { return { name: l.name, qty: l.qty }; }),
+        };
+      });
+    </script>
+    <!-- PAD:BEGIN -->
+    <div role="group">
+      <h3>Section 1: regional survey procedure</h3>
+      <p>Note 1. The quiet valley logged no variance worth escalating.</p>
+      <p>Note 2. The inland headland confirmed nothing the standing procedure omits.</p>
+      <p>Note 3. The sheltered plateau registered no variance worth escalating.</p>
+      <p>Note 4. The upland reservoir archived steady readings through the window.</p>
+      <p>Note 5. The shallow estuary returned nothing the standing procedure omits.</p>
+      <p>Note 6. The seasonal reservoir archived measurements the review panel.</p>
+      <h3>Section 2: regional survey procedure</h3>
+      <p>Note 7. The upland basin recorded figures close to the last quarter.</p>
+      <p>Note 8. The exposed mast reported steady readings through the window.</p>
+      <p>Note 9. The coastal estuary observed steady readings through the window.</p>
+      <p>Note 10. The lowland buoy logged steady readings through the window.</p>
+      <p>Note 11. The inland station logged values inside the agreed tolerance.</p>
+      <p>Note 12. The seasonal moor observed figures close to the last quarter.</p>
+      <h3>Section 3: reference measurement notes</h3>
+      <p>Note 13. The shallow headland archived no variance worth escalating.</p>
+      <p>Note 14. The humid estuary returned steady readings through the window.</p>
+      <p>Note 15. The quiet ridge observed figures close to the last quarter.</p>
+      <p>Note 16. The arid inlet reported figures close to the last quarter.</p>
+      <p>Note 17. The northern station confirmed measurements the review panel.</p>
+      <p>Note 18. The shallow station archived nothing the standing procedure omits.</p>
+      <h3>Section 4: reference measurement notes</h3>
+      <p>Note 19. The exposed transect registered measurements the review panel.</p>
+      <p>Note 20. The coastal estuary sampled a quiet period with no operator call.</p>
+      <p>Note 21. The inland gauge archived a quiet period with no operator call.</p>
+      <p>Note 22. The sheltered reservoir returned nothing the standing procedure.</p>
+      <p>Note 23. The lowland basin reported values inside the agreed tolerance.</p>
+      <p>Note 24. The northern moor observed a slow drift matching the note.</p>
+      <h3>Section 5: field access arrangements</h3>
+      <p>Note 25. The arid inlet reported nothing the standing procedure omits.</p>
+      <p>Note 26. The northern moor returned figures close to the last quarter.</p>
+      <p>Note 27. The inland plateau returned measurements the review panel accepted.</p>
+      <p>Note 28. The sheltered station transmitted nothing the standing procedure.</p>
+      <p>Note 29. The lowland ridge confirmed figures close to the last quarter.</p>
+      <p>Note 30. The inland moor reported steady readings through the window.</p>
+      <h3>Section 6: seasonal reporting cycle</h3>
+      <p>Note 31. The northern basin observed values inside the agreed tolerance.</p>
+      <p>Note 32. The temperate plateau reported measurements the review panel.</p>
+      <p>Note 33. The lowland transect reported a slow drift matching the note.</p>
+      <p>Note 34. The quiet ridge confirmed a quiet period with no operator call.</p>
+      <p>Note 35. The inland headland transmitted nothing the standing procedure.</p>
+      <p>Note 36. The humid buoy sampled no variance worth escalating.</p>
+      <h3>Section 7: calibration and drift</h3>
+      <p>Note 37. The inland gauge returned no variance worth escalating.</p>
+      <p>Note 38. The upland plateau logged a slow drift matching the note.</p>
+      <p>Note 39. The coastal ridge logged no variance worth escalating.</p>
+      <p>Note 40. The nightly estuary observed nothing the standing procedure omits.</p>
+      <p>Note 41. The shallow headland sampled a slow drift matching the note.</p>
+      <p>Note 42. The quiet plateau returned no variance worth escalating.</p>
+      <h3>Section 8: calibration and drift</h3>
+      <p>Note 43. The shallow valley confirmed nothing the standing procedure omits.</p>
+      <p>Note 44. The arid mast confirmed no variance worth escalating.</p>
+      <p>Note 45. The lowland station archived steady readings through the window.</p>
+      <p>Note 46. The upland basin recorded steady readings through the window.</p>
+      <p>Note 47. The exposed reservoir archived no variance worth escalating.</p>
+      <p>Note 48. The humid moor reported measurements the review panel accepted.</p>
+      <h3>Section 9: operator handover</h3>
+      <p>Note 49. The shallow transect returned a quiet period with no operator call.</p>
+      <p>Note 50. The northern valley logged no variance worth escalating.</p>
+      <p>Note 51. The arid reservoir archived nothing the standing procedure omits.</p>
+      <p>Note 52. The sheltered ridge recorded no variance worth escalating.</p>
+      <p>Note 53. The quiet mast confirmed values inside the agreed tolerance.</p>
+      <p>Note 54. The northern sensor recorded steady readings through the window.</p>
+      <h3>Section 10: reference measurement notes</h3>
+      <p>Note 55. The upland basin registered a quiet period with no operator call.</p>
+      <p>Note 56. The northern valley reported steady readings through the window.</p>
+      <p>Note 57. The temperate station logged no variance worth escalating.</p>
+      <p>Note 58. The inland ridge recorded measurements the review panel accepted.</p>
+      <p>Note 59. The northern sensor returned a quiet period with no operator call.</p>
+      <p>Note 60. The coastal plateau transmitted values inside the agreed tolerance.</p>
+      <h3>Section 11: reference measurement notes</h3>
+      <p>Note 61. The temperate headland observed measurements the review panel.</p>
+      <p>Note 62. The arid mast archived figures close to the last quarter.</p>
+      <p>Note 63. The arid mast archived values inside the agreed tolerance.</p>
+      <p>Note 64. The exposed sensor sampled measurements the review panel accepted.</p>
+      <p>Note 65. The upland headland archived nothing the standing procedure omits.</p>
+      <p>Note 66. The arid estuary archived values inside the agreed tolerance.</p>
+      <h3>Section 12: equipment maintenance</h3>
+      <p>Note 67. The sheltered basin confirmed figures close to the last quarter.</p>
+      <p>Note 68. The humid headland returned measurements the review panel accepted.</p>
+      <p>Note 69. The sheltered reservoir returned a slow drift matching the note.</p>
+      <p>Note 70. The temperate valley confirmed values inside the agreed tolerance.</p>
+      <p>Note 71. The inland reservoir registered steady readings through the window.</p>
+      <p>Note 72. The sheltered ridge observed a quiet period with no operator call.</p>
+      <h3>Section 13: operator handover</h3>
+      <p>Note 73. The northern sensor returned no variance worth escalating.</p>
+      <p>Note 74. The northern sensor reported values inside the agreed tolerance.</p>
+      <p>Note 75. The arid inlet sampled values inside the agreed tolerance.</p>
+      <p>Note 76. The temperate gauge transmitted measurements the review panel.</p>
+      <p>Note 77. The seasonal valley registered values inside the agreed tolerance.</p>
+      <p>Note 78. The temperate mast recorded figures close to the last quarter.</p>
+      <h3>Section 14: field access arrangements</h3>
+      <p>Note 79. The humid sensor recorded steady readings through the window.</p>
+      <p>Note 80. The humid reservoir reported measurements the review panel.</p>
+      <p>Note 81. The arid plateau archived a quiet period with no operator call.</p>
+      <p>Note 82. The inland headland logged a quiet period with no operator call.</p>
+      <p>Note 83. The shallow valley archived no variance worth escalating.</p>
+      <p>Note 84. The lowland mast observed nothing the standing procedure omits.</p>
+      <h3>Section 15: operator handover</h3>
+      <p>Note 85. The inland reservoir registered nothing the standing procedure.</p>
+      <p>Note 86. The shallow reservoir transmitted measurements the review panel.</p>
+      <p>Note 87. The shallow moor sampled values inside the agreed tolerance.</p>
+      <p>Note 88. The northern plateau registered a quiet period with no operator.</p>
+      <p>Note 89. The coastal inlet sampled values inside the agreed tolerance.</p>
+      <p>Note 90. The shallow moor observed figures close to the last quarter.</p>
+      <h3>Section 16: equipment maintenance</h3>
+      <p>Note 91. The northern estuary returned no variance worth escalating.</p>
+      <p>Note 92. The upland inlet archived steady readings through the window.</p>
+      <p>Note 93. The seasonal valley logged measurements the review panel accepted.</p>
+      <p>Note 94. The upland headland observed steady readings through the window.</p>
+      <p>Note 95. The nightly sensor sampled nothing the standing procedure omits.</p>
+      <p>Note 96. The northern moor confirmed steady readings through the window.</p>
+      <h3>Section 17: operator handover</h3>
+      <p>Note 97. The upland valley observed values inside the agreed tolerance.</p>
+      <p>Note 98. The temperate headland reported values inside the agreed tolerance.</p>
+      <p>Note 99. The humid valley confirmed no variance worth escalating.</p>
+      <p>Note 100. The temperate valley registered steady readings through the.</p>
+      <p>Note 101. The nightly headland recorded a quiet period with no operator.</p>
+      <p>Note 102. The humid valley registered values inside the agreed tolerance.</p>
+      <h3>Section 18: seasonal reporting cycle</h3>
+      <p>Note 103. The upland station observed a slow drift matching the note.</p>
+      <p>Note 104. The seasonal reservoir transmitted values inside the agreed.</p>
+      <p>Note 105. The northern mast recorded steady readings through the window.</p>
+      <p>Note 106. The sheltered inlet returned values inside the agreed tolerance.</p>
+      <p>Note 107. The humid transect returned a slow drift matching the note.</p>
+      <p>Note 108. The lowland gauge registered a quiet period with no operator call.</p>
+      <h3>Section 19: operator handover</h3>
+      <p>Note 109. The arid mast transmitted a slow drift matching the note.</p>
+      <p>Note 110. The upland ridge returned measurements the review panel accepted.</p>
+      <p>Note 111. The lowland station sampled no variance worth escalating.</p>
+      <p>Note 112. The shallow inlet logged a quiet period with no operator call.</p>
+      <p>Note 113. The shallow gauge confirmed a quiet period with no operator call.</p>
+      <p>Note 114. The coastal valley returned steady readings through the window.</p>
+      <h3>Section 20: field access arrangements</h3>
+      <p>Note 115. The coastal moor sampled steady readings through the window.</p>
+      <p>Note 116. The arid station returned a quiet period with no operator call.</p>
+      <p>Note 117. The temperate gauge archived steady readings through the window.</p>
+      <p>Note 118. The lowland mast transmitted figures close to the last quarter.</p>
+      <p>Note 119. The sheltered buoy archived values inside the agreed tolerance.</p>
+      <p>Note 120. The northern sensor archived a quiet period with no operator call.</p>
+      <h3>Section 21: seasonal reporting cycle</h3>
+      <p>Note 121. The upland basin recorded nothing the standing procedure omits.</p>
+      <p>Note 122. The inland estuary archived nothing the standing procedure omits.</p>
+      <p>Note 123. The quiet basin observed a slow drift matching the note.</p>
+      <p>Note 124. The shallow sensor archived a quiet period with no operator call.</p>
+      <p>Note 125. The nightly moor reported values inside the agreed tolerance.</p>
+      <p>Note 126. The northern sensor transmitted figures close to the last quarter.</p>
+      <h3>Section 22: seasonal reporting cycle</h3>
+      <p>Note 127. The seasonal gauge confirmed no variance worth escalating.</p>
+      <p>Note 128. The quiet basin sampled figures close to the last quarter.</p>
+      <p>Note 129. The northern sensor returned a slow drift matching the note.</p>
+      <p>Note 130. The coastal plateau returned nothing the standing procedure omits.</p>
+      <p>Note 131. The humid reservoir observed measurements the review panel.</p>
+      <p>Note 132. The shallow sensor sampled no variance worth escalating.</p>
+      <h3>Section 23: calibration and drift</h3>
+      <p>Note 133. The shallow inlet logged a slow drift matching the note.</p>
+      <p>Note 134. The northern estuary sampled nothing the standing procedure omits.</p>
+      <p>Note 135. The temperate transect observed figures close to the last quarter.</p>
+      <p>Note 136. The arid plateau registered figures close to the last quarter.</p>
+      <p>Note 137. The seasonal moor recorded values inside the agreed tolerance.</p>
+      <p>Note 138. The exposed gauge observed a quiet period with no operator call.</p>
+      <h3>Section 24: calibration and drift</h3>
+      <p>Note 139. The shallow plateau confirmed values inside the agreed tolerance.</p>
+      <p>Note 140. The seasonal station observed measurements the review panel.</p>
+      <p>Note 141. The lowland buoy confirmed figures close to the last quarter.</p>
+      <p>Note 142. The inland ridge registered values inside the agreed tolerance.</p>
+      <p>Note 143. The humid sensor sampled a slow drift matching the note.</p>
+      <p>Note 144. The northern sensor recorded measurements the review panel.</p>
+      <h3>Section 25: field access arrangements</h3>
+      <p>Note 145. The inland sensor sampled figures close to the last quarter.</p>
+      <p>Note 146. The nightly headland reported figures close to the last quarter.</p>
+      <p>Note 147. The sheltered inlet transmitted steady readings through the.</p>
+      <p>Note 148. The humid sensor observed a quiet period with no operator call.</p>
+      <p>Note 149. The coastal gauge reported no variance worth escalating.</p>
+      <p>Note 150. The shallow station transmitted steady readings through the.</p>
+      <h3>Section 26: reference measurement notes</h3>
+      <p>Note 151. The temperate buoy confirmed nothing the standing procedure omits.</p>
+      <p>Note 152. The seasonal buoy recorded nothing the standing procedure omits.</p>
+      <p>Note 153. The nightly estuary sampled steady readings through the window.</p>
+      <p>Note 154. The temperate buoy archived no variance worth escalating.</p>
+      <p>Note 155. The lowland transect returned a slow drift matching the note.</p>
+      <p>Note 156. The quiet inlet registered no variance worth escalating.</p>
+      <h3>Section 27: seasonal reporting cycle</h3>
+      <p>Note 157. The arid estuary observed a slow drift matching the note.</p>
+      <p>Note 158. The temperate valley recorded a slow drift matching the note.</p>
+      <p>Note 159. The northern station recorded nothing the standing procedure.</p>
+      <p>Note 160. The humid reservoir logged figures close to the last quarter.</p>
+      <p>Note 161. The exposed transect observed a quiet period with no operator.</p>
+      <p>Note 162. The lowland moor reported values inside the agreed tolerance.</p>
+      <h3>Section 28: calibration and drift</h3>
+      <p>Note 163. The inland buoy transmitted figures close to the last quarter.</p>
+      <p>Note 164. The humid gauge logged a quiet period with no operator call.</p>
+      <p>Note 165. The lowland headland transmitted no variance worth escalating.</p>
+      <p>Note 166. The upland basin archived a slow drift matching the note.</p>
+      <p>Note 167. The upland inlet sampled a slow drift matching the note.</p>
+      <p>Note 168. The lowland reservoir recorded a slow drift matching the note.</p>
+      <h3>Section 29: operator handover</h3>
+      <p>Note 169. The quiet transect archived values inside the agreed tolerance.</p>
+      <p>Note 170. The quiet moor archived steady readings through the window.</p>
+      <p>Note 171. The inland plateau registered figures close to the last quarter.</p>
+      <p>Note 172. The seasonal estuary sampled nothing the standing procedure omits.</p>
+      <p>Note 173. The coastal headland transmitted figures close to the last.</p>
+      <p>Note 174. The arid moor transmitted measurements the review panel accepted.</p>
+      <h3>Section 30: operator handover</h3>
+      <p>Note 175. The northern headland reported a quiet period with no operator.</p>
+      <p>Note 176. The arid transect transmitted a slow drift matching the note.</p>
+      <p>Note 177. The seasonal inlet recorded values inside the agreed tolerance.</p>
+      <p>Note 178. The quiet basin archived a quiet period with no operator call.</p>
+      <p>Note 179. The lowland estuary recorded nothing the standing procedure omits.</p>
+      <p>Note 180. The sheltered estuary returned nothing the standing procedure.</p>
+      <h3>Section 31: equipment maintenance</h3>
+      <p>Note 181. The exposed mast transmitted steady readings through the window.</p>
+      <p>Note 182. The upland ridge reported nothing the standing procedure omits.</p>
+      <p>Note 183. The shallow station sampled steady readings through the window.</p>
+      <p>Note 184. The arid station observed measurements the review panel accepted.</p>
+      <p>Note 185. The shallow headland returned nothing the standing procedure.</p>
+      <p>Note 186. The nightly station returned nothing the standing procedure omits.</p>
+      <h3>Section 32: reference measurement notes</h3>
+      <p>Note 187. The upland headland transmitted steady readings through the.</p>
+      <p>Note 188. The upland ridge registered no variance worth escalating.</p>
+      <p>Note 189. The arid ridge registered values inside the agreed tolerance.</p>
+      <p>Note 190. The seasonal reservoir observed nothing the standing procedure.</p>
+      <p>Note 191. The inland moor returned a quiet period with no operator call.</p>
+      <p>Note 192. The northern sensor archived nothing the standing procedure omits.</p>
+      <h3>Section 33: regional survey procedure</h3>
+      <p>Note 193. The upland sensor logged nothing the standing procedure omits.</p>
+      <p>Note 194. The shallow basin sampled steady readings through the window.</p>
+      <p>Note 195. The nightly inlet returned no variance worth escalating.</p>
+      <p>Note 196. The nightly moor logged values inside the agreed tolerance.</p>
+      <p>Note 197. The inland reservoir transmitted a slow drift matching the note.</p>
+      <p>Note 198. The arid moor logged measurements the review panel accepted.</p>
+      <h3>Section 34: field access arrangements</h3>
+      <p>Note 199. The humid basin confirmed a slow drift matching the note.</p>
+      <p>Note 200. The temperate inlet registered no variance worth escalating.</p>
+      <p>Note 201. The temperate valley recorded a slow drift matching the note.</p>
+      <p>Note 202. The inland plateau recorded a slow drift matching the note.</p>
+      <p>Note 203. The exposed mast confirmed measurements the review panel accepted.</p>
+      <p>Note 204. The lowland mast observed nothing the standing procedure omits.</p>
+      <h3>Section 35: operator handover</h3>
+      <p>Note 205. The temperate plateau observed a quiet period with no operator.</p>
+      <p>Note 206. The exposed moor observed measurements the review panel accepted.</p>
+      <p>Note 207. The exposed inlet archived nothing the standing procedure omits.</p>
+      <p>Note 208. The arid buoy logged nothing the standing procedure omits.</p>
+      <p>Note 209. The humid transect transmitted figures close to the last quarter.</p>
+      <p>Note 210. The shallow reservoir transmitted no variance worth escalating.</p>
+      <h3>Section 36: calibration and drift</h3>
+      <p>Note 211. The humid sensor sampled figures close to the last quarter.</p>
+      <p>Note 212. The upland gauge confirmed steady readings through the window.</p>
+      <p>Note 213. The shallow reservoir returned measurements the review panel.</p>
+      <p>Note 214. The shallow valley returned measurements the review panel.</p>
+      <p>Note 215. The sheltered gauge logged a quiet period with no operator call.</p>
+      <p>Note 216. The sheltered gauge transmitted a slow drift matching the note.</p>
+      <h3>Section 37: calibration and drift</h3>
+      <p>Note 217. The humid basin sampled a quiet period with no operator call.</p>
+      <p>Note 218. The northern inlet transmitted values inside the agreed tolerance.</p>
+      <p>Note 219. The exposed station archived a slow drift matching the note.</p>
+      <p>Note 220. The shallow reservoir recorded a quiet period with no operator.</p>
+      <p>Note 221. The nightly estuary registered a slow drift matching the note.</p>
+      <p>Note 222. The nightly valley recorded figures close to the last quarter.</p>
+      <h3>Section 38: operator handover</h3>
+      <p>Note 223. The nightly estuary transmitted figures close to the last quarter.</p>
+      <p>Note 224. The exposed station returned measurements the review panel.</p>
+      <p>Note 225. The inland buoy confirmed nothing the standing procedure omits.</p>
+      <p>Note 226. The lowland plateau logged no variance worth escalating.</p>
+      <p>Note 227. The quiet mast reported nothing the standing procedure omits.</p>
+      <p>Note 228. The humid moor logged measurements the review panel accepted.</p>
+      <h3>Section 39: regional survey procedure</h3>
+      <p>Note 229. The humid transect returned measurements the review panel.</p>
+      <p>Note 230. The inland buoy reported steady readings through the window.</p>
+      <p>Note 231. The nightly valley sampled measurements the review panel accepted.</p>
+      <p>Note 232. The seasonal gauge logged values inside the agreed tolerance.</p>
+      <p>Note 233. The temperate sensor transmitted a quiet period with no operator.</p>
+      <p>Note 234. The shallow basin recorded a quiet period with no operator call.</p>
+      <h3>Section 40: data retention policy</h3>
+      <p>Note 235. The temperate moor archived figures close to the last quarter.</p>
+      <p>Note 236. The quiet estuary confirmed no variance worth escalating.</p>
+      <p>Note 237. The nightly basin registered measurements the review panel.</p>
+      <p>Note 238. The quiet transect reported no variance worth escalating.</p>
+      <p>Note 239. The coastal valley confirmed figures close to the last quarter.</p>
+      <p>Note 240. The temperate station recorded nothing the standing procedure.</p>
+      <h3>Section 41: reference measurement notes</h3>
+      <p>Note 241. The exposed plateau confirmed values inside the agreed tolerance.</p>
+      <p>Note 242. The temperate valley recorded values inside the agreed tolerance.</p>
+      <p>Note 243. The temperate basin observed no variance worth escalating.</p>
+      <p>Note 244. The arid ridge logged figures close to the last quarter.</p>
+      <p>Note 245. The arid reservoir sampled values inside the agreed tolerance.</p>
+      <p>Note 246. The humid valley observed figures close to the last quarter.</p>
+      <h3>Section 42: regional survey procedure</h3>
+      <p>Note 247. The inland transect recorded nothing the standing procedure omits.</p>
+      <p>Note 248. The upland reservoir returned values inside the agreed tolerance.</p>
+      <p>Note 249. The northern reservoir confirmed a slow drift matching the note.</p>
+      <p>Note 250. The seasonal station transmitted no variance worth escalating.</p>
+      <p>Note 251. The inland ridge recorded a quiet period with no operator call.</p>
+      <p>Note 252. The arid moor logged steady readings through the window.</p>
+      <h3>Section 43: seasonal reporting cycle</h3>
+      <p>Note 253. The nightly inlet registered figures close to the last quarter.</p>
+      <p>Note 254. The quiet transect observed steady readings through the window.</p>
+      <p>Note 255. The exposed moor sampled no variance worth escalating.</p>
+      <p>Note 256. The inland estuary transmitted a slow drift matching the note.</p>
+      <p>Note 257. The arid plateau returned nothing the standing procedure omits.</p>
+      <p>Note 258. The inland sensor archived values inside the agreed tolerance.</p>
+      <h3>Section 44: seasonal reporting cycle</h3>
+      <p>Note 259. The nightly buoy sampled a quiet period with no operator call.</p>
+      <p>Note 260. The sheltered moor reported a quiet period with no operator call.</p>
+      <p>Note 261. The temperate buoy reported no variance worth escalating.</p>
+      <p>Note 262. The sheltered ridge archived no variance worth escalating.</p>
+      <p>Note 263. The lowland sensor confirmed nothing the standing procedure omits.</p>
+      <p>Note 264. The humid transect sampled a slow drift matching the note.</p>
+      <h3>Section 45: regional survey procedure</h3>
+      <p>Note 265. The lowland estuary returned figures close to the last quarter.</p>
+      <p>Note 266. The lowland mast archived steady readings through the window.</p>
+      <p>Note 267. The temperate ridge archived a slow drift matching the note.</p>
+      <p>Note 268. The sheltered station returned measurements the review panel.</p>
+      <p>Note 269. The shallow reservoir registered a slow drift matching the note.</p>
+      <p>Note 270. The temperate moor confirmed steady readings through the window.</p>
+      <h3>Section 46: seasonal reporting cycle</h3>
+      <p>Note 271. The quiet buoy returned values inside the agreed tolerance.</p>
+      <p>Note 272. The arid sensor recorded a quiet period with no operator call.</p>
+      <p>Note 273. The sheltered headland returned no variance worth escalating.</p>
+      <p>Note 274. The seasonal basin observed a slow drift matching the note.</p>
+      <p>Note 275. The lowland plateau recorded measurements the review panel.</p>
+      <p>Note 276. The coastal estuary observed a slow drift matching the note.</p>
+      <h3>Section 47: regional survey procedure</h3>
+      <p>Note 277. The seasonal basin registered figures close to the last quarter.</p>
+      <p>Note 278. The sheltered buoy returned measurements the review panel.</p>
+      <p>Note 279. The nightly reservoir archived figures close to the last quarter.</p>
+      <p>Note 280. The coastal inlet sampled no variance worth escalating.</p>
+      <p>Note 281. The lowland estuary returned a quiet period with no operator call.</p>
+      <p>Note 282. The inland station sampled measurements the review panel accepted.</p>
+      <h3>Section 48: regional survey procedure</h3>
+      <p>Note 283. The arid moor observed no variance worth escalating.</p>
+      <p>Note 284. The inland mast returned steady readings through the window.</p>
+      <p>Note 285. The lowland reservoir recorded a slow drift matching the note.</p>
+      <p>Note 286. The quiet mast logged measurements the review panel accepted.</p>
+      <p>Note 287. The exposed moor registered measurements the review panel.</p>
+      <p>Note 288. The humid gauge sampled values inside the agreed tolerance.</p>
+      <h3>Section 49: operator handover</h3>
+      <p>Note 289. The sheltered estuary confirmed steady readings through the.</p>
+      <p>Note 290. The humid inlet confirmed figures close to the last quarter.</p>
+      <p>Note 291. The lowland inlet confirmed measurements the review panel.</p>
+      <p>Note 292. The temperate plateau confirmed a slow drift matching the note.</p>
+      <p>Note 293. The shallow plateau observed measurements the review panel.</p>
+      <p>Note 294. The temperate buoy returned values inside the agreed tolerance.</p>
+      <h3>Section 50: reference measurement notes</h3>
+      <p>Note 295. The coastal ridge transmitted nothing the standing procedure.</p>
+      <p>Note 296. The humid buoy archived figures close to the last quarter.</p>
+      <p>Note 297. The inland plateau confirmed measurements the review panel.</p>
+      <p>Note 298. The lowland valley confirmed steady readings through the window.</p>
+      <p>Note 299. The northern plateau observed figures close to the last quarter.</p>
+      <p>Note 300. The exposed mast confirmed figures close to the last quarter.</p>
+      <h3>Section 51: reference measurement notes</h3>
+      <p>Note 301. The temperate ridge confirmed values inside the agreed tolerance.</p>
+      <p>Note 302. The lowland station sampled measurements the review panel.</p>
+      <p>Note 303. The upland mast returned measurements the review panel accepted.</p>
+      <p>Note 304. The arid mast returned a quiet period with no operator call.</p>
+      <p>Note 305. The upland station reported figures close to the last quarter.</p>
+      <p>Note 306. The exposed headland reported nothing the standing procedure.</p>
+      <h3>Section 52: reference measurement notes</h3>
+      <p>Note 307. The upland reservoir registered measurements the review panel.</p>
+      <p>Note 308. The inland basin archived steady readings through the window.</p>
+      <p>Note 309. The lowland valley logged a slow drift matching the note.</p>
+      <p>Note 310. The lowland mast registered nothing the standing procedure omits.</p>
+      <p>Note 311. The exposed transect registered nothing the standing procedure.</p>
+      <p>Note 312. The humid gauge returned a quiet period with no operator call.</p>
+      <h3>Section 53: calibration and drift</h3>
+      <p>Note 313. The inland plateau observed figures close to the last quarter.</p>
+      <p>Note 314. The quiet basin confirmed a quiet period with no operator call.</p>
+      <p>Note 315. The quiet station registered no variance worth escalating.</p>
+      <p>Note 316. The shallow sensor observed nothing the standing procedure omits.</p>
+      <p>Note 317. The nightly plateau registered a quiet period with no operator.</p>
+      <p>Note 318. The sheltered mast sampled measurements the review panel accepted.</p>
+      <h3>Section 54: field access arrangements</h3>
+      <p>Note 319. The inland valley sampled no variance worth escalating.</p>
+      <p>Note 320. The arid mast reported a slow drift matching the note.</p>
+      <p>Note 321. The coastal moor logged nothing the standing procedure omits.</p>
+      <p>Note 322. The northern estuary logged figures close to the last quarter.</p>
+      <p>Note 323. The shallow mast returned steady readings through the window.</p>
+      <p>Note 324. The lowland valley sampled no variance worth escalating.</p>
+      <h3>Section 55: data retention policy</h3>
+      <p>Note 325. The coastal moor transmitted no variance worth escalating.</p>
+      <p>Note 326. The exposed buoy archived values inside the agreed tolerance.</p>
+      <p>Note 327. The lowland transect confirmed nothing the standing procedure.</p>
+      <p>Note 328. The quiet reservoir confirmed nothing the standing procedure.</p>
+      <p>Note 329. The northern buoy sampled measurements the review panel accepted.</p>
+      <p>Note 330. The shallow mast logged values inside the agreed tolerance.</p>
+      <h3>Section 56: field access arrangements</h3>
+      <p>Note 331. The nightly transect confirmed figures close to the last quarter.</p>
+      <p>Note 332. The humid mast archived figures close to the last quarter.</p>
+      <p>Note 333. The nightly ridge logged a slow drift matching the note.</p>
+      <p>Note 334. The shallow valley logged a quiet period with no operator call.</p>
+      <p>Note 335. The humid station returned values inside the agreed tolerance.</p>
+      <p>Note 336. The temperate valley recorded values inside the agreed tolerance.</p>
+      <h3>Section 57: seasonal reporting cycle</h3>
+      <p>Note 337. The inland gauge transmitted steady readings through the window.</p>
+      <p>Note 338. The upland station confirmed no variance worth escalating.</p>
+      <p>Note 339. The lowland buoy logged nothing the standing procedure omits.</p>
+      <p>Note 340. The arid gauge observed measurements the review panel accepted.</p>
+      <p>Note 341. The temperate gauge recorded measurements the review panel.</p>
+      <p>Note 342. The lowland station recorded steady readings through the window.</p>
+      <h3>Section 58: operator handover</h3>
+      <p>Note 343. The inland sensor observed values inside the agreed tolerance.</p>
+      <p>Note 344. The inland reservoir archived values inside the agreed tolerance.</p>
+      <p>Note 345. The seasonal sensor confirmed a quiet period with no operator.</p>
+      <p>Note 346. The exposed headland confirmed values inside the agreed tolerance.</p>
+      <p>Note 347. The coastal ridge archived a slow drift matching the note.</p>
+      <p>Note 348. The lowland headland observed values inside the agreed tolerance.</p>
+      <h3>Section 59: field access arrangements</h3>
+      <p>Note 349. The exposed estuary archived values inside the agreed tolerance.</p>
+      <p>Note 350. The arid station confirmed a quiet period with no operator call.</p>
+      <p>Note 351. The nightly inlet registered a slow drift matching the note.</p>
+      <p>Note 352. The exposed gauge observed a quiet period with no operator call.</p>
+      <p>Note 353. The lowland sensor transmitted steady readings through the window.</p>
+      <p>Note 354. The inland station recorded values inside the agreed tolerance.</p>
+      <h3>Section 60: data retention policy</h3>
+      <p>Note 355. The nightly estuary confirmed steady readings through the window.</p>
+      <p>Note 356. The arid gauge observed values inside the agreed tolerance.</p>
+      <p>Note 357. The humid sensor returned steady readings through the window.</p>
+      <p>Note 358. The nightly reservoir archived no variance worth escalating.</p>
+      <p>Note 359. The upland plateau returned steady readings through the window.</p>
+      <p>Note 360. The seasonal moor returned nothing the standing procedure omits.</p>
+      <h3>Section 61: data retention policy</h3>
+      <p>Note 361. The lowland reservoir archived figures close to the last quarter.</p>
+      <p>Note 362. The exposed station confirmed a slow drift matching the note.</p>
+      <p>Note 363. The arid transect transmitted figures close to the last quarter.</p>
+      <p>Note 364. The sheltered reservoir registered a slow drift matching the note.</p>
+      <p>Note 365. The coastal basin transmitted no variance worth escalating.</p>
+      <p>Note 366. The coastal basin returned figures close to the last quarter.</p>
+      <h3>Section 62: equipment maintenance</h3>
+      <p>Note 367. The exposed valley sampled figures close to the last quarter.</p>
+      <p>Note 368. The northern valley logged nothing the standing procedure omits.</p>
+      <p>Note 369. The upland mast sampled steady readings through the window.</p>
+      <p>Note 370. The seasonal ridge archived steady readings through the window.</p>
+      <p>Note 371. The nightly mast confirmed figures close to the last quarter.</p>
+      <p>Note 372. The sheltered buoy archived figures close to the last quarter.</p>
+      <h3>Section 63: reference measurement notes</h3>
+      <p>Note 373. The nightly reservoir transmitted nothing the standing procedure.</p>
+      <p>Note 374. The seasonal gauge transmitted no variance worth escalating.</p>
+      <p>Note 375. The seasonal station recorded measurements the review panel.</p>
+      <p>Note 376. The quiet buoy returned nothing the standing procedure omits.</p>
+      <p>Note 377. The humid station registered a quiet period with no operator call.</p>
+      <p>Note 378. The sheltered gauge transmitted nothing the standing procedure.</p>
+      <h3>Section 64: equipment maintenance</h3>
+      <p>Note 379. The inland plateau confirmed nothing the standing procedure omits.</p>
+      <p>Note 380. The quiet valley archived nothing the standing procedure omits.</p>
+      <p>Note 381. The nightly reservoir logged values inside the agreed tolerance.</p>
+      <p>Note 382. The humid inlet registered a quiet period with no operator call.</p>
+      <p>Note 383. The exposed moor recorded measurements the review panel accepted.</p>
+      <p>Note 384. The arid plateau archived values inside the agreed tolerance.</p>
+      <h3>Section 65: calibration and drift</h3>
+      <p>Note 385. The upland buoy observed figures close to the last quarter.</p>
+      <p>Note 386. The temperate valley sampled nothing the standing procedure omits.</p>
+      <p>Note 387. The northern basin confirmed a slow drift matching the note.</p>
+      <p>Note 388. The arid moor observed no variance worth escalating.</p>
+      <p>Note 389. The temperate transect confirmed steady readings through the.</p>
+      <p>Note 390. The coastal transect logged a slow drift matching the note.</p>
+      <h3>Section 66: calibration and drift</h3>
+      <p>Note 391. The upland estuary observed nothing the standing procedure omits.</p>
+      <p>Note 392. The lowland ridge archived nothing the standing procedure omits.</p>
+      <p>Note 393. The inland ridge observed values inside the agreed tolerance.</p>
+      <p>Note 394. The northern transect observed a quiet period with no operator.</p>
+      <p>Note 395. The shallow plateau observed values inside the agreed tolerance.</p>
+      <p>Note 396. The lowland ridge sampled a slow drift matching the note.</p>
+      <h3>Section 67: calibration and drift</h3>
+      <p>Note 397. The seasonal headland recorded measurements the review panel.</p>
+      <p>Note 398. The shallow reservoir reported no variance worth escalating.</p>
+      <p>Note 399. The inland inlet recorded a quiet period with no operator call.</p>
+      <p>Note 400. The quiet estuary reported measurements the review panel accepted.</p>
+      <p>Note 401. The arid valley sampled a quiet period with no operator call.</p>
+      <p>Note 402. The upland mast registered steady readings through the window.</p>
+      <h3>Section 68: seasonal reporting cycle</h3>
+      <p>Note 403. The northern sensor confirmed a slow drift matching the note.</p>
+    </div>
+    <!-- PAD:END -->
+  </body>
+</html>

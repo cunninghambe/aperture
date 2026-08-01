@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ledger</title>
+  </head>
+  <body>
+    <main>
+      <h1>Ledger</h1>
+      <button data-bench="apply">Apply next adjustment</button>
+      <button data-bench="close">Close ledger</button>
+      <h2>Last 4 adjustments</h2>
+      <ul id="log"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // L4 — THE ARMS' HONEST DIFFERENCE, loaded as hard as this suite can load
+      // it without leaving the wave-1 page-size class.
+      //
+      // The running balance is NEVER displayed. It exists only in the witness's
+      // report, which the agent cannot see. The only trace of an adjustment on
+      // the page is one line in a rolling window of the last four — so the fact
+      // that decides when to stop is assembled from things the page said on
+      // earlier turns and does not say now.
+      //
+      // The asymmetry between the arms is exactly this window:
+      //   - A full re-dump restates the last four adjustments every single turn.
+      //     The re-dump agent re-reads most of the history for free.
+      //   - A diff announces ONLY the newest entry, and this is not a hope, it
+      //     is a consequence of how the diff engine matches nodes. Each entry's
+      //     <span> is keyed by its own text, so when the window slides the
+      //     engine finds every surviving entry elsewhere in the new tree
+      //     (`oldByKey`), calls it a move, and — because a <span> is generic and
+      //     therefore ref-less — emits nothing at all for it. The entry that
+      //     scrolls out of the window leaves in complete silence too. One add
+      //     line per click, and that is the whole diff.
+      //
+      // The deltas are a fixed sequence. Their prefix sums are 4, 2, 7, 8, 10,
+      // 7, 10: the balance passes through +10 for the first time on the FIFTH
+      // application, and the fifth delta (+2) exists only in the fifth click's
+      // diff. An agent that has lost one earlier entry stops at the wrong point,
+      // and the witness — which knows the balance — says so.
+      var DELTAS = [4, -2, 5, 1, 2, -3, 3];
+      var WINDOW = 4;
+
+      var state = { applied: [], balance: 0, closed: false };
+
+      var logEl = document.getElementById('log');
+      var applyEl = document.querySelector('button[data-bench="apply"]');
+      var main = document.querySelector('main');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function sign(n) {
+        return (n > 0 ? '+' : '') + n;
+      }
+
+      function render(note) {
+        var recent = state.applied.slice(-WINDOW);
+        var rows = recent.map(function (d) {
+          var li = document.createElement('li');
+          // The text lives in a <span>, not on the <li>. A listitem takes only
+          // an explicit name, so its own text node renders nowhere at all.
+          li.append(el('span', 'applied ' + sign(d)));
+          return li;
+        });
+        logEl.replaceChildren.apply(logEl, rows);
+        if (state.applied.length >= DELTAS.length) applyEl.disabled = true;
+
+        var old = main.querySelector('p[data-outcome]');
+        if (old) old.remove();
+        if (note) main.append(el('p', note, { 'data-outcome': '' }));
+      }
+
+      document.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench');
+        if (state.closed) return;
+        if (id === 'apply') {
+          if (state.applied.length >= DELTAS.length) return;
+          var d = DELTAS[state.applied.length];
+          state.applied.push(d);
+          state.balance += d;
+          render();
+        } else if (id === 'close') {
+          state.closed = true;
+          render('Ledger closed.');
+        }
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          applied: state.applied.slice(),
+          balance: state.balance,
+          closed: state.closed,
+        };
+      });
+    </script>
+  </body>
+</html>

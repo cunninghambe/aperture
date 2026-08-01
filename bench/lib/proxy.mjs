@@ -85,12 +85,22 @@ export const ARM_DEFINITION = {
  * The one sentence still dropped is "The result is a DIFF against the page
  * state you already hold", which is true in one arm and false in the other. A
  * description that lies to one arm is not a controlled experiment.
+ *
+ * The completeness sentences say "the report", not "the diff", and that is the
+ * arm-neutrality check spelled out: in the re-dump arm the report is a full
+ * snapshot, for which "anything it does not mention is unchanged" and "a
+ * re-verifying snapshot returns nothing new" are also true — more obviously so.
+ * Identical bytes to both arms can move the absolute level of voluntary
+ * snapshotting; it cannot move the between-arm comparison.
  */
 const ACT_DESCRIPTION =
   'Click, type, hover, scroll, or press a key on the page, then observe what ' +
   'changed.\n\n' +
   'Aperture reports the result of the action for you. That is the whole point: ' +
-  'do not call browser_snapshot after every action.\n\n' +
+  'do not call browser_snapshot after every action. ' +
+  'The report after each action is complete: anything it does not mention is ' +
+  'unchanged. Do not call browser_snapshot to re-verify what a report already ' +
+  'told you — it will return nothing new.\n\n' +
   'Input is dispatched as real browser input, so framework handlers, native ' +
   'widgets and validation behave exactly as they do for a human.\n\n' +
   'If a ref has gone stale you get a targeted error naming what is there now, ' +
@@ -177,11 +187,19 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
   /** @type {any} */
   let ep = null;
 
-  function newEpisode({ arm, maxSteps, allowed, taskId }) {
+  // `inject` is forced onto every upstream browser_act/browser_snapshot call.
+  // Its only current use is `budgetTokens` for the size sweep, and it exists
+  // because the default budget truncates at ~8k chars: above that page size
+  // the re-dump arm's observations are cut and the diff arm's are not, which
+  // is not a measurement of diffs, it is a measurement of the budget. Applied
+  // to both arms identically — it must never become a second thing that
+  // differs between them (see ARM_DEFINITION).
+  function newEpisode({ arm, maxSteps, allowed, taskId, inject }) {
     ep = {
       taskId,
       arm,
       maxSteps,
+      inject: inject ? { ...inject } : null,
       allowed: new Set(allowed),
       steps: 0,
       capHits: 0,
@@ -197,7 +215,7 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     return ep;
   }
 
-  function recordObservation(tool, text) {
+  function recordObservation(tool, text, forwarded) {
     const kind = isFullSnapshot(text)
       ? 'full'
       : isDiff(text)
@@ -208,7 +226,14 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     // The text is kept, not just the shape. `mustObserve` is checked against
     // the diff-only stream, and a failure report that cannot show the bytes the
     // agent actually read is not a failure report.
-    ep.observations.push({ tool, kind, chars: text.length, truncated: isTruncated(text), text });
+    //
+    // `mode`/`expand` are recorded AS FORWARDED, not as the agent asked: the
+    // re-dump arm rewrites mode to 'full' below, and wave 1 could not tell an
+    // agent-chosen full from a harness-forced one after the fact.
+    const asked = forwarded
+      ? { mode: forwarded.mode ?? null, expand: forwarded.expand ?? null }
+      : {};
+    ep.observations.push({ tool, kind, chars: text.length, truncated: isTruncated(text), ...asked, text });
     if (kind === 'full') ep.lastFullAt = ep.observations.length - 1;
     applyObservation(ep.model, text);
   }
@@ -232,7 +257,7 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     const shadowHad = ref ? ep.model.has(ref) : true;
     const shadowLabel = ref ? ep.model.get(ref)?.label : undefined;
 
-    const forwarded = { ...args };
+    const forwarded = { ...args, ...(ep.inject ?? {}) };
     // THE ARM. Nothing else in the whole apparatus differs between the two.
     // Stated in prose as ARM_DEFINITION at the top of this file, which is what
     // gets stamped onto every stored episode.
@@ -301,13 +326,13 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
       return `error: step budget exhausted (${ep.maxSteps} steps used). Call task_done now.`;
     }
     ep.steps++;
-    const forwarded = { ...args };
+    const forwarded = { ...args, ...(ep.inject ?? {}) };
     // A voluntary snapshot in the re-dump arm must not be allowed to come back
     // as a diff — that would be the re-dump arm observing a diff, which is
     // exactly what guard G3 exists to catch, caused by the harness itself.
     if (ep.arm === 'redump') forwarded.mode = 'full';
     const text = await upstream('browser_snapshot', forwarded);
-    recordObservation('browser_snapshot', text);
+    recordObservation('browser_snapshot', text, forwarded);
     return text;
   }
 

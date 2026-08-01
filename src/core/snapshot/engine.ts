@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ipcMain, type WebContents } from 'electron';
 import { RefRegistry, assignRefs } from './registry.js';
 import { diffSnapshots } from './diff.js';
-import { renderDiff, renderFull } from './render.js';
+import { renderDiff, renderFull, renderUnchanged } from './render.js';
 import { VolatilityTracker } from './volatility.js';
 import type { Observation, Snapshot, SnapshotNode } from './types.js';
 
@@ -250,13 +250,28 @@ export async function observe(
     st.volatility.noteChange(u.key, now, opts.afterAction === true, u.text, opts.actedKey);
   }
 
-  if (result.ops.length === 0) {
-    const seq = st.nextDiffSeq();
-    st.last = { ...st.last, seq, root: r.root, url: r.url, title: r.title };
-    const diff = { tabId, seq, baseSeq: st.last.seq, ops: [], suppressed: result.suppressed, unreadChanges: 0 };
+  // Hoisted ABOVE the empty-ops return on purpose. A `pushState` that changes
+  // the URL without an immediate DOM delta produces zero ops, and below the
+  // return it silently updated `st.last.url` and told the agent nothing had
+  // changed — a route change is news. Above it, a zero-op navigation falls
+  // through to the full-snapshot branch exactly as it already does when ops
+  // exist.
+  const navigated = r.url !== st.last.url;
+
+  if (result.ops.length === 0 && !navigated) {
+    // Zero ops consume NEITHER a state id NOR one of the epoch's diff slots.
+    // The id names a state, and there is no new state to name; the cap exists
+    // to bound accumulated model-side application error, and applying zero ops
+    // accumulates none of it. Before this, every "nothing changed" answer burnt
+    // a slot and hastened a full resync the agent then paid for.
+    st.last = { ...st.last, root: r.root, title: r.title };
     return {
-      observation: { kind: 'unchanged', seq },
-      text: renderDiff({ ...diff, seq, baseSeq: seq }),
+      observation: { kind: 'unchanged', seq: st.last.seq },
+      text: renderUnchanged(st.last.seq, {
+        afterAction: opts.afterAction === true,
+        suppressed: result.suppressed,
+        unreadChanges: result.unreadChanges,
+      }),
     };
   }
 
@@ -279,7 +294,6 @@ export async function observe(
   const tooBig =
     rendered.split('\n').length > Math.max(60, st.lastFullLines * DIFF_SIZE_RATIO);
   const tooMany = st.diffsThisEpoch > MAX_DIFFS_PER_EPOCH;
-  const navigated = r.url !== st.last.url;
 
   if (tooBig || tooMany || navigated) {
     const snap: Snapshot = {

@@ -1,0 +1,62 @@
+{
+  "generator": "1",
+  "generatedFrom": {
+    "bench/fixtures/cart.html": "0bc335c65e64a2cc",
+    "bench/fixtures/bench.js": "d17fea2bfeea926c"
+  },
+  "baselineChars": 1116,
+  "headingOverhead": 8,
+  "paragraphOverhead": 13,
+  "tiers": [
+    {
+      "id": "s1",
+      "file": "cart-s1.html",
+      "target": null,
+      "predictedChars": 1116,
+      "headings": 0,
+      "paragraphs": 0,
+      "htmlBytes": 2822,
+      "sha": "0bc335c65e64a2cc"
+    },
+    {
+      "id": "s2",
+      "file": "cart-s2.html",
+      "target": 4000,
+      "predictedChars": 3981,
+      "headings": 6,
+      "paragraphs": 31,
+      "htmlBytes": 5838,
+      "sha": "c85104276737f446"
+    },
+    {
+      "id": "s3",
+      "file": "cart-s3.html",
+      "target": 10000,
+      "predictedChars": 9963,
+      "headings": 17,
+      "paragraphs": 97,
+      "htmlBytes": 11974,
+      "sha": "622178fc949eaa91"
+    },
+    {
+      "id": "s4",
+      "file": "cart-s4.html",
+      "target": 21000,
+      "predictedChars": 21043,
+      "headings": 37,
+      "paragraphs": 218,
+      "htmlBytes": 23335,
+      "sha": "53bfb67ce321865e"
+    },
+    {
+      "id": "s5",
+      "file": "cart-s5.html",
+      "target": 38000,
+      "predictedChars": 38015,
+      "headings": 68,
+      "paragraphs": 403,
+      "htmlBytes": 40740,
+      "sha": "3fdb497e9b35c6ec"
+    }
+  ]
+}

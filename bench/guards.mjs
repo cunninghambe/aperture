@@ -274,6 +274,81 @@ const beta = refFor('Beta action', 'button');
   );
 }
 
+// --- G12: an unchanged observation is honest, and costs nothing -------------
+//
+// Both halves are unit-untestable by construction: they are claims about state
+// the engine keeps ACROSS calls (the page state id, and the epoch's diff
+// budget), and `observe()` needs a live WebContents. So they are measured here,
+// end to end, against the ids the agent actually receives.
+
+{
+  // A fresh full snapshot opens a new epoch, so the 12-diff budget G12b
+  // reasons about starts from a known zero rather than from whatever the guards
+  // above happened to spend on this page.
+  applyObservation(model, await call('browser_snapshot', { mode: 'full' }));
+  const shipRef = refFor('Shipping', 'combobox');
+
+  // A select, not a click: this fixture's selects change one value and one
+  // witness line, so the act's own diff is small and deterministic, and no
+  // modal or hit-test is involved.
+  const acted = await call('browser_act', {
+    action: 'select', ref: shipRef, option: 'Standard',
+  });
+  applyObservation(model, acted);
+  if (!/^page #\d+\.\d+ \(diff from/m.test(acted)) {
+    console.error(
+      'G12 could not run: the act that seeds the epoch did not return a diff.\n' +
+        acted.slice(0, 400),
+    );
+    process.exit(3);
+  }
+
+  const seqOf = (t) => (/^page #(\d+\.\d+) \(unchanged/m.exec(t) ?? [])[1];
+  const headOf = (t) =>
+    (t.split('\n').find((l) => /^(page #|FULL SNAPSHOT #)/.test(l)) ?? t.slice(0, 120)).slice(0, 120);
+
+  const first = await call('browser_snapshot', { mode: 'auto' });
+  const second = await call('browser_snapshot', { mode: 'auto' });
+  check(
+    'G12a',
+    'a redundant snapshot says so in its own words, and does not advance the page state id',
+    /\(unchanged — you already hold/.test(second) &&
+      Boolean(seqOf(first)) &&
+      seqOf(first) === seqOf(second),
+    `first:  ${headOf(first)}\n        second: ${headOf(second)}`,
+  );
+
+  // Thirteen unchanged observations in total (the two above plus eleven more),
+  // one MORE than MAX_DIFFS_PER_EPOCH. On the old accounting each of them took
+  // a slot, so the act that follows was forced to resync. Nothing on the page
+  // changed across any of them.
+  let unchangedSeen = /^page #\d+\.\d+ \(unchanged/m.test(first) ? 1 : 0;
+  if (/^page #\d+\.\d+ \(unchanged/m.test(second)) unchangedSeen++;
+  for (let i = 0; i < 11; i++) {
+    const t = await call('browser_snapshot', { mode: 'auto' });
+    if (/^page #\d+\.\d+ \(unchanged/m.test(t)) unchangedSeen++;
+  }
+
+  const after = await call('browser_act', {
+    action: 'select', ref: shipRef, option: 'Overnight',
+  });
+  applyObservation(model, after);
+  check(
+    'G12b',
+    '13 unchanged observations do not spend the 12-diff budget: the next act still gets a diff',
+    // `unchangedSeen === 13` is not decoration. Without it the guard passes
+    // vacuously if the probes come back as fulls — each full resets the budget,
+    // so the final act would get its diff having never exercised the unchanged
+    // path at all. The guard must prove it observed the thing it is about.
+    unchangedSeen === 13 &&
+      /^page #\d+\.\d+ \(diff from/m.test(after) &&
+      !/^FULL SNAPSHOT #/m.test(after),
+    `${unchangedSeen}/13 snapshots reported unchanged; the act after them returned ` +
+      `${/^FULL SNAPSHOT #/m.test(after) ? 'a FULL SNAPSHOT — the budget was consumed' : 'a diff'}` +
+      `\n        ${headOf(after)}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 const failed = checks.filter((c) => !c.ok);

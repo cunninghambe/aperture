@@ -291,6 +291,45 @@ function describeShape(n: SnapshotNode): string {
 // Diff rendering
 // ---------------------------------------------------------------------------
 
+export interface UnchangedOptions {
+  /**
+   * True when the observation followed an agent action.
+   *
+   * The two meanings of "nothing changed" are not the same fact and must not
+   * read the same. After an action it is DIAGNOSTIC — the click had no visible
+   * effect, which is real signal about the page. After a voluntary snapshot it
+   * is REDUNDANT — the agent already holds the page and has just paid a turn to
+   * be told so. The engine is the only place that knows which; the wire should
+   * say which.
+   */
+  afterAction?: boolean;
+  suppressed?: number;
+  unreadChanges?: number;
+}
+
+/**
+ * The one spelling of an observation with zero ops.
+ *
+ * Both variants share the `(unchanged` prefix on purpose: one regex classifies
+ * them, and the bench's stream reader is that regex.
+ */
+export function renderUnchanged(seq: string, opts: UnchangedOptions = {}): string {
+  const head = opts.afterAction
+    ? `page #${seq} (unchanged — the action caused no visible change)`
+    : `page #${seq} (unchanged — you already hold the current page)`;
+
+  // Same notes a non-empty diff carries, in the same words. The empty path used
+  // to hardcode unreadChanges to 0, so a page whose only changes were in regions
+  // the model has never been shown reported "nothing changed" with no caveat at
+  // all — the one case where the agent most needs the caveat.
+  const notes: string[] = [];
+  if (opts.suppressed) notes.push(`${opts.suppressed} live-region updates suppressed`);
+  if (opts.unreadChanges) {
+    notes.push(`${opts.unreadChanges} changes in regions you have not read`);
+  }
+  return notes.length ? `${head} (${notes.join('; ')})` : head;
+}
+
 /**
  * `commit: false` renders the identical text but records no emission marks.
  * The engine uses it to size a candidate diff before deciding between the
@@ -298,9 +337,15 @@ function describeShape(n: SnapshotNode): string {
  * subtree refs as shown to the model, because they were not.
  */
 export function renderDiff(d: SnapshotDiff, reg?: RefRegistry, commit = true): string {
+  // One spelling of "nothing changed", held in renderUnchanged. The engine calls
+  // it directly on its own empty path (where it knows whether an action caused
+  // the observation); this branch delegates so a second spelling cannot drift
+  // into existence behind it.
   if (d.ops.length === 0) {
-    const extra = d.suppressed ? ` (${d.suppressed} live-region updates suppressed)` : '';
-    return `page #${d.seq} (no visible change)${extra}`;
+    return renderUnchanged(d.seq, {
+      suppressed: d.suppressed,
+      unreadChanges: d.unreadChanges,
+    });
   }
 
   const out: string[] = [`page #${d.seq} (diff from #${d.baseSeq})`];

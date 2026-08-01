@@ -17,3 +17,7 @@ userdata/
 # followed a checkout onto a different machine would be pooled with episodes
 # from a build it never ran on.
 bench/task/results/
+
+# Size-sweep outputs — measurements, not source (same reasoning as bench/task/results/)
+bench/size/results.jsonl
+bench/size/.agent-cwd

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cart</title>
+  </head>
+  <body>
+    <main>
+      <h1>Your cart</h1>
+      <ul id="lines"></ul>
+      <p id="total">Total: $0.00</p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      var lines = [
+        { id: 'blue-widget', name: 'Blue Widget', price: 12.0, qty: 1 },
+        { id: 'desk-lamp', name: 'Desk Lamp', price: 34.5, qty: 2 },
+        { id: 'notebook', name: 'Notebook', price: 4.25, qty: 3 },
+        { id: 'usb-hub', name: 'USB Hub', price: 19.99, qty: 1 },
+      ];
+
+      var listEl = document.getElementById('lines');
+      var totalEl = document.getElementById('total');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function money(n) {
+        return '$' + n.toFixed(2);
+      }
+
+      function render() {
+        var rows = lines.map(function (l) {
+          var li = document.createElement('li');
+          li.append(el('span', l.name + ' at ' + money(l.price) + ' each'));
+          // The quantity lives in its own text node AND in nothing else. An
+          // agent that wants to know where a stepper has got to has to have
+          // read this line out of the stream.
+          li.append(el('span', 'Quantity: ' + l.qty));
+          li.append(el('button', 'Add one ' + l.name, { 'data-bench': 'inc:' + l.id }));
+          li.append(el('button', 'Remove one ' + l.name, { 'data-bench': 'dec:' + l.id }));
+          li.append(el('button', 'Delete ' + l.name + ' from cart', { 'data-bench': 'rm:' + l.id }));
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+        var t = lines.reduce(function (a, l) { return a + l.price * l.qty; }, 0);
+        totalEl.textContent = 'Total: ' + money(t);
+      }
+
+      listEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        var idx = -1;
+        for (var i = 0; i < lines.length; i++) if (lines[i].id === parts[1]) idx = i;
+        if (idx < 0) return;
+        if (parts[0] === 'inc') lines[idx].qty += 1;
+        else if (parts[0] === 'dec') lines[idx].qty = Math.max(0, lines[idx].qty - 1);
+        else if (parts[0] === 'rm') lines.splice(idx, 1);
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          lines: lines.map(function (l) { return { name: l.name, qty: l.qty }; }),
+        };
+      });
+    </script>
+  </body>
+</html>

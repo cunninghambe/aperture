@@ -317,7 +317,7 @@ function stepFailure(out) {
   if (/could not be acted on|is not a known element|^error:|\nerror:/m.test(out)) return out.trim().slice(0, 300);
   if (!/^ok (click|type|hover|scroll|key|clear|select)/m.test(out)) return 'no ok-acknowledgement in response';
   if (!/^(page #|FULL SNAPSHOT #)/m.test(out)) return 'no observation followed the action';
-  if (/\(no visible change\)/.test(out)) {
+  if (/\(unchanged\b/.test(out)) {
     return 'action produced no observable change — this scenario expects every step to change the page';
   }
   return null;

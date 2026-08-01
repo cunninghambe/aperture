@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Moderation queue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Moderation queue</h1>
+      <p data-status>7 pending</p>
+      <ul id="queue"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // L1 — PURELY POSITIONAL IDENTITY. The one load wave 1 had no fixture for.
+      //
+      // Every row is content-identical: the same row text, the same two button
+      // labels, no link and no heading anywhere inside a row. That combination
+      // is chosen against the walker, not against intuition:
+      //
+      //   - `siblingDiscriminator` consults ONLY <a> and <h1>..<h4> siblings
+      //     (and, one level up, a `:scope > a|h1|h2|h3`). A row containing
+      //     neither returns undefined, so no row can key against its own
+      //     content.
+      //   - `identityKey` Tier 1 needs data-testid/data-test/data-qa/data-cy, a
+      //     `name` attribute on a form control, or a non-generated `id`. The
+      //     buttons here have NONE of those. `data-bench` is deliberately not
+      //     one of them: it is the witness's handle, invisible to identity.
+      //     (This is why the whole suite uses data-bench and never data-testid
+      //     — data-testid is Tier-1 identity input and would change the very
+      //     behaviour under test.)
+      //   - So every Approve button falls through to the S-tier key
+      //     `S|0|button|approve|listitem|main>list>listitem` — identical for all
+      //     seven — and `disambiguate` appends a document-order ordinal.
+      //
+      // Ordinals are recomputed per walk. Removing a row therefore renumbers
+      // every row BELOW it, and the ref the agent is holding for "row 5" now
+      // resolves to what used to be row 6. That is a wrong-element action the
+      // witness can see, which is the bar section 3 sets for a hard task.
+      //
+      // The queue is REMOVALS-ONLY on purpose: rows leave, none are added and
+      // none reorder. The `nth` solver targeting in bench/task.mjs is only
+      // valid under that constraint (see the note on `resolveLabel`), and this
+      // fixture is the reason the constraint is stated there.
+      //
+      // The "divider" marker on every third row is NOT decoration and NOT a row
+      // property: it is a function of the row's CURRENT index, so the shape of
+      // the row at ordinal i never changes when the list shrinks. Two things
+      // depend on it:
+      //   1. Seven same-shape siblings would hit COLLAPSE_RUN (5) and render as
+      //      "… 4 more listitems", hiding rows the task needs — the same hazard
+      //      inbox.html breaks with its attachment badges. Marking every third
+      //      row caps any same-shape run at 4, under EVERY removal order (four
+      //      unmarked rows and three marked ones, at most).
+      //   2. Because the marker follows the position rather than the row, the
+      //      diff after a removal carries no shape churn at all. What is left
+      //      is the pure signal: the pending count, and the refs of the LAST
+      //      row dying — never the refs of the row that was actually clicked.
+      var queue = [
+        { id: 'q1' }, { id: 'q2' }, { id: 'q3' }, { id: 'q4' },
+        { id: 'q5' }, { id: 'q6' }, { id: 'q7' },
+      ];
+      var approved = [];
+      var rejected = [];
+
+      var listEl = document.getElementById('queue');
+      // Addressed without an id on purpose. A non-generated id would give this
+      // paragraph the stable Tier-1 key `I|0|generic|status`, its text change
+      // would arrive as a propDelta update on a ref the model has never been
+      // shown, and diff.ts would route it to `unread` instead of emitting it.
+      // Keyed by its own content, the change arrives as a remove plus an add —
+      // which is how cart.html's "Quantity: N" reaches the stream too.
+      var statusEl = document.querySelector('p[data-status]');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var rows = queue.map(function (item, i) {
+          var li = document.createElement('li');
+          if (i % 3 === 0) li.append(el('span', 'divider'));
+          li.append(el('span', 'Queued submission'));
+          li.append(el('button', 'Approve', { 'data-bench': 'approve:' + item.id }));
+          li.append(el('button', 'Reject', { 'data-bench': 'reject:' + item.id }));
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+        statusEl.textContent = queue.length + ' pending';
+      }
+
+      listEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        for (var i = 0; i < queue.length; i++) {
+          if (queue[i].id === parts[1]) {
+            (parts[0] === 'approve' ? approved : rejected).push(queue[i].id);
+            queue.splice(i, 1);
+            break;
+          }
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          pending: queue.map(function (q) { return q.id; }),
+          approved: approved.slice(),
+          rejected: rejected.slice(),
+        };
+      });
+    </script>
+  </body>
+</html>

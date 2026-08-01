@@ -154,7 +154,15 @@ export function applyObservation(model, text) {
 
 export const isFullSnapshot = (text) => /^FULL SNAPSHOT #/m.test(text);
 export const isDiff = (text) => /^page #\d+\.\d+ \(diff from/m.test(text);
-export const isNoChange = (text) => /^page #\d+\.\d+ \(no visible change\)/m.test(text);
+/**
+ * Both engine wordings — the diagnostic one an action gets, and the redundant
+ * one a voluntary snapshot gets — share the `(unchanged` prefix precisely so
+ * ONE regex classifies them. This must move in the SAME change set as the
+ * engine's wording: with the old spelling, a new-format observation classifies
+ * as `other`, which pollutes `unclassified` and breaks G4's share arithmetic in
+ * the diff arm.
+ */
+export const isNoChange = (text) => /^page #\d+\.\d+ \(unchanged/m.test(text);
 /** The budget dropped lines. A truncated observation is not a fair one. */
 export const isTruncated = (text) => text.includes('more lines beyond budget');
 

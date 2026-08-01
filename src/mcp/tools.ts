@@ -77,6 +77,7 @@ Snapshot format (indentation = containment):
   NxM           table dims; cells joined with |
   "... K more"  collapsed repetition — browser_snapshot expand:true for refs
   #E.n          page state id (epoch.step)
+  (unchanged …)  nothing visible changed; your model of the page is already current
 
 Diff ops: ~ changed  + added  - removed  > moved  ! subtree replaced
 A "FULL SNAPSHOT" header means: discard everything you believed about this
@@ -297,6 +298,10 @@ export function registerBrowserTools(
         'snapshot is thousands.\n\n' +
         'Repeated siblings collapse to "… N more". Those items have refs, but ' +
         'no ordinary read reveals them: set expand:true to get every one.\n\n' +
+        'If every action\'s result has been a diff, you already hold the ' +
+        'current page: a snapshot adds nothing and returns a one-line ' +
+        '"unchanged" notice. Snapshot when you have lost track of the page ' +
+        '(for instance after compaction) or genuinely need a restatement.\n\n' +
         FORMAT_LEGEND +
         '\n\n' +
         ENVELOPE_LEGEND,
@@ -515,7 +520,12 @@ export function registerBrowserTools(
         'option, then observe what changed.\n\n' +
         'The result is a DIFF against the page state you already hold — ' +
         'typically 40-150 tokens rather than a full re-read. That is the whole ' +
-        'point: do not call browser_snapshot after every action.\n\n' +
+        'point: do not call browser_snapshot after every action. ' +
+        'A diff is complete: anything it does not mention is unchanged ' +
+        '(suppressed live-region churn and unread regions are called out ' +
+        'explicitly when they exist). If an action reports "unchanged", that ' +
+        'is a finding — the action had no visible effect — not a failure to ' +
+        'observe.\n\n' +
         'Input is dispatched as real browser input, so framework handlers, ' +
         'native widgets and validation behave exactly as they do for a human.\n\n' +
         'DROPDOWNS. action:"select" is for NATIVE <select> elements — the ones ' +
@@ -563,6 +573,12 @@ export function registerBrowserTools(
             'How to report the result: "diff" (default) returns what changed; ' +
               '"full" returns a complete snapshot.',
           ),
+        // Same shape as browser_snapshot's. Without it an act-embedded full
+        // snapshot — every act in the bench's re-dump arm, and every
+        // observe:"full" call in production — renders under DEFAULT_BUDGET and
+        // is silently truncated on a large page, while a diff of the same page
+        // is not. Diffs ignore it; there is no budget cut on that path.
+        budgetTokens: z.number().int().min(200).max(20000).optional(),
         tabId: z.string().optional(),
       }),
     },
@@ -575,6 +591,7 @@ export function registerBrowserTools(
       deltaY,
       submit,
       observe: observeArg,
+      budgetTokens,
       tabId,
     }) => {
       const t = tabs();
@@ -602,6 +619,7 @@ export function registerBrowserTools(
         const { text: obs } = await observe(id, wc, {
           afterAction: true,
           full: wantFull,
+          budgetTokens,
         });
         // `ok scroll` is Aperture speaking; the observation is the page. The
         // acknowledgement used to sit inside the envelope, which taught the
@@ -646,7 +664,7 @@ export function registerBrowserTools(
       if (!r.ok) {
         // Targeted recovery rather than "something went wrong": tell the agent
         // what it can do next without re-reading the entire page.
-        const { text: obs } = await observe(id, wc, { full: wantFull });
+        const { text: obs } = await observe(id, wc, { full: wantFull, budgetTokens });
         // The error and the "here is what to look at" framing are Aperture's;
         // only the observation is the page's.
         return text(
@@ -687,7 +705,7 @@ export function registerBrowserTools(
         if (!sel.ok) {
           switch (sel.reason) {
             case 'gone': {
-              const { text: obs } = await observe(id, wc, { full: wantFull });
+              const { text: obs } = await observe(id, wc, { full: wantFull, budgetTokens });
               return text(
                 `error: ${ref} could not be acted on (gone).\n` +
                   'The page as it stands now:\n' +
@@ -767,6 +785,7 @@ export function registerBrowserTools(
           afterAction: true,
           actedKey: key2,
           full: wantFull,
+          budgetTokens,
         });
         // Replace semantics said aloud. A multi-select that silently kept its
         // other selections — or silently dropped them — is a difference the
@@ -814,6 +833,7 @@ export function registerBrowserTools(
         afterAction: true,
         actedKey: key2,
         full: wantFull,
+        budgetTokens,
       });
       return text(
         `ok ${action} ${ref}\n` +
