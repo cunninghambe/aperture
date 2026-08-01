@@ -32,6 +32,7 @@ import {
   untrusted,
 } from './envelope.js';
 import {
+  armInputWitness,
   clearField,
   click,
   hover,
@@ -80,6 +81,10 @@ Snapshot format (indentation = containment):
   (unchanged …)  nothing visible changed; your model of the page is already current
 
 Diff ops: ~ changed  + added  - removed  > moved  ! subtree replaced
+  ~ eN href=/path   this link now points somewhere else; the label may not have
+                    changed, so re-read the target before trusting it
+  ~ eN RxC:         this table's contents changed; the rows that follow REPLACE
+                    the ones you were holding for eN
 A "FULL SNAPSHOT" header means: discard everything you believed about this
 page and start from what follows.
 
@@ -521,9 +526,11 @@ export function registerBrowserTools(
         'The result is a DIFF against the page state you already hold — ' +
         'typically 40-150 tokens rather than a full re-read. That is the whole ' +
         'point: do not call browser_snapshot after every action. ' +
-        'A diff is complete: anything it does not mention is unchanged ' +
-        '(suppressed live-region churn and unread regions are called out ' +
-        'explicitly when they exist). If an action reports "unchanged", that ' +
+        'A diff is complete: anything it does not mention is unchanged. ' +
+        '(Scroll positions and pixel layout are not tracked; everything ' +
+        'rendered — text, values, labels, states, links, table content — is.) ' +
+        'Suppressed live-region churn and unread regions are called out ' +
+        'explicitly when they exist. If an action reports "unchanged", that ' +
         'is a finding — the action had no visible effect — not a failure to ' +
         'observe.\n\n' +
         'Input is dispatched as real browser input, so framework handlers, ' +
@@ -805,6 +812,29 @@ export function registerBrowserTools(
         );
       }
 
+      // Refusals that dispatch NOTHING are settled before the witness is armed.
+      // An armed listener with no dispatch behind it reports a dead input path
+      // for input that was never sent — a false alarm on the one signal this
+      // mechanism exists to make trustworthy.
+      if (action === 'type') {
+        if (textArg === undefined) return text('error: text required for type');
+        if (!r.editable) {
+          return text(`error: ${ref} is a ${r.tag.toLowerCase()}, not an editable field`);
+        }
+      }
+
+      // W1. `ok` has to mean the input reached the page, not that CDP accepted
+      // the command. Wave 2 spent forty minutes acknowledging clicks that
+      // landed nowhere: the debugger resolved, the walker answered, the page
+      // loaded, and the input path was dead. Nothing in the stack could tell
+      // "the click did nothing" from "the click never happened", so the agent
+      // was told the first when the truth was the second.
+      const witness = await armInputWitness(
+        wc,
+        key2,
+        action === 'hover' ? ['mousemove'] : ['mousedown'],
+      );
+
       switch (action) {
         case 'click':
           await click(wc, r.x, r.y);
@@ -817,16 +847,30 @@ export function registerBrowserTools(
           await clearField(wc);
           break;
         case 'type': {
-          if (textArg === undefined) return text('error: text required for type');
-          if (!r.editable) {
-            return text(`error: ${ref} is a ${r.tag.toLowerCase()}, not an editable field`);
-          }
+          // Guarded above, before the witness was armed. Bound once here for
+          // the same reason `select` binds `option`.
+          const typed = textArg as string;
           await click(wc, r.x, r.y);
           await clearField(wc);
-          await typeText(wc, textArg);
+          await typeText(wc, typed);
           if (submit) await pressKey(wc, 'Enter');
           break;
         }
+      }
+
+      // Only an armed-and-silent witness fails the act. A witness that could
+      // not be armed returns `unknown` and changes nothing — and a click that
+      // reached a dead button still returns `ok`, because "the action caused
+      // no visible change" is a finding about the PAGE and must not be
+      // recoloured as an engine failure.
+      if ((await witness.settle()) === 'lost') {
+        return text(
+          `error: input was dispatched but never reached the page. The ${action} ` +
+            `on ${ref} was sent and no matching event arrived in the page, so ` +
+            'Aperture\'s input path to this tab is not working — retrying this or ' +
+            'any other action here will not take effect either. The page was not ' +
+            'changed by this call. Tell the human; this needs the browser restarted.',
+        );
       }
 
       const { text: obs } = await observe(id, wc, {

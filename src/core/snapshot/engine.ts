@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, type WebContents } from 'electron';
 import { RefRegistry, assignRefs } from './registry.js';
-import { diffSnapshots } from './diff.js';
+import { diffSnapshots, firstDifferingCell, indexByKey } from './diff.js';
 import { renderDiff, renderFull, renderUnchanged } from './render.js';
 import { VolatilityTracker } from './volatility.js';
 import type { Observation, Snapshot, SnapshotNode } from './types.js';
@@ -231,15 +231,21 @@ export async function observe(
     wasEmitted: (ref) => st.registry.wasEmitted(ref),
   });
 
+  // A rows-carrying update has no `text` of its own, and a table that rewrites
+  // itself every second is exactly as much of a live region as a ticking clock
+  // — it must be able to earn suppression the same way. The old tree is
+  // indexed lazily and only when a rows update is actually present, so an
+  // ordinary diff pays nothing for this.
+  let oldIndex: Map<string, SnapshotNode> | undefined;
   for (const op of result.ops) {
     if (op.op === 'update') {
-      st.volatility.noteChange(
-        refKey(st, op.ref) ?? op.ref,
-        now,
-        opts.afterAction === true,
-        op.delta.text?.[1] ?? op.delta.name?.[1] ?? op.delta.value,
-        opts.actedKey,
-      );
+      const key = refKey(st, op.ref) ?? op.ref;
+      let text = op.delta.text?.[1] ?? op.delta.name?.[1] ?? op.delta.value;
+      if (text === undefined && op.delta.rows) {
+        oldIndex ??= indexByKey(st.last.root);
+        text = firstDifferingCell(oldIndex.get(key)?.rows, op.delta.rows);
+      }
+      st.volatility.noteChange(key, now, opts.afterAction === true, text, opts.actedKey);
     }
   }
   // Unread changes never become ops, but the tracker must still hear about

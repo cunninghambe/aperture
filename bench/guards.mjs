@@ -349,6 +349,65 @@ const beta = refFor('Beta action', 'button');
   );
 }
 
+// --- G13: the blind fields, on the fast tripwire ----------------------------
+//
+// `blindfields` (bench/fidelity.mjs) is the thorough measurement of this class,
+// and it costs one freshly started Aperture and a couple of minutes. This is the
+// cheap end-to-end version that runs against every live build: two clicks, two
+// string checks, no model bookkeeping at all.
+//
+// Recorded because the obvious spelling of G13a is weaker than it looks: a click
+// FOCUSES its target, and a focus flip is a state delta propDelta always
+// reported — so against the pre-fix build the first click on "Advance shipment"
+// answered `page #3.1 (diff from #3.0)` / `~ e3 +focused`, a diff that is busy
+// and empty. The `(unchanged` clause below is therefore NOT the load-bearing
+// half; `SHIPPED` is. Both are kept: the first proves the observation is a real
+// report, the second proves the report contains the page.
+// (docs/design/blindfields-red-record.md §2.)
+
+{
+  const rosterModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/roster.html?guardrun=${Date.now()}`,
+  });
+  await sleep(2500);
+  const rosterInitial = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(rosterInitial)) {
+    console.error('G13 could not run: roster.html did not produce a full snapshot.\n' + rosterInitial.slice(0, 400));
+    process.exit(3);
+  }
+  applyObservation(rosterModel, rosterInitial);
+
+  const one = (label) => {
+    const hits = [...rosterModel.entries()].filter(([, e]) => e.label === label && e.role === 'button');
+    if (hits.length !== 1) {
+      console.error(`G13 could not run: "${label}" resolves to ${hits.length} buttons on roster.html`);
+      process.exit(3);
+    }
+    return hits[0][0];
+  };
+
+  const advanced = await call('browser_act', { action: 'click', ref: one('Advance shipment') });
+  check(
+    'G13a',
+    'a click that rewrites table cells reports the new cells, not "nothing changed"',
+    !/\(unchanged/.test(advanced) && advanced.includes('SHIPPED'),
+    `unchanged: ${/\(unchanged/.test(advanced)}, carries "SHIPPED": ${advanced.includes('SHIPPED')}\n        ` +
+      advanced.split('\n').filter((l) => /^[~+\->!(]|^page #|^FULL SNAPSHOT/.test(l)).join('\n        ').slice(0, 600),
+  );
+  await sleep(300);
+
+  const rotated = await call('browser_act', { action: 'click', ref: one('Rotate link') });
+  check(
+    'G13b',
+    'a link whose href moves under a stable label reports the new target',
+    rotated.includes('/checkout-v2'),
+    `carries "/checkout-v2": ${rotated.includes('/checkout-v2')}\n        ` +
+      rotated.split('\n').filter((l) => /^[~+\->!(]|^page #|^FULL SNAPSHOT/.test(l)).join('\n        ').slice(0, 600),
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 const failed = checks.filter((c) => !c.ok);

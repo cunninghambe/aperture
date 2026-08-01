@@ -245,13 +245,22 @@ export function renderLine(n: SnapshotNode, depth: number): string | null {
   // Tables render their rows inline, pipe-joined — models parse that natively
   // from markdown, and it is ~4x cheaper than nested cell nodes.
   if (n.rows && n.rows.length) {
-    const rowLines = n.rows.map(
-      (r) => `${pad}  ${r.map((c) => (c ? quote(c) : '')).join(' | ')}`,
-    );
-    return [head, ...rowLines].join('\n');
+    return [head, ...renderRows(n.rows, `${pad}  `)].join('\n');
   }
 
   return head;
+}
+
+/**
+ * Table rows, pipe-joined, one line each, indented by `pad`.
+ *
+ * The single spelling of the row format. It is emitted from two places — a
+ * table's own line in a full snapshot, and an `~` update that restates a
+ * changed table — and the bench's stream reader parses both with one rule. Two
+ * copies of a wire format is how one of them goes stale.
+ */
+export function renderRows(rows: string[][], pad: string): string[] {
+  return rows.map((r) => `${pad}${r.map((c) => (c ? quote(c) : '')).join(' | ')}`);
 }
 
 /** Only set states are emitted, so booleans cost nothing when false. */
@@ -374,8 +383,26 @@ function renderOp(
       if (op.delta.name) bits.push(quote(op.delta.name[1]));
       if (op.delta.value !== undefined) bits.push(`=${quote(op.delta.value)}`);
       if (op.delta.text) bits.push(quote(op.delta.text[1]));
+      // New target only — the same convention `name` and `value` follow.
+      // Unquoted, because `sanitizeHref` (walker.ts) has already stripped
+      // whitespace, control characters and bidi overrides and capped the
+      // length, so the token cannot break the line or a reader parsing it.
+      if (op.delta.href) bits.push(`href=${op.delta.href[1]}`);
       if (op.delta.statesOn) bits.push(`+${stateWords(op.delta.statesOn)}`);
       if (op.delta.statesOff) bits.push(`-${stateWords(op.delta.statesOff)}`);
+      // A changed table is RESTATED, not edited row by row: rows have no
+      // identity, so a row-level script would need a second matching pass. The
+      // `RxC:` tail goes last because the rows follow on the next lines, in
+      // exactly the format a table's own snapshot line uses.
+      if (op.delta.rows) {
+        const d =
+          op.delta.dims ??
+          { rows: op.delta.rows.length, cols: op.delta.rows[0]?.length ?? 0 };
+        bits.push(`${d.rows}x${d.cols}:`);
+        return [`~ ${op.ref} ${bits.join(' ')}`, ...renderRows(op.delta.rows, '  ')].join(
+          '\n',
+        );
+      }
       return `~ ${op.ref} ${bits.join(' ')}`;
     }
     case 'add': {

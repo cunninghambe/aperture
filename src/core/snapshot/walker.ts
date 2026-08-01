@@ -317,8 +317,17 @@ function visit(
  * distinguishable only by position, a reorder can move a ref. The alternative
  * is worse — one ref for ten buttons and a silent click on the wrong one — and
  * for elements that are truly indistinguishable, no agent plan can depend on
- * the distinction anyway. `positional` is set on the node so the diff engine
- * and the renderer can treat these as fragile.
+ * the distinction anyway.
+ *
+ * The renumbering half IS handled, on the diff side rather than here:
+ * `diff.ts`'s `positionalFamilyLostAMember` recomputes positionality from the
+ * key shape via `isPositionalKey` below, and escalates a removal from a
+ * positional family to one `replace` of the container — so the model receives
+ * fresh label→ref lines for every survivor whose ordinal just shifted. There
+ * is deliberately no `positional` field on `SnapshotNode`: the key shape is
+ * already the contract, a copy of it on the node could only drift out of step
+ * with `disambiguate`, and a rendered "this ref is fragile" marker would tell
+ * the model to distrust a ref while giving it nothing to re-resolve with.
  */
 /**
  * Find a nearby uniquely-named element to key against.

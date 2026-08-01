@@ -52,8 +52,18 @@ vi.mock('@core/snapshot/engine.js', () => ({
   stateFor: () => ({}),
 }));
 
+/**
+ * The dispatch witness (W1), stubbed at the seam the product uses.
+ *
+ * `'landed'` is the healthy default. `'lost'` is the wave-2 wedge: CDP accepts
+ * the command, the page never sees the event. `'unknown'` is "no witness could
+ * be armed", which must behave exactly like today.
+ */
+let dispatchVerdict: 'landed' | 'lost' | 'unknown' = 'landed';
+
 vi.mock('@core/snapshot/act.js', () => ({
   resolveRef: vi.fn(async () => resolveReply),
+  armInputWitness: vi.fn(async () => ({ settle: async () => dispatchVerdict })),
   click: vi.fn(),
   hover: vi.fn(),
   clearField: vi.fn(),
@@ -99,6 +109,7 @@ beforeEach(() => {
   observeCalls.length = 0;
   selectReply = null;
   resolveReply = REACHABLE;
+  dispatchVerdict = 'landed';
   // Call history only — implementations survive, which is what the two stubs
   // above rely on.
   vi.clearAllMocks();
@@ -137,6 +148,76 @@ describe('browser_act observe parameter', () => {
     const out = await act({ action: 'scroll', deltaY: 300 });
     expect(out).toContain('(diff from');
     expect(observeCalls.at(-1)!.opts!.full).toBe(false);
+  });
+});
+
+describe('W1 — browser_act must not ack input that never reached the page', () => {
+  /**
+   * Wave 2 (docs/design/wave2-evaluation.md §6): Aperture's input path wedged
+   * mid-run and `browser_act` answered `ok` for forty minutes. CDP resolved,
+   * the walker kept serving snapshots, the renderer kept loading pages, and
+   * not one click reached the DOM. Nothing could distinguish "the click did
+   * nothing" from "the click never happened" — so the agent was told the
+   * first when the truth was the second, and kept planning on it.
+   *
+   * These assert the three verdicts, because the failure mode of a naive
+   * implementation is not "misses the wedge" — it is inventing errors on a
+   * healthy page.
+   */
+  it('returns an error, not ok, when the dispatch is never witnessed', async () => {
+    dispatchVerdict = 'lost';
+    const out = await act({ action: 'click', ref: 'e1' });
+    expect(out).toMatch(/^error:/);
+    expect(out).toContain('never reached the page');
+    expect(out).not.toContain('ok click');
+  });
+
+  it('does not report a page observation for input that never landed', async () => {
+    // The observation would be indistinguishable from a real "nothing
+    // changed", which is precisely the confusion this closes.
+    dispatchVerdict = 'lost';
+    const out = await act({ action: 'click', ref: 'e1' });
+    expect(out).not.toContain('page #1.1');
+    expect(out).not.toContain('untrusted-page-content');
+  });
+
+  it('covers every element-targeted dispatch, not just click', async () => {
+    dispatchVerdict = 'lost';
+    for (const action of ['click', 'hover', 'clear', 'type']) {
+      const out = await act({ action, ref: 'e1', text: 'hello' });
+      expect(out, action).toMatch(/^error:/);
+      expect(out, action).toContain('never reached the page');
+    }
+  });
+
+  it('still acks a click that landed on an element that did nothing', async () => {
+    // "The action caused no visible change" is a finding about the PAGE. A
+    // dispatch check that recoloured it as an engine failure would destroy
+    // real signal, which is worse than the bug it fixes.
+    dispatchVerdict = 'landed';
+    const out = await act({ action: 'click', ref: 'e1' });
+    expect(out).toContain('ok click e1');
+  });
+
+  it('changes nothing when no witness could be armed', async () => {
+    dispatchVerdict = 'unknown';
+    const out = await act({ action: 'click', ref: 'e1' });
+    expect(out).toContain('ok click e1');
+    expect(out).not.toContain('error:');
+  });
+
+  it('refuses an unusable target BEFORE arming, so no false alarm is possible', async () => {
+    // These return without dispatching anything. An armed witness with no
+    // dispatch behind it times out and reports a dead input path for input
+    // that was never sent.
+    dispatchVerdict = 'lost';
+    resolveReply = { ...REACHABLE, editable: false, tag: 'DIV' };
+    const out = await act({ action: 'type', ref: 'e1', text: 'hello' });
+    expect(out).toContain('not an editable field');
+    expect(out).not.toContain('never reached the page');
+
+    const { armInputWitness } = await import('@core/snapshot/act.js');
+    expect(armInputWitness).not.toHaveBeenCalled();
   });
 });
 

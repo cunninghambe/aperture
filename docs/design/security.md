@@ -116,7 +116,52 @@ Two named residuals, stated rather than papered over:
   do not expose page-defined accessors — so the page cannot currently choose the
   string. That is a property of Chromium's world isolation, not a construction
   like invariant 1, and it is the weaker of the two guarantees. Narrowing these
-  to a fixed vocabulary is the honest fix and is not done.
+  to a fixed vocabulary is the honest fix and is not done. (Counts and line
+  numbers are as audited 2026-07-31 and drift with the file. The dispatch
+  witness added 2026-08-01 — `aperture:witness`, W1 — holds the discipline the
+  audit asked for: its two reasons are the fixed literals `gone` and
+  `not-witnessed`, and it catches nothing it could interpolate.)
+
+## Finding: a link's href could change under a stable label with no report (2026-08-01)
+
+**Mechanism.** `propDelta` compared five fields — `name`, `value`, `text`, and
+the two state masks — and never read `href`. A link whose target moved while its
+accessible name stayed byte-identical therefore changed nothing the diff engine
+could see: same key, same label, no children, so the walk produced zero ops. The
+zero-op path answers *"unchanged — the action caused no visible change"* and
+then absorbs the new tree into the baseline, so the next diff compares the
+updated tree against itself and the change is unreportable as a diff for the
+rest of the session.
+
+**Consequence.** The ref stays live and correct throughout. `ensureRef` updates
+the registry's stored href and the page-side index resolves by key to the live
+element, so a click lands on the element's **current** target while the agent's
+belief is the href it read in the last full snapshot. A page — or a script
+injected into one — can rotate `Continue to checkout` from `/checkout` to an
+attacker path *after* the agent has read the page, and nothing in the stream
+ever contradicts it. This is a phishing primitive aimed at the agent's **memory**
+rather than its eyes: no visual deception is needed, and the usual defence
+(re-read before acting) is exactly what the completeness sentence in
+`browser_act`'s description tells the agent it need not do. Our own doctrine was
+the amplifier.
+
+**Scope.** A full snapshot, a `tooBig` resync, or a forced re-read restates the
+current href and heals the belief. So this was not permanent against every
+access pattern — it was permanent against the one the product recommends.
+
+**Found** by external review 2026-08-01
+(`docs/design/review-external-2026-08-01.md` §1), verified by executed probe
+rather than by reading. **Fixed** by tier2b P0: `propDelta` compares `href` and
+the renderer emits the new target as `~ eN href=/path`. **Regression-guarded**
+by `test/diff-blindfields.test.ts`, by `test/completeness.test.ts` — which fails
+CI when a field joins `SnapshotNode` without a completeness ruling, guarding the
+recurrence mechanism rather than only this instance — by the fidelity
+`blindfields` scenario's href step, and by guard G13b.
+
+The same blindness covered flattened table `rows`: the identical chain with a
+data table in place of a link. That half is not a security finding on its own —
+no impersonation, no target substitution — but it shares this root cause and is
+closed by the same change.
 
 ## Why origin mismatch has no override
 

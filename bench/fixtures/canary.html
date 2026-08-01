@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Canary</title>
+  </head>
+  <body>
+    <main>
+      <h1>Canary</h1>
+      <!-- The smallest page that can answer one question: did an acknowledged
+           click reach the page? No task uses this fixture and no episode is
+           scored on it. The runner clicks the button between episodes and asks
+           the WITNESS — not Aperture — whether the click happened.
+
+           Wave 2 lost 46 minutes and $2.16 to a browser whose act path kept
+           answering `ok` against a page nothing could reach (wave2-evaluation
+           §1, §6). This fixture bounds a recurrence to one episode. -->
+      <button data-bench="canary">Canary</button>
+      <p id="beats">beats: 0</p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      var beats = 0;
+      var out = document.getElementById('beats');
+      document.querySelector('button[data-bench=canary]').addEventListener('click', function () {
+        beats += 1;
+        out.textContent = 'beats: ' + beats;
+      });
+      window.bench.register(function () {
+        return { beats: beats };
+      });
+    </script>
+  </body>
+</html>

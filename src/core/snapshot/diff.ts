@@ -1,6 +1,7 @@
 import type { RefRegistry } from './registry.js';
 import type { DiffOp, PropDelta, SnapshotNode } from './types.js';
 import { State } from './types.js';
+import { isPositionalKey } from './walker.js';
 
 /**
  * Diffing two snapshots.
@@ -44,6 +45,17 @@ export interface DiffResult {
  */
 const REPLACE_MATCH_RATIO = 0.4;
 const REPLACE_MIN_CHILDREN = 8;
+
+/**
+ * The key an ordinal-suffixed key is a positional variant of.
+ *
+ * `disambiguate` (walker.ts) leaves the FIRST occurrence bare and suffixes the
+ * rest, so a family is the bare key plus its `|#N` siblings and they all fold
+ * to the same base.
+ */
+function positionalBase(key: string): string {
+  return key.replace(/\|#\d+$/, '');
+}
 
 export function diffSnapshots(
   oldRoot: SnapshotNode,
@@ -173,7 +185,73 @@ export function diffSnapshots(
       return;
     }
 
+    // Third escalation: a POSITIONAL FAMILY lost a member.
+    //
+    // `disambiguate` gives the first occurrence of a key the bare key and
+    // suffixes the rest `|#1`, `|#2`… — so for elements distinguishable only
+    // by document order, identity IS the ordinal. Remove one and every
+    // survivor below it silently renumbers: `e12` still resolves, still points
+    // at a live element, and points at a DIFFERENT row than the one the agent
+    // read. Wave 2 measured the cost live — 6 wrong-element clicks in
+    // `queue-positional`, every one a stale ordinal after a removal.
+    //
+    // A per-child edit script cannot express this, because nothing in it is
+    // false: the ops are individually correct and the model's ordinals are
+    // collectively wrong. Restating the container is the one op that hands the
+    // model fresh label→ref lines in the same observation, in vocabulary it
+    // and the bench reader already speak. Cost is the container, paid only on
+    // the removal-from-a-family event — which is precisely the event that
+    // invalidated the ordinals.
+    if (positionalFamilyLostAMember(oldKids, newKids)) {
+      const survivors = new Set<string>();
+      collectKeys(n, survivors);
+      ops.push({
+        op: 'replace',
+        ref: reg.ensureRef(n),
+        subtree: n,
+        gone: buryUnder(o, survivors),
+      });
+      return;
+    }
+
     reconcileChildren(o, n);
+  }
+
+  /**
+   * Did a removal renumber the ordinals of surviving siblings?
+   *
+   * A positional family is a bare key plus its `|#N` suffixed siblings: ≥2 old
+   * children sharing a `positionalBase`, at least one of which is actually
+   * ordinal-suffixed. The family lost a member when one of its keys is absent
+   * from both the new children AND the rest of the new tree (a key that turned
+   * up elsewhere moved, it did not die) while at least one sibling survives in
+   * place.
+   */
+  function positionalFamilyLostAMember(
+    oldKids: SnapshotNode[],
+    newKids: SnapshotNode[],
+  ): boolean {
+    const families = new Map<string, string[]>();
+    for (const c of oldKids) {
+      const base = positionalBase(c.key);
+      const fam = families.get(base);
+      if (fam) fam.push(c.key);
+      else families.set(base, [c.key]);
+    }
+
+    const newKeys = new Set(newKids.map((c) => c.key));
+    for (const [, keys] of families) {
+      if (keys.length < 2) continue;
+      if (!keys.some(isPositionalKey)) continue;
+      let removed = false;
+      let survived = false;
+      for (const key of keys) {
+        if (newKeys.has(key)) survived = true;
+        else if (!newByKey.has(key)) removed = true;
+      }
+      if (removed && survived) return true;
+    }
+    return false;
   }
 
   function reconcileChildren(o: SnapshotNode, n: SnapshotNode): void {
@@ -343,6 +421,45 @@ function countMatched(a: SnapshotNode[], b: SnapshotNode[]): number {
   return n;
 }
 
+/**
+ * Every property difference between two versions of the same node.
+ *
+ * THE FIELD CONTRACT. This function is what makes the product's completeness
+ * doctrine true — "a diff is complete: anything it does not mention is
+ * unchanged" (`src/mcp/tools.ts`). A field that `SnapshotNode` carries, the
+ * renderer emits, and this function does not compare is a change the agent is
+ * affirmatively told did not happen; the zero-op path then absorbs it into the
+ * baseline and it becomes unreportable forever. That is not hypothetical — it
+ * shipped, for `href` and `rows`, and an external review found it by probe
+ * (docs/design/review-external-2026-08-01.md §1).
+ *
+ * The ruling for EVERY key of `SnapshotNode` lives in `test/completeness.test.ts`
+ * as a literal table, and that test fails CI when a field is added without a
+ * ruling. The exclusions, with their reasons, are:
+ *
+ *   - `scroll`   — churns on every scroll by agent, user, or page; the agent's
+ *                  own scroll actions already return observations, and the
+ *                  semantic consequence (Offscreen) is masked below for the
+ *                  same reason.
+ *   - `rect`     — geometry; agents act by ref, not coordinates, and it moves
+ *                  on every layout shift.
+ *   - `headingLevel` — presentation weight; the heading's text is the operative
+ *                  fact and IS diffed.
+ *   - `autocomplete`, `inputType` — never rendered, so the model never held
+ *                  them and there is nothing to keep faithful.
+ *   - `shape`    — renderer-internal collapse hint.
+ *   - `ref`, `key`, `frameId`, `synthetic` — identity plumbing, not page facts.
+ *   - `dims`     — derived from `rows`; restated with them, never compared
+ *                  alone (walker.ts computes one from the other).
+ *   - `optionCount`, `children` — structural, reported by
+ *                  `optionSetTurnedOver` and `reconcileChildren`. Comparing
+ *                  them here would double-report.
+ *
+ * Snapshot-level: `url` is the `navigated` hoist in engine.ts; `title` is
+ * excluded (tab-badge counters make it a live region, and the meaningful
+ * correlate is a route change); `viewport` is full-only; `modal` is reported by
+ * its dialog subtree's add/remove.
+ */
 export function propDelta(o: SnapshotNode, n: SnapshotNode): PropDelta | null {
   const d: PropDelta = {};
   let any = false;
@@ -357,6 +474,34 @@ export function propDelta(o: SnapshotNode, n: SnapshotNode): PropDelta | null {
   }
   if ((o.text ?? '') !== (n.text ?? '')) {
     d.text = [o.text ?? '', n.text ?? ''];
+    any = true;
+  }
+  // A link whose target moved under an unchanged label is the phishing
+  // primitive this diff engine used to be blind to: the ref stays live, the
+  // click lands on the CURRENT target, and nothing in the stream ever
+  // contradicts the target the agent read.
+  if ((o.href ?? '') !== (n.href ?? '')) {
+    d.href = [o.href ?? '', n.href ?? ''];
+    any = true;
+  }
+
+  // Flattened tables are pure content: the walker drops their children, so a
+  // table whose every cell changed produces no structural ops at all. Compare
+  // only when BOTH sides carry rows — when flattening flips (a table gains or
+  // loses an interactive descendant) one side has `children` instead, and the
+  // child reconciliation already restates the content through add/replace.
+  // Emitting a rows delta on top of that would double-report.
+  if (o.rows && n.rows) {
+    if (!rowsEqual(o.rows, n.rows)) {
+      d.rows = n.rows;
+      d.dims = n.dims ?? { rows: n.rows.length, cols: n.rows[0]?.length ?? 0 };
+      any = true;
+    }
+  } else if (o.rows && !n.rows && n.children.length === 0) {
+    // The one asymmetric case that is NOT covered by child reconciliation: the
+    // table emptied. Nothing on the new side would say so.
+    d.rows = [];
+    d.dims = { rows: 0, cols: 0 };
     any = true;
   }
 
@@ -376,15 +521,60 @@ export function propDelta(o: SnapshotNode, n: SnapshotNode): PropDelta | null {
   return any ? d : null;
 }
 
+/**
+ * Cell-by-cell equality, with an early exit.
+ *
+ * Bounded by the walker's own caps (50 rows, truncated cells), so the worst
+ * case is small and the common case — one cell moved — exits on the first row.
+ */
+function rowsEqual(a: string[][], b: string[][]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ra = a[i]!;
+    const rb = b[i]!;
+    if (ra.length !== rb.length) return false;
+    for (let j = 0; j < ra.length; j++) if (ra[j] !== rb[j]) return false;
+  }
+  return true;
+}
+
+/**
+ * The first cell that differs, as the volatility tracker's `text`.
+ *
+ * It is what a human would call "the change", it gives `TIMER_SHAPE` a shot at
+ * a clock living in a cell, and it is O(cells) with an early exit. Falls back
+ * to the first cell of the first row when the shapes differ, since then no
+ * single cell is "the" change.
+ */
+export function firstDifferingCell(
+  o: string[][] | undefined,
+  n: string[][],
+): string | undefined {
+  if (o) {
+    for (let i = 0; i < Math.min(o.length, n.length); i++) {
+      const ra = o[i]!;
+      const rb = n[i]!;
+      if (ra.length !== rb.length) break;
+      for (let j = 0; j < rb.length; j++) if (ra[j] !== rb[j]) return rb[j];
+    }
+  }
+  return n[0]?.[0];
+}
+
 function collectKeys(n: SnapshotNode, out: Set<string>): void {
   out.add(n.key);
   for (const c of n.children) collectKeys(c, out);
 }
 
-function keysOf(n: SnapshotNode): string[] {
+/**
+ * Every key in a subtree. Returns the Set itself: both call sites only iterate
+ * it, and spreading to an array was a duplicate O(n) allocation per
+ * removal/replace for nothing.
+ */
+function keysOf(n: SnapshotNode): Set<string> {
   const s = new Set<string>();
   collectKeys(n, s);
-  return [...s];
+  return s;
 }
 
 export function indexByKey(root: SnapshotNode): Map<string, SnapshotNode> {

@@ -27,6 +27,12 @@
  * - Two guards run BEFORE any API budget is spent, and they catch the two worst
  *   vectors: a task that succeeds by accident (G1) and an experiment where the
  *   winning information never travels through a diff at all (G2).
+ * - A LIVENESS CANARY runs before every episode, and an episode whose
+ *   acknowledged clicks never reached the page is quarantined rather than
+ *   scored (G6b). Wave 2 spent 46 minutes and $2.16 measuring a browser whose
+ *   act path answered `ok` against a page nothing could reach, and the shipped
+ *   suite diagnosed it as MISLABELLED ARMS. An apparatus failure must never be
+ *   able to present as a result about the variable under test.
  *
  * KNOWN LIMITATIONS, stated rather than papered over:
  * - The SDK exposes no temperature control (only `effort`), so runs are
@@ -510,6 +516,109 @@ function resolveLabel(model, step) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// G6b — the apparatus wedge: predicate, stamp, and liveness canary
+// ---------------------------------------------------------------------------
+
+/**
+ * Acknowledged element actions the witness never saw.
+ *
+ * Scroll, hover and key are excluded, and that exclusion is measured rather
+ * than assumed: across wave 2's 245 clean episodes the number of
+ * `click`/`type`/`clear` acts attributed `no_page_effect` is ZERO, while the
+ * single clean `no_page_effect` of any kind is a `scroll` in
+ * `queue-positional redump run13`. Scroll, hover and key legitimately produce no
+ * witness event, which is why the raw `no_page_effect` RATE is the wrong
+ * predicate and this one is right.
+ *
+ * Recomputable from `acts` alone, so it applies to stores recorded before the
+ * `apparatus` stamp existed — including wave 2's, where it fires on exactly the
+ * six wedged episodes and on nothing else.
+ */
+export function deadActsFrom(acts) {
+  return (acts ?? []).filter(
+    (a) => ['click', 'type', 'clear'].includes(a.action) && a.attribution === 'no_page_effect',
+  ).length;
+}
+
+/**
+ * G6b — apparatus-wedge quarantine. An episode whose acknowledged clicks or
+ * types produced no witness event TWICE or more, or that contains a
+ * walk-timeout observation, measured a wedged browser, not an arm. One dead act
+ * is tolerated and counted: the known ~1-in-450 ok-click flake (wave-1
+ * limitations) must not quarantine a real episode.
+ *
+ * Nothing in it references success, the arm, or the delta — which is what makes
+ * it a predicate that could have been written blind, and the reason wave 2's
+ * post-hoc application of it is defensible at all (wave2-evaluation §2).
+ */
+export function isWedged(r) {
+  return (
+    (r.apparatus?.deadActs ?? deadActsFrom(r.acts)) >= 2 || (r.apparatus?.walkTimeouts ?? 0) > 0
+  );
+}
+
+/**
+ * One scripted click on a fixture nothing is scored on, asked of the WITNESS.
+ *
+ * Spends no API budget. Costs ~2-3s, so ~12 minutes across a 280-episode run;
+ * the wave-2 wedge burned $2.16 and 46 minutes producing episodes that contained
+ * zero bits about the variable under test, and this bounds a recurrence to one.
+ *
+ * It asks the page, never Aperture. `browser_act` answering `ok` for 40 minutes
+ * against a dead page is precisely the failure being guarded against, so an
+ * apparatus check that believed `ok` would be checking nothing.
+ */
+async function livenessCanary({ proxy, collector }) {
+  collector.reset();
+  const ep = proxy.newEpisode({
+    arm: 'diff',
+    maxSteps: 4,
+    allowed: ['canary'],
+    taskId: '__canary',
+  });
+  await navigate(proxy, 'canary.html');
+  if (!(await waitForLoad(collector, 5000))) {
+    return { ok: false, why: 'the canary fixture never reported to the collector' };
+  }
+  const snap = await proxy.direct.snapshot({ mode: 'full' });
+  const r = resolveLabel(ep.model, { act: 'click', label: 'Canary' });
+  if (r.error) {
+    return { ok: false, why: `the canary button is not in the snapshot:\n    ${r.error}`, out: snap };
+  }
+
+  const out = await proxy.direct.act({ action: 'click', ref: r.ref });
+  // doAct already waited for the collector to go quiet; this second, shorter
+  // wait is what makes the window the specified 2s rather than doAct's 1.5s.
+  await settle(collector, 200, 500);
+  const seen = collector.actions().some((e) => e.detail?.bench === 'canary');
+  if (seen) return { ok: true };
+  const act = ep.acts[ep.acts.length - 1];
+  return {
+    ok: false,
+    why:
+      'a scripted click on the canary button was acknowledged by Aperture and never ' +
+      `reached the page (attribution: ${act?.attribution ?? 'none'})`,
+    out,
+  };
+}
+
+function canaryFailed(where, canary) {
+  return bail(EXIT.INFRA, `LIVENESS CANARY FAILED ${where} — the apparatus is wedged:`, [
+    canary.why,
+    '',
+    'This is NOT a statement about the arms, the tasks, or the model. The browser',
+    'stopped delivering input to the page while its act path kept answering ok —',
+    'the wave-2 wedge (docs/design/wave2-evaluation.md §6), whose root cause is',
+    'undecidable after the fact and whose episodes contain no information about',
+    'anything under test.',
+    '',
+    'The store is intact and every completed episode is on disk. Restart Aperture',
+    'and resume; the quarantined slots re-run only under --new-cohort.',
+    ...(canary.out ? ['', `last reply: ${String(canary.out).slice(0, 300)}`] : []),
+  ]);
+}
+
 async function waitForLoad(collector, ms = 10000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -555,6 +664,15 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
 
   const kinds = { full: 0, diff: 0, nochange: 0, other: 0 };
   for (const o of ep.observations) kinds[o.kind]++;
+  // G6b's evidence, stamped onto the episode rather than left to be recomputed:
+  // how many acknowledged element actions the witness never saw, and whether the
+  // walker itself timed out. See `isWedged` for what is done with them.
+  const apparatus = {
+    deadActs: deadActsFrom(ep.acts),
+    walkTimeouts: ep.observations.filter((o) =>
+      /could not read the page \(walk timed out\)/.test(o.text),
+    ).length,
+  };
   const attributions = {};
   for (const a of ep.acts) attributions[a.attribution] = (attributions[a.attribution] ?? 0) + 1;
   const postResync = ep.acts.filter((a) => a.tags.includes('post_resync') && a.attribution !== 'ok').length;
@@ -578,6 +696,7 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     truncatedObs: ep.observations.filter((o) => o.truncated).length,
     obsChars: ep.observations.reduce((a, o) => a + o.chars, 0),
     attributions,
+    apparatus,
     // Any observation the shape predicates could not classify. An unclassified
     // observation is the hole a diff could slip through unnoticed in the
     // re-dump arm, so they are surfaced rather than bucketed and forgotten.
@@ -1400,8 +1519,18 @@ async function main() {
     }
     console.log('G2 PASS\n');
 
+    // ---- G6b liveness canary, once before anything is scored ---------------
+    //
+    // Run in the selftest too, deliberately. A guard whose first execution is
+    // during a $40 wave is a guard nobody has tested; `--selftest` is where the
+    // apparatus proves it can see itself.
+    console.log('G6b canary — an acknowledged click must reach the page');
+    const preflight = await livenessCanary({ proxy, collector });
+    if (!preflight.ok) return (code = canaryFailed('before the first episode', preflight));
+    console.log('G6b canary PASS\n');
+
     if (opts.selftest) {
-      console.log('SELFTEST PASS — G1 and G2 green, no API budget spent.');
+      console.log('SELFTEST PASS — G1, G2 and the liveness canary green, no API budget spent.');
       return (code = EXIT.PARITY);
     }
 
@@ -1422,20 +1551,45 @@ async function main() {
     let i = 0;
     for (const t of todo) {
       i++;
+      // Before EVERY episode. The wedge's onset was abrupt and mid-episode, and
+      // the episode it began in is unrecoverable either way; what the canary
+      // buys is that the NEXT one is never run, and that onset is timestamped to
+      // within one episode instead of being reconstructed from a store months
+      // later.
+      const pre = await livenessCanary({ proxy, collector });
+      if (!pre.ok) return (code = canaryFailed(`before episode ${i}/${todo.length}`, pre));
+
       const r = await runEpisode({
         proxy, collector, task: t.task, arm: t.arm, runIndex: t.runIndex,
         driver: agentDriver(proxy, t.task, opts),
       });
+      // Quarantine is stamped at write time so the store carries the ruling, and
+      // recomputed at report time so stores written before G6b existed are held
+      // to the same rule. The slot stays occupied: a quarantined episode is not
+      // a missing one, and it re-runs only under --new-cohort.
+      if (isWedged(r)) r.quarantined = 'apparatus_wedge';
       const row = stampEpisode(r, identity, ARM_DEFINITION, toolsHash);
       appendEpisode(storePath, row);
       phaseRows.push(row);
       stored.push(row);
       console.log(
         `[${String(i).padStart(3)}/${todo.length}] run${String(t.runIndex).padStart(3)} ${t.task.id.padEnd(20)} ${t.arm.padEnd(7)} ` +
-          `${r.success ? 'PASS' : 'fail'}  wrong=${r.wrongElement} steps=${r.steps} ` +
+          `${r.quarantined ? 'WEDGED' : r.success ? 'PASS' : 'fail'}  wrong=${r.wrongElement} steps=${r.steps} ` +
           `obs=${r.kinds.full}F/${r.kinds.diff}D/${r.kinds.nochange}N/${r.kinds.other}? · ${r.obsChars}ch · $${r.costUsd.toFixed(4)} · ${(r.durationMs / 1000).toFixed(0)}s` +
           (r.driverError ? `  ERROR: ${r.driverError.slice(0, 80)}` : ''),
       );
+
+      // The other half of the specification: any dead act or walk timeout at all
+      // — one, below the quarantine threshold — is enough to ask the question
+      // immediately rather than at the top of the next episode.
+      if ((r.apparatus?.deadActs ?? 0) >= 1 || (r.apparatus?.walkTimeouts ?? 0) >= 1) {
+        console.log(
+          `      apparatus signal: ${r.apparatus.deadActs} dead act(s), ` +
+            `${r.apparatus.walkTimeouts} walk timeout(s) — checking liveness`,
+        );
+        const post = await livenessCanary({ proxy, collector });
+        if (!post.ok) return (code = canaryFailed(`after episode ${i}/${todo.length}`, post));
+      }
     }
 
     console.log(
@@ -1457,7 +1611,17 @@ async function main() {
   }
 }
 
-function report(rows, opts, tasks) {
+function report(allRows, opts, tasks) {
+  // G6b — the quarantine, applied before anything is computed from anything.
+  //
+  // A wedged episode is an ABSENT measurement, not an unfavourable one: no
+  // action reached the page, so it contains zero bits about the variable under
+  // test and averaging it into an arm is noise injection, not conservatism. It
+  // is excluded from every guard and from the verdict arithmetic, and it is
+  // reported in its own table rather than deleted.
+  const quarantined = allRows.filter(isWedged);
+  const rows = allRows.filter((r) => !isWedged(r));
+
   const diff = summarise(rows, 'diff');
   const redump = summarise(rows, 'redump');
 
@@ -1468,6 +1632,34 @@ function report(rows, opts, tasks) {
     `pooled over ${rows.length} episode(s) on record — every phase of this cohort, not just\n` +
       'the most recent one. The verdict rule below is the preregistered one, unchanged.',
   );
+
+  const qByArm = { diff: 0, redump: 0 };
+  if (quarantined.length) {
+    for (const r of quarantined) qByArm[r.arm] = (qByArm[r.arm] ?? 0) + 1;
+    console.log(
+      `\nG6b QUARANTINE — ${quarantined.length} episode(s) excluded as apparatus failures ` +
+        `(diff ${qByArm.diff}, re-dump ${qByArm.redump}) out of ${allRows.length} on record.`,
+    );
+    console.log(
+      '  Predicate: two or more acknowledged click/type/clear actions produced no witness\n' +
+        '  event, or the walker timed out. Such an episode measured a wedged browser, not an\n' +
+        '  arm. The episodes are kept, their slots stay occupied, and they re-run only under\n' +
+        '  --new-cohort.',
+    );
+    for (const r of quarantined.slice(0, 12)) {
+      const dead = r.apparatus?.deadActs ?? deadActsFrom(r.acts);
+      console.log(
+        `    ${r.task.padEnd(20)} ${r.arm.padEnd(7)} run${String(r.runIndex).padStart(3)}  ` +
+          `dead acts ${String(dead).padStart(2)}  walk timeouts ${r.apparatus?.walkTimeouts ?? '?'}  ` +
+          `pageActions ${r.pageActions}  ${Math.round((r.durationMs ?? 0) / 1000)}s`,
+      );
+    }
+    if (quarantined.length > 12) console.log(`    … and ${quarantined.length - 12} more`);
+    console.log(
+      '\n  Any citation of this run must disclose the quarantine, its per-arm counts, and\n' +
+        '  the fact that a rule which removes episodes can move a verdict class.',
+    );
+  }
 
   console.log('\nPer task (success diff / re-dump):');
   for (const t of tasks) {
@@ -1505,7 +1697,19 @@ function report(rows, opts, tasks) {
   if (g3.length) {
     infra.push(
       `G3: ${g3.length} re-dump episodes received an observation that was not a FULL SNAPSHOT. ` +
-        'The arms are not what they claim to be.',
+        'The arms are not what they claim to be. ' +
+        'If these episodes also satisfy G6b, the fault is the apparatus, not the arm forcing ' +
+        '— see the quarantine table.',
+    );
+  }
+
+  // G6b symmetry. A wedge that fell mostly on one arm confounds the comparison
+  // in a way no amount of disclosure repairs: the surviving episodes of the two
+  // arms are then drawn from different stretches of the run.
+  if (Math.abs(qByArm.diff - qByArm.redump) >= 3) {
+    infra.push(
+      `G6b: the quarantine is asymmetric (diff ${qByArm.diff}, re-dump ${qByArm.redump}). ` +
+        'The wedge fell on one arm; the comparison is confounded.',
     );
   }
 

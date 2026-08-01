@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   RefRegistry,
   assignRefs,
-  fuzzyRescue,
   nameSimilarity,
 } from '../src/core/snapshot/registry.js';
 import {
@@ -179,30 +178,12 @@ describe('identity key generation', () => {
   });
 });
 
-// -- fuzzy rescue -----------------------------------------------------------
+// -- label similarity -------------------------------------------------------
 
-describe('fuzzyRescue', () => {
-  const lost = {
-    ref: 'e1', key: 'x', frameId: 0, role: 'button' as Role,
-    name: 'Apply coupon', href: undefined, rect: [10, 10, 100, 30] as [number, number, number, number],
-    state: 'dead' as const, emitted: true, needsReannounce: true, lastSeenSeq: '1.0',
-  };
-
-  it('recovers an element whose label barely changed', () => {
-    const found = fuzzyRescue(lost, [k('button', 'new', 'Apply coupon code')]);
-    expect(found?.name).toBe('Apply coupon code');
-  });
-
-  it('refuses to guess when nothing is close', () => {
-    // Guessing wrong here means clicking the wrong button, which can be
-    // destructive — so below threshold it must fail rather than act.
-    expect(fuzzyRescue(lost, [k('button', 'new', 'Delete account')])).toBeNull();
-  });
-
-  it('never crosses roles', () => {
-    expect(fuzzyRescue(lost, [k('link', 'new', 'Apply coupon')])).toBeNull();
-  });
-});
+// `fuzzyRescue` was tested here. It is deleted (tier2b §2) and so are its
+// tests: a test asserting a deleted function's behavior does not survive, and
+// a passing test suite around never-called code is how a reviewer catches us.
+// The reasoning is recorded at the deletion site in registry.ts.
 
 describe('nameSimilarity', () => {
   it('is order-insensitive', () => {
@@ -378,6 +359,21 @@ describe('renderFull', () => {
     });
     const out = renderFull(snapshot(k('main', 'm', undefined, { children: [t] })));
     expect(out).toContain('"USB-C Hub" | "1" | "$34.99"');
+  });
+
+  it('indents rows one level under their table line, at any depth', () => {
+    // The row format now has ONE spelling (`renderRows`), shared with the `~`
+    // update that restates a changed table. This pins the full-snapshot side of
+    // that share: an extraction that quietly shifted indentation would move
+    // rows out from under their table for every reader that parses by depth.
+    const t = k('table', 't', undefined, {
+      rows: [['Order', 'Status'], ['#1001', 'Pending']],
+      dims: { rows: 2, cols: 2 },
+    });
+    const lines = renderLine(t, 2)!.split('\n');
+    expect(lines[0]).toBe('    table 2x2');
+    expect(lines[1]).toBe('      "Order" | "Status"');
+    expect(lines[2]).toBe('      "#1001" | "Pending"');
   });
 
   it('shows only states that are set', () => {

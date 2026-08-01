@@ -9,7 +9,18 @@
  * disagreement rather than about the agent — so they share, deliberately.
  *
  * Nothing here talks to the network or knows what a task is. It is a pure
- * function from text to a Map<ref, {role,label,value,states}>.
+ * function from text to a Map<ref, {role,label,value,states,href,dims,rows}>.
+ *
+ * THE FIELD SET IS NOT A STYLE CHOICE — it is the ceiling on what any bench
+ * built on this reader can ever see. For a year it was role/ref/label/value/
+ * states, then optionCount; `href`, `dims` and table `rows` were emitted by the
+ * renderer and dropped here. Both sides of fidelity.mjs's comparison are built
+ * by this function, so a field this reader discards compares stale-against-fresh
+ * as EQUAL: the propDelta blind-field bug (tier2b, external review 2026-08-01)
+ * was structurally invisible to five green fidelity scenarios for exactly that
+ * reason. When the walker's emission set grows, this function is where the
+ * ruling gets made — and `test/completeness.test.ts` is what forces someone to
+ * make it.
  */
 
 export const STATE_WORDS = new Set([
@@ -19,7 +30,60 @@ export const STATE_WORDS = new Set([
 
 export const unesc = (s) => s.replace(/\\(.)/g, '$1');
 
-/** Full-snapshot / subtree line: `role eN "label" ="value" … states`. */
+/** `3x2` — a flattened table's dimensions, derived from its rows. */
+const DIMS_TOKEN = /^(\d+)x(\d+)$/;
+/** `(0/1200px)` — a scrollable's offset. EXCLUDED from the contract (tier2b §1). */
+const SCROLL_TOKEN = /^\(-?\d+\/-?\d+px\)$/;
+
+/**
+ * One rendered table row back into cells.
+ *
+ * Cells are pipe-joined with ` | ` and each non-empty cell is quoted
+ * (render.ts:247-252), so the separator is only a separator OUTSIDE a quoted
+ * cell — a cell whose own text contains " | " would otherwise split into two.
+ * Scanned rather than `split(' | ')` for that reason.
+ */
+export function splitRowLine(s) {
+  const cells = [];
+  let cur = '';
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '"') {
+      const m = /^"((?:[^"\\]|\\.)*)"/.exec(s.slice(i));
+      if (m) {
+        cur += unesc(m[1]);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (s.startsWith(' | ', i)) {
+      cells.push(cur);
+      cur = '';
+      i += 3;
+      continue;
+    }
+    cur += s[i];
+    i++;
+  }
+  cells.push(cur);
+  return cells;
+}
+
+/** Leading whitespace of a line, as a count. Row attachment is indentation-based. */
+const indentOf = (line) => /^\s*/.exec(line)[0].length;
+
+/**
+ * Full-snapshot / subtree line:
+ * `role eN "label" ="value" href [N options] RxC (top/heightpx) states`.
+ *
+ * The bare (unquoted, unbracketed) tokens are read POSITIONALLY, in the
+ * renderer's emission order (render.ts:230-238): href, then `RxC` dims, then
+ * the scroll offset. Scroll is parsed only so it cannot be mistaken for
+ * something else — it is an excluded field and is not returned.
+ *
+ * hrefs are `sanitizeHref`-guaranteed to hold no whitespace and no quotes
+ * (walker.ts:697-699), so a token-level read cannot be broken by page content.
+ */
 export function parseElementLine(line) {
   const m = /^\s*(\w+) (e\d+)(.*)$/.exec(line);
   if (!m) return null;
@@ -52,19 +116,47 @@ export function parseElementLine(line) {
 
   const states = new Set();
   const words = rest.trim().split(/\s+/).filter(Boolean);
+  let bareEnd = words.length;
   for (let i = words.length - 1; i >= 0; i--) {
-    if (STATE_WORDS.has(words[i])) states.add(words[i]);
-    else break;
+    if (STATE_WORDS.has(words[i])) {
+      states.add(words[i]);
+      bareEnd = i;
+    } else break;
   }
-  return { role, ref, label, value, states, optionCount };
+
+  // What is left, in emission order: [href] [RxC] [(top/heightpx)].
+  const bare = words.slice(0, bareEnd).filter((t) => !SCROLL_TOKEN.test(t));
+  let href;
+  let dims;
+  if (bare.length >= 2) {
+    // Both present: order decides, and no shape test can be fooled by an href
+    // that happens to look like `3x2`.
+    href = bare[0];
+    const dm = DIMS_TOKEN.exec(bare[1]);
+    if (dm) dims = { rows: Number(dm[1]), cols: Number(dm[2]) };
+  } else if (bare.length === 1) {
+    const dm = DIMS_TOKEN.exec(bare[0]);
+    if (dm) dims = { rows: Number(dm[1]), cols: Number(dm[2]) };
+    else href = bare[0];
+  }
+
+  return { role, ref, label, value, states, optionCount, href, dims };
 }
 
 /**
  * The agent's mental model, built ONLY from what it was told.
- * ref -> { role, label, value, states:Set }.
+ * ref -> { role, label, value, states:Set, href?, dims?, rows? }.
+ *
+ * The loop is indexed rather than a for…of over lines because a flattened
+ * table's rows are LINES OF THEIR OWN, indented under the table's element line
+ * (render.ts:247-252). They carry no `role eN` head, so nothing but their
+ * position attaches them to their table — which is exactly why they used to
+ * fall on the floor.
  */
 export function applyObservation(model, text) {
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (/^FULL SNAPSHOT #/.test(line)) {
       model.clear();
       continue;
@@ -102,11 +194,37 @@ export function applyObservation(model, text) {
 
     if (/^> e\d+ moved/.test(line)) continue; // position is not tracked
 
-    // Diff update: `~ e3 "name" ="value" "text" +focused -checked`
+    // Diff update: `~ e3 "name" ="value" "text" href=/p 3x2: +focused -checked`
+    //
+    // `href=` and the `RxC:` + indented rows tail are the wire form tier2b P0
+    // adds for the two fields propDelta was blind to. Reading them here has to
+    // land in the SAME change set as the renderer emitting them — the
+    // `isNoChange` note below is the precedent and the reason.
     const upd = /^~ (e\d+)(.*)$/.exec(line);
     if (upd) {
       const entry = model.get(upd[1]) ?? { role: '?', label: '', value: '', states: new Set() };
       let rest = upd[2];
+
+      // Before the quoted-string extractions: an href is unquoted and cannot
+      // contain whitespace, so it is unambiguous wherever it sits on the line.
+      const hm = / href=(\S+)/.exec(rest);
+      if (hm) {
+        entry.href = hm[1];
+        rest = rest.slice(0, hm.index) + rest.slice(hm.index + hm[0].length);
+      }
+      // `~ e7 3x2:` — a rows restatement. The rows follow, indented, in exactly
+      // the element-line row format.
+      const rm2 = / (\d+)x(\d+):\s*$/.exec(rest);
+      if (rm2) {
+        entry.dims = { rows: Number(rm2[1]), cols: Number(rm2[2]) };
+        rest = rest.slice(0, rm2.index);
+        const rows = [];
+        const base = indentOf(line);
+        while (i + 1 < lines.length && lines[i + 1].trim() && indentOf(lines[i + 1]) > base) {
+          rows.push(splitRowLine(lines[++i].trim()));
+        }
+        entry.rows = rows;
+      }
 
       const vm = / ="((?:[^"\\]|\\.)*)"/.exec(rest);
       if (vm) {
@@ -142,7 +260,35 @@ export function applyObservation(model, text) {
     // Anything else that looks like an element line (full snapshots, add and
     // replace subtrees) restates the element outright.
     const el = parseElementLine(line);
-    if (el) model.set(el.ref, el);
+    if (el) {
+      // A flattened table's rows are the indented lines directly beneath it —
+      // on full snapshots, `+ add` subtrees and `! replace` subtrees alike.
+      // Consumed until the indentation returns to the table's level or
+      // shallower, which is also where the table's siblings resume.
+      if (el.role === 'table') {
+        const base = indentOf(line);
+        let j = i;
+        const rows = [];
+        let flattened = true;
+        while (j + 1 < lines.length && lines[j + 1].trim() && indentOf(lines[j + 1]) > base) {
+          const next = lines[++j];
+          // A table that was NOT flattened (it holds links or buttons, so the
+          // walker kept its subtree — walker.ts:277) renders element lines under
+          // itself. Those are children, not rows, and mistaking one for the
+          // other would both invent a row and lose an element.
+          if (parseElementLine(next) || /^\s*…/.test(next)) {
+            flattened = false;
+            break;
+          }
+          rows.push(splitRowLine(next.trim()));
+        }
+        if (flattened && rows.length) {
+          el.rows = rows;
+          i = j;
+        }
+      }
+      model.set(el.ref, el);
+    }
   }
   return model;
 }

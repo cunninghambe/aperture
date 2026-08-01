@@ -1,4 +1,4 @@
-import type { Rect, RefEntry, Role, SnapshotNode } from './types.js';
+import type { RefEntry, Role, SnapshotNode } from './types.js';
 import { isAddressableRole } from './walker.js';
 
 /**
@@ -135,44 +135,36 @@ export function assignRefs(root: SnapshotNode, reg: RefRegistry): void {
 }
 
 // ---------------------------------------------------------------------------
-// Stale-ref rescue
+// Label similarity
 // ---------------------------------------------------------------------------
 
-/**
- * When an agent acts on a ref whose node is gone, guessing wrong is worse than
- * failing — clicking the wrong button can be destructive. So the threshold is
- * deliberately high, and anything below it fails with a micro-snapshot instead
- * of acting.
+/*
+ * `fuzzyRescue` lived here — a weighted guess (name similarity, href equality,
+ * frame, geometry) at which live node a dead ref "really" meant, behind a 0.62
+ * threshold. Deleted 2026-08-01, per docs/design/tier2b.md §2, for three
+ * independent reasons:
+ *
+ *   1. It was never wired. Exported, doc-commented as the stale-ref rescue
+ *      path, tested — and called from nowhere in src/. The act path already
+ *      fails loudly on a dead ref, which is the behavior the doc comment
+ *      claimed as the fallback's virtue.
+ *   2. Its scoring provably could not serve its own motivating case. The
+ *      metric was token-set Jaccard, which scores Follow→Following at 0.0, so
+ *      a label morph could not clear 0.62 even with perfect geometry.
+ *   3. The product's controlling failure class is wrong-element actions. A
+ *      thresholded guess at which button the agent meant is a generator of
+ *      exactly those, with a confidence knob on it.
  */
-const RESCUE_THRESHOLD = 0.62;
 
-export function fuzzyRescue(
-  lost: RefEntry,
-  candidates: SnapshotNode[],
-): SnapshotNode | null {
-  let best: SnapshotNode | null = null;
-  let bestScore = 0;
-
-  for (const c of candidates) {
-    if (c.role !== lost.role) continue;
-    const score =
-      0.45 * nameSimilarity(lost.name ?? '', c.name ?? '') +
-      0.2 * (eqIdent(lost.href, c.href) ? 1 : 0) +
-      0.2 * (c.frameId === lost.frameId ? 1 : 0) +
-      0.15 * geomProximity(lost.rect, c.rect);
-    if (score > bestScore) {
-      bestScore = score;
-      best = c;
-    }
-  }
-  return bestScore >= RESCUE_THRESHOLD ? best : null;
-}
-
-function eqIdent(a: string | undefined, b: string | undefined): boolean {
-  return a !== undefined && b !== undefined && a === b;
-}
-
-/** Token-set Jaccard. Robust to reordered and partially-changed labels. */
+/**
+ * Token-set Jaccard. Robust to reordered and partially-changed labels.
+ *
+ * TENURE, dated 2026-08-01: the sole intended consumer is tier2b P2's S-tier
+ * reconciliation metric (docs/design/tier2b.md §3), which incorporates this as
+ * one term. If P2's measurement (`bench/churn.mjs`) rules the fix unwarranted,
+ * delete this and its tests in the same decision — do not leave a second
+ * tested orphan behind the one just removed.
+ */
 export function nameSimilarity(a: string, b: string): number {
   if (!a && !b) return 1;
   if (!a || !b) return 0;
@@ -193,16 +185,6 @@ function tokens(s: string): Set<string> {
       .split(/\s+/)
       .filter(Boolean),
   );
-}
-
-/** Decays to zero over ~400px of centre-to-centre distance. */
-function geomProximity(a: Rect, b: Rect): number {
-  const ax = a[0] + a[2] / 2;
-  const ay = a[1] + a[3] / 2;
-  const bx = b[0] + b[2] / 2;
-  const by = b[1] + b[3] / 2;
-  const d = Math.hypot(ax - bx, ay - by);
-  return Math.max(0, 1 - d / 400);
 }
 
 export type { Role };

@@ -2,8 +2,9 @@
 
 ## Current state — all benchmarks green, and this time the green is guarded
 
-283 tests pass. The browser runs, the MCP server works, `browser_act` closes
-the act-observe loop, and Claude Code can drive it end to end.
+The full test suite passes. The browser runs, the MCP server works,
+`browser_act` closes the act-observe loop, and Claude Code can drive it end to
+end.
 
 ```
 bench:fidelity form       GREEN   18/18 refs · 13 diffs + 1 forced resync · typed values round-tripped

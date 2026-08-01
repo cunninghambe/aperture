@@ -170,6 +170,86 @@ ipcRenderer.on(
   },
 );
 
+/**
+ * Arm a one-shot witness for input that is about to be dispatched.
+ *
+ * WHY THIS EXISTS. Wave 2 ended with Aperture's input path wedged for forty
+ * minutes while `browser_act` answered `ok` to every call: CDP
+ * `Input.dispatchMouseEvent` resolved, the walker kept serving snapshots, the
+ * renderer kept loading pages — and not one click reached the DOM. Nothing
+ * anywhere in the stack could tell the difference between "the click landed
+ * and the page did nothing" and "the click never landed", so the agent was
+ * told the first when the truth was the second. `sendCommand` resolving is a
+ * statement about CDP, not about the page; the only witness that means
+ * anything is an event observed in the page itself.
+ *
+ * The listener is capture-phase on the resolved target's WINDOW, which is the
+ * first node in the capture path — so no page handler can `stopPropagation`
+ * its way out of being observed. A document-level listener would not be
+ * enough: a page capture handler on `window` runs earlier and could suppress
+ * every witness, turning a working page into a permanent false alarm. The page
+ * also cannot remove this listener — it lives in the isolated world, and the
+ * page holds no reference to it or to this world's `EventTarget.prototype`.
+ *
+ * It witnesses ARRIVAL, not effect. A click that reaches a dead button is
+ * still `ok` — "the action caused no visible change" is a real finding and
+ * this must not turn it into an error. The one thing it converts is silence on
+ * the input path itself.
+ *
+ * `reason` strings here are fixed vocabulary (`gone`, `not-witnessed`), never
+ * interpolated from a caught error — these land OUTSIDE the untrusted-content
+ * envelope in `browser_act`'s prose. See docs/design/security.md, "Preload
+ * reason strings".
+ */
+ipcRenderer.on(
+  'aperture:witness',
+  (
+    _event,
+    req: { requestId: string; key: string; types: string[]; timeoutMs?: number },
+  ) => {
+    const reply = (payload: unknown): void =>
+      ipcRenderer.send('aperture:witness-result', req.requestId, payload);
+
+    const el = index.get(req.key);
+    if (!el || !el.isConnected) {
+      // Answered on the ARMING channel, not the result channel: nothing was
+      // armed, so there is no verdict to report and the caller must not spend
+      // its arming timeout waiting for one it will never get.
+      return ipcRenderer.send('aperture:witness-armed', req.requestId, {
+        ok: false,
+        reason: 'gone',
+      });
+    }
+
+    const target: EventTarget = el.ownerDocument.defaultView ?? el.ownerDocument;
+    let settled = false;
+    const types = req.types.length ? req.types : ['mousedown'];
+
+    const done = (witnessed: boolean, type?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const t of types) target.removeEventListener(t, onEvent, true);
+      reply(
+        witnessed
+          ? { ok: true, witnessed: true, type }
+          : { ok: false, reason: 'not-witnessed' },
+      );
+    };
+
+    const onEvent = (e: Event): void => done(true, e.type);
+
+    // The deadline is the preload's, not the main process's, so a wedge that
+    // also kills IPC in this direction still produces exactly one reply.
+    const timer = setTimeout(() => done(false), req.timeoutMs ?? 500);
+    for (const t of types) target.addEventListener(t, onEvent, true);
+
+    // Armed. The main process dispatches only after this ack, or the race is
+    // real: a fast synthetic click can beat the listener into place.
+    ipcRenderer.send('aperture:witness-armed', req.requestId, { ok: true });
+  },
+);
+
 /** Ancestor test that crosses shadow boundaries via the host chain. */
 function composedContains(ancestor: Element, node: Element): boolean {
   let cur: Node | null = node;

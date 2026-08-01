@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { isAllowedScheme, normalizeUrl } from '../src/main/tabs.js';
 import { quote } from '../src/core/snapshot/render.js';
 import { registrableDomain } from '../src/vault/vault.js';
-import { RefRegistry } from '../src/core/snapshot/registry.js';
+import { RefRegistry, assignRefs } from '../src/core/snapshot/registry.js';
+import { diffSnapshots } from '../src/core/snapshot/diff.js';
+import type { SnapshotNode } from '../src/core/snapshot/types.js';
 import { isPositionalKey } from '../src/core/snapshot/walker.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
 import { buildUaProfile, isCoherent } from '../src/privacy/useragent.js';
@@ -200,10 +202,104 @@ describe('review — ten identical buttons must not share one ref', () => {
     expect(new Set(refs).size).toBe(10);
   });
 
-  it('marks positional keys so the diff engine knows they are fragile', () => {
+  it('recognises ordinal-suffixed keys', () => {
+    // Named for what it asserts. It used to be called "marks positional keys
+    // so the diff engine knows they are fragile", which claimed a wiring that
+    // did not exist: `isPositionalKey` was exported, tested, and called from
+    // nowhere in src/. The wiring is real now, and it is asserted below by
+    // behavior rather than by test name.
     expect(isPositionalKey('S|0|button|add to cart||#3')).toBe(true);
     expect(isPositionalKey('S|0|button|add to cart|')).toBe(false);
     expect(isPositionalKey('I|0|button|checkout-submit')).toBe(false);
+  });
+});
+
+describe('P1 — a removal that renumbers ordinals must restate the container', () => {
+  /**
+   * The wave-2 measurement this closes: 6 wrong-element clicks in
+   * `queue-positional`, every one a stale ordinal after a removal
+   * (docs/design/review-external-2026-08-01.md §3).
+   *
+   * When siblings are distinguishable only by document order, `disambiguate`
+   * keys them bare, `|#1`, `|#2`… — so identity IS the ordinal. Delete one and
+   * every survivor below it renumbers: the agent's ref still resolves, still
+   * points at a live element, and points at a different row than the one it
+   * read. A per-child edit script cannot express that, because every op in it
+   * is individually true while the model's ordinals are collectively wrong.
+   */
+  const base = 'S|0|button|approve||main>list';
+  const famKey = (i: number): string => (i === 0 ? base : `${base}|#${i}`);
+
+  const row = (key: string, name: string): SnapshotNode => ({
+    role: 'button', name, key, states: 0, frameId: 0, rect: [0, 0, 10, 10], children: [],
+  });
+
+  const container = (kids: SnapshotNode[]): SnapshotNode => ({
+    role: 'list', name: 'Queue', key: 'I|0|list|queue', states: 0, frameId: 0,
+    rect: [0, 0, 100, 100], children: kids,
+  });
+
+  it('escalates a positional-family removal to one replace of the parent', () => {
+    const reg = new RefRegistry();
+    // Seven rows: bare + |#1..|#6. Fewer than REPLACE_MIN_CHILDREN, so the
+    // match-ratio branch cannot be what fires here.
+    const before = container(
+      Array.from({ length: 7 }, (_, i) => row(famKey(i), `Approve ${i}`)),
+    );
+    assignRefs(before, reg);
+
+    // The third row dies; rows 3..6 slide up and answer to ordinals 2..5.
+    const survivors = [0, 1, 3, 4, 5, 6];
+    const after = container(survivors.map((i, slot) => row(famKey(slot), `Approve ${i}`)));
+
+    const { ops } = diffSnapshots(before, after, reg);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.op).toBe('replace');
+    // No per-child ops for family members: those are exactly the ops that read
+    // as true while leaving the model's ordinals wrong.
+    expect(ops.some((o) => o.op === 'remove' || o.op === 'move')).toBe(false);
+
+    const replace = ops[0] as { op: 'replace'; ref: string; gone?: string[] };
+    expect(replace.ref).toBe(reg.byKeyLookup('I|0|list|queue')?.ref);
+    // The ordinal that no longer exists is named, so the model stops believing
+    // in it rather than holding a ref one row short of the list.
+    expect(replace.gone).toContain(reg.byKeyLookup(famKey(6))?.ref);
+  });
+
+  it('does not escalate when the removed child has no positional family', () => {
+    // The negative half. Escalating every removal would restate a container on
+    // the commonest interaction there is, for no identity problem at all.
+    const reg = new RefRegistry();
+    const before = container([
+      row('I|0|button|save', 'Save'),
+      row('I|0|button|cancel', 'Cancel'),
+      row('I|0|button|delete', 'Delete'),
+    ]);
+    assignRefs(before, reg);
+
+    const after = container([
+      row('I|0|button|save', 'Save'),
+      row('I|0|button|delete', 'Delete'),
+    ]);
+
+    const { ops } = diffSnapshots(before, after, reg);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.op).toBe('remove');
+  });
+
+  it('does not escalate when a whole family disappears together', () => {
+    // Nothing renumbered — every ordinal holder is gone. That is an ordinary
+    // subtree death, and the existing remove/gone machinery already reports it.
+    const reg = new RefRegistry();
+    const before = container([
+      row('I|0|button|save', 'Save'),
+      ...Array.from({ length: 3 }, (_, i) => row(famKey(i), `Approve ${i}`)),
+    ]);
+    assignRefs(before, reg);
+
+    const after = container([row('I|0|button|save', 'Save')]);
+    const { ops } = diffSnapshots(before, after, reg);
+    expect(ops.some((o) => o.op === 'replace')).toBe(false);
   });
 });
 

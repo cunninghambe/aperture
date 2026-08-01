@@ -25,11 +25,22 @@
  *      clicked checkboxes must read checked) exist to pierce that: they
  *      compare against what the bench itself did to the page, not against
  *      anything the engine reported.
- *   2. The comparison covers ref existence, role, label, value, and state
- *      flags. It does NOT cover containment structure or position — a diff
- *      stream that reordered the world would still pass. "Faithful" here
- *      means "every element the agent believes in exists, as described",
- *      not "the agent could redraw the page".
+ *   2. The comparison covers ref existence, role, label, value, state flags,
+ *      the `[N options]` marker, href, and flattened table rows. It does NOT
+ *      cover containment structure or position — a diff stream that reordered
+ *      the world would still pass. "Faithful" here means "every element the
+ *      agent believes in exists, as described", not "the agent could redraw
+ *      the page".
+ *
+ *      THIS LIST IS THE MEASUREMENT'S CEILING, and it went stale once with
+ *      consequences: for as long as the shared reader dropped `href` and table
+ *      `rows`, BOTH SIDES of every comparison below were blind in the same way,
+ *      so a mutated table or a rotated link compared stale-against-fresh as
+ *      EQUAL. Five green scenarios could not have caught the propDelta
+ *      blind-field bug however many fixtures were added (tier2b §0). The field
+ *      set is now tethered to the walker's emission set by
+ *      `test/completeness.test.ts`; scroll offset, geometry, heading weight and
+ *      page title are excluded BY RULING there, not by omission here.
  *
  * Scenarios target elements BY LABEL, resolved against the agent-side model.
  * The old hardcoded e-numbers were how the historical false green happened
@@ -37,7 +48,8 @@
  * Label targeting also makes the run self-checking: if the diff stream fails
  * to deliver a label update, the next step cannot even resolve its target.
  *
- * Usage: node bench/fidelity.mjs <token> [form|rerender|widgets|biglist|selects]
+ * Usage:
+ *   node bench/fidelity.mjs <token> [form|rerender|widgets|biglist|selects|blindfields]
  *
  * Exit codes — anything nonzero must never be read as "roughly green":
  *   0  GREEN
@@ -47,12 +59,26 @@
  *   4  vacuous run: counts below the scenario's minimums — no verdict.
  *      An empty measurement scoring perfect is the failure mode this whole
  *      file exists to prevent.
+ *
+ * EXIT CODES ARE POLICY, and one of them was wrong. An `(unchanged` response to
+ * a step the bench KNOWS mutated the page used to be exit 3 — "a step did not
+ * run", which reads as "fix your scenario" and invites editing the fixture until
+ * the complaint goes away. That is the propDelta blind-field signature exactly,
+ * and it is a measurement that DID run and DID find the defect. It is now a RED
+ * (tier2b F3). Two consequences of that ruling are implemented below and are not
+ * incidental:
+ *
+ *   - a recorded RED outranks a later no-verdict: once the stream has been shown
+ *     to be missing information, a step that then fails to resolve its target is
+ *     a CONSEQUENCE of that hole, not a scenario-design problem, and the run
+ *     still exits 1.
+ *   - a recorded RED outranks the vacuity guards: when the engine answers
+ *     "nothing changed" instead of emitting a diff, the diff COUNT collapses as
+ *     well. Reporting that as "your scenario measures nothing" (exit 4, no
+ *     verdict) would launder the same defect through a different exit code.
  */
 
-import {
-  applyObservation,
-  parseElementLine,
-} from './lib/streamModel.mjs';
+import { applyObservation } from './lib/streamModel.mjs';
 
 const TOKEN = process.argv[2];
 if (!TOKEN) {
@@ -107,30 +133,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 function truthFrom(text, minRefs) {
   if (!/^FULL SNAPSHOT #/m.test(text)) {
-    console.error('ground truth is not a full snapshot — cannot judge anything.\n' + text.slice(0, 300));
-    process.exit(2);
+    noVerdict(2, 'ground truth is not a full snapshot — cannot judge anything.\n' + text.slice(0, 300));
   }
   if (text.includes('more lines beyond budget') || /^\s*… \d+ more /m.test(text)) {
-    console.error(
+    noVerdict(
+      2,
       'ground truth incomplete — cannot judge phantoms.\n' +
         'The reference snapshot was elided (collapsed run or budget cut), so\n' +
         'refs that exist on the page are missing from it. Raise budgetTokens\n' +
         'or fix expand:true; do NOT interpret the result as phantom refs.',
     );
-    process.exit(2);
   }
 
-  const truth = new Map();
-  for (const line of text.split('\n')) {
-    const el = parseElementLine(line);
-    if (el) truth.set(el.ref, el);
-  }
+  // The truth is built by the SAME reader as the believed model — deliberately,
+  // so the comparison is apples to apples. Table rows ride along on the element
+  // lines beneath their table, which is why `applyObservation` (not a bare line
+  // loop) does the parsing here.
+  const truth = applyObservation(new Map(), text);
   if (truth.size < minRefs) {
-    console.error(
+    noVerdict(
+      2,
       `ground truth holds only ${truth.size} refs (scenario expects >= ${minRefs}).\n` +
         'The reference snapshot is not credible — refusing to judge against it.',
     );
-    process.exit(2);
   }
   return truth;
 }
@@ -280,6 +305,62 @@ const SCENARIOS = {
       return problems;
     },
   },
+
+  // The fields nothing measured. Every mutation on this page lands in a field
+  // `propDelta` did not compare and the shared reader did not parse: flattened
+  // table cells, and an href under a label that never moves. Against a build
+  // with that blindness the FIRST step returns `(unchanged` — the engine
+  // sincerely reporting that nothing it looks at changed — which is the RED
+  // this scenario exists to produce (tier2b F4).
+  //
+  // The fourth step is a different animal and is here on purpose: a bare
+  // `<button>Follow</button>` whose label morph changes its own S-tier identity
+  // key, so it dies and is reborn. The assertion is that the new label ARRIVES,
+  // never which ops carried it — tier2b P2 may reconcile that pair into a single
+  // update, and this scenario must stay green across that change.
+  // ONE DEVIATION FROM THE SPEC'S STEP LIST, and it is the difference between
+  // F3 being exercised and F3 being decoration. tier2b F4 orders the steps
+  // advance / rotate / advance / follow and states that step 1 returns
+  // `(unchanged`. Measured against the pre-fix build, it does not:
+  //
+  //     ==== click 1: Advance shipment (e3) ====
+  //     page #3.1 (diff from #3.0)
+  //     ~ e3 +focused
+  //
+  // A click FOCUSES its target, and a focus flip is a state delta propDelta
+  // does report — so the observation is a diff carrying one state bit and
+  // saying nothing whatever about the two table cells the click just rewrote.
+  // The blindness is total and the wire still looks busy. `(unchanged` appears
+  // only when the click moves no focus either, i.e. on a SECOND click of the
+  // element that already has it:
+  //
+  //     ==== click 2: Advance shipment AGAIN, focus already on it ====
+  //     page #3.1 (unchanged — the action caused no visible change)
+  //
+  // So steps 1 and 2 are the two Advance clicks, back to back, and the rotate
+  // moves to step 3. Every assertion in the spec's list survives verbatim; what
+  // changes is that the scenario now trips F3 as well as F2 against the pre-fix
+  // build, which is what F4's evidence requirement actually asks for.
+  blindfields: {
+    url: `${BASE}/roster.html`,
+    steps: [
+      { do: 'click', label: 'Advance shipment' }, // table cells -> SHIPPED
+      { do: 'click', label: 'Advance shipment' }, // table cells -> CANCELLED, and no focus move
+      { do: 'click', label: 'Rotate link' }, // href -> /checkout-v2
+      { do: 'click', label: 'Follow' }, // S-tier label morph
+    ],
+    expect: { minRefs: 5, minDiffs: 3 },
+    // The same-walker pierce, in the established shape of `typed`/`stateChecks`:
+    // the bench knows what its own clicks did to its own fixture, so it asserts
+    // the believed model — built from the stream and nothing else — holds the
+    // literals, without consulting the truth snapshot at all.
+    independent: [
+      { ref: 'byLabelTable', rowsInclude: 'SHIPPED' },
+      { ref: 'byLabelTable', rowsInclude: 'CANCELLED' },
+      { link: 'Continue to checkout', href: '/checkout-v2' },
+      { anyLabel: 'Following' },
+    ],
+  },
 };
 
 const which = process.argv[3] ?? 'form';
@@ -295,31 +376,63 @@ if (!scenario) {
 
 const TYPE_ROLES = new Set(['textbox', 'searchbox', 'combobox']);
 
+/**
+ * REDs recorded mid-run, before the comparison could be reached.
+ *
+ * Only one thing writes to it today: an `(unchanged` answer to a step the
+ * scenario declares mutating (F3). It exists as a list rather than a flag so
+ * that `noVerdict` below can tell "the measurement could not run" from "the
+ * measurement already established a RED and then could not continue".
+ */
+const midRunReds = [];
+
+/**
+ * Exit with a no-verdict code — unless a RED is already on the record, in which
+ * case the run exits 1 with the RED it found.
+ *
+ * A step that cannot resolve its target AFTER the stream has been shown to be
+ * withholding information is a downstream symptom of that hole. Reporting it as
+ * "no verdict, fix your scenario" is the exact misrouting F3 exists to end.
+ */
+function noVerdict(code, message) {
+  console.error(message);
+  if (!midRunReds.length) process.exit(code);
+  console.error(
+    '\nA RED was already established before this happened, so the run does NOT exit ' +
+      `${code} (no verdict). The stream was already known to be missing information:`,
+  );
+  for (const r of midRunReds) console.error('  - ' + r);
+  console.log('\nRESULT: RED — diffs do not describe the real page');
+  process.exit(1);
+}
+
 function resolveTarget(model, step) {
   const wantTyped = step.do === 'type' || step.do === 'clear';
   const hits = [...model.entries()].filter(
     ([, e]) => e.label === step.label && (!wantTyped || TYPE_ROLES.has(e.role)),
   );
   if (hits.length !== 1) {
-    console.error(
+    noVerdict(
+      3,
       `step "${step.label}" resolves to ${hits.length} elements in the agent model ` +
         `(need exactly 1). The model holds:\n` +
         [...model.entries()].map(([r, e]) => `  ${r} ${e.role} "${e.label}"`).join('\n'),
     );
-    process.exit(3);
   }
   return hits[0][0];
 }
 
-/** Reasons a step must not be scored. Anything caught here is exit 3. */
+/**
+ * Reasons a step must not be scored. Anything caught here is exit 3.
+ *
+ * `(unchanged` is deliberately NOT one of them any more — see the exit-code
+ * ruling in the file header and F3 in docs/design/tier2b.md.
+ */
 function stepFailure(out) {
   if (!out || !out.trim()) return 'empty response from the server';
   if (/could not be acted on|is not a known element|^error:|\nerror:/m.test(out)) return out.trim().slice(0, 300);
   if (!/^ok (click|type|hover|scroll|key|clear|select)/m.test(out)) return 'no ok-acknowledgement in response';
   if (!/^(page #|FULL SNAPSHOT #)/m.test(out)) return 'no observation followed the action';
-  if (/\(unchanged\b/.test(out)) {
-    return 'action produced no observable change — this scenario expects every step to change the page';
-  }
   return null;
 }
 
@@ -372,8 +485,25 @@ for (const [i, step] of scenario.steps.entries()) {
     // A step that never ran must not be scored. The historical false green:
     // every action failed, no diffs were produced, and an empty model scored
     // perfectly. Run ONE scenario per freshly started Aperture.
-    console.error(`step ${i + 1} (${step.do} "${step.label}" -> ${ref}) did not run:\n${failure}`);
-    process.exit(3);
+    noVerdict(3, `step ${i + 1} (${step.do} "${step.label}" -> ${ref}) did not run:\n${failure}`);
+  }
+
+  // F3 — the defect signature, reclassified. `mutates` defaults true; a future
+  // scenario may set `mutates: false` for a deliberate no-op step. The run
+  // CONTINUES so the comparison below can name which fields went stale — the
+  // verdict is already decided, and the evidence is worth more than the two
+  // seconds saved by aborting here.
+  if ((step.mutates ?? true) && /\(unchanged\b/.test(out)) {
+    const line = out.split('\n').find((l) => /\(unchanged/.test(l)) ?? '';
+    console.error(
+      '\nRED: the engine reported "unchanged" for an action the bench knows mutated ' +
+        'the page — information is missing from the stream',
+    );
+    console.error(`     step ${i + 1}: ${step.do} "${step.label}" -> ${ref}`);
+    console.error(`     ${line.trim()}\n`);
+    midRunReds.push(
+      `step ${i + 1} (${step.do} "${step.label}" -> ${ref}) was answered "unchanged"`,
+    );
   }
 
   const isDiff = /^page #\d+\.\d+ \(diff from/m.test(out);
@@ -410,7 +540,8 @@ for (const [i, step] of scenario.steps.entries()) {
 
   console.log(
     `step ${String(i + 1).padStart(2)} ${step.do.padEnd(5)} "${step.label}" -> ${ref}  ` +
-      `${isFull ? 'FULL RESYNC' : isDiff ? 'diff' : '??'}  model=${model.size} refs`,
+      `${isFull ? 'FULL RESYNC' : isDiff ? 'diff' : /\(unchanged\b/.test(out) ? 'UNCHANGED' : '??'}  ` +
+      `model=${model.size} refs`,
   );
   if (scenario.stepDelayMs) await sleep(scenario.stepDelayMs);
 }
@@ -442,9 +573,18 @@ if (scenario.expect.resync && fullSteps === 0) {
   vacuous.push('scenario expects at least one mid-run full resync and none happened — the fallback path went unexercised');
 }
 if (vacuous.length) {
-  console.error('\nVACUOUS RUN — refusing to print a verdict:');
+  // A RED outranks the vacuity guards, and the reason is the whole of F3: when
+  // the engine answers "nothing changed" instead of emitting a diff, the diff
+  // COUNT collapses with it. Exiting 4 here would report the defect's own
+  // symptom as "your scenario measures nothing" — the same laundering, one exit
+  // code along. The guards still print, because they are true.
+  console.error(
+    midRunReds.length
+      ? '\nCounts below the scenario minimums (a CONSEQUENCE of the RED below, not a scenario fault):'
+      : '\nVACUOUS RUN — refusing to print a verdict:',
+  );
   for (const v of vacuous) console.error('  - ' + v);
-  process.exit(4);
+  if (!midRunReds.length) process.exit(4);
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +598,13 @@ let wrongLabel = 0;
 let wrongRole = 0;
 let wrongState = 0;
 let wrongOptions = 0;
+let wrongHref = 0;
+let wrongRows = 0;
+let wrongIndependent = 0;
 const problems = [...initialProblems];
+
+/** Rows as one comparable string. dims is derived from rows on both sides. */
+const rowsText = (e) => (e.rows ? e.rows.map((r) => r.join('|')).join('\n') : null);
 
 for (const [ref, believed] of model) {
   const actual = truth.get(ref);
@@ -494,6 +640,34 @@ for (const [ref, believed] of model) {
         `[${actual.optionCount ?? 'no'} options]`,
     );
   }
+  // href and rows are compared for EVERY scenario, not just the one built for
+  // them. Most fixtures already carry links, so a stale href anywhere is now
+  // visible for free — and a stale link target under a live, correct-looking
+  // ref is a wrong-element action the agent has no way to detect.
+  //
+  // Both are skipped when the model only ever heard about this ref through a
+  // `~` update (role '?'): it was never told the element's shape at all, which
+  // is the hole the role check above already excuses, and reporting it twice
+  // more would bury the real ones.
+  if (believed.role !== '?') {
+    if ((believed.href ?? '') !== (actual.href ?? '')) {
+      wrongHref++;
+      problems.push(
+        `${ref} ("${actual.label}"): agent has href ${believed.href ?? '(none)'}, ` +
+          `page has ${actual.href ?? '(none)'}`,
+      );
+    }
+    const bRows = rowsText(believed);
+    const aRows = rowsText(actual);
+    if (bRows !== aRows) {
+      wrongRows++;
+      problems.push(
+        `${ref} ("${actual.label}"): the agent's table content is not the page's.\n` +
+          `      agent believes: ${bRows === null ? '(no rows at all)' : JSON.stringify(bRows)}\n` +
+          `      page holds    : ${aRows === null ? '(no rows at all)' : JSON.stringify(aRows)}`,
+      );
+    }
+  }
   for (const s of new Set([...believed.states, ...actual.states])) {
     if (believed.states.has(s) !== actual.states.has(s)) {
       wrongState++;
@@ -527,6 +701,68 @@ for (const [ref, state, expected, label, has] of stateChecks) {
   }
 }
 
+// The same pierce again, for content the bench put on the page itself. The
+// fixture is ours, so the literals a click produces are known in advance and
+// can be asserted against the believed model alone — no truth snapshot, no
+// walker, nothing that could agree with itself.
+for (const ind of scenario.independent ?? []) {
+  // `byLabelTable`: the one flattened table in the model. Resolved by role
+  // rather than by ref, because a ref number is exactly the thing a scenario
+  // must never hardcode (see the header).
+  if (ind.ref === 'byLabelTable') {
+    const tables = [...model.entries()].filter(([, e]) => e.role === 'table');
+    if (tables.length !== 1) {
+      wrongIndependent++;
+      problems.push(
+        `independent check: the model holds ${tables.length} tables (need exactly 1) — ` +
+          `cannot check rowsInclude "${ind.rowsInclude}"`,
+      );
+      continue;
+    }
+    const [tref, table] = tables[0];
+    const text = rowsText(table);
+    if (text === null || !text.includes(ind.rowsInclude)) {
+      wrongIndependent++;
+      problems.push(
+        `${tref}: the bench put "${ind.rowsInclude}" in this table and the stream never ` +
+          `delivered it. Model holds: ${text === null ? '(no rows at all)' : JSON.stringify(text)}`,
+      );
+    }
+    continue;
+  }
+  if (ind.link !== undefined) {
+    const hits = [...model.entries()].filter(([, e]) => e.label === ind.link && e.role === 'link');
+    if (hits.length !== 1) {
+      wrongIndependent++;
+      problems.push(`independent check: "${ind.link}" resolves to ${hits.length} links (need exactly 1)`);
+      continue;
+    }
+    const [lref, link] = hits[0];
+    if (link.href !== ind.href) {
+      wrongIndependent++;
+      problems.push(
+        `${lref} ("${ind.link}"): the bench set this link's target to ${ind.href} and the ` +
+          `stream delivered ${link.href ?? '(no href at all)'} — a stable label over a ` +
+          'mutated target is precisely the wrong-element action an agent cannot detect',
+      );
+    }
+    continue;
+  }
+  if (ind.anyLabel !== undefined) {
+    const hits = [...model.values()].filter((e) => e.label === ind.anyLabel);
+    if (!hits.length) {
+      wrongIndependent++;
+      problems.push(
+        `independent check: no element in the model is labelled "${ind.anyLabel}", but the ` +
+          'bench made the page say so',
+      );
+    }
+    continue;
+  }
+  wrongIndependent++;
+  problems.push(`independent check not understood by this bench: ${JSON.stringify(ind)}`);
+}
+
 const missed = [...truth.keys()].filter((r) => !model.has(r));
 
 console.log('');
@@ -538,6 +774,11 @@ console.log(`WRONG LABELS                : ${wrongLabel}`);
 console.log(`WRONG ROLES                 : ${wrongRole}`);
 console.log(`WRONG STATE FLAGS           : ${wrongState}`);
 console.log(`WRONG [N options] MARKERS   : ${wrongOptions}`);
+console.log(`WRONG HREF                  : ${wrongHref}`);
+console.log(`WRONG TABLE CONTENT         : ${wrongRows}`);
+if (scenario.independent) {
+  console.log(`FAILED INDEPENDENT CHECKS   : ${wrongIndependent} of ${scenario.independent.length}`);
+}
 console.log(`refs on page agent never saw: ${missed.length} (elision/budget — reported, not scored)`);
 // Named, not just counted. "2 refs you never saw" is unactionable; knowing
 // they are two paragraphs of text is the difference between a shrug and a
@@ -559,9 +800,19 @@ if (problems.length) {
 }
 
 let red =
-  phantom + wrongValue + wrongLabel + wrongRole + wrongState + wrongOptions > 0;
+  phantom + wrongValue + wrongLabel + wrongRole + wrongState + wrongOptions +
+    wrongHref + wrongRows + wrongIndependent >
+  0;
 if (scenario.expect.suppression && !sawSuppression) {
   console.log('\nRED: the ticking clock was never suppressed — the volatility path did not fire.');
+  red = true;
+}
+if (midRunReds.length) {
+  console.log(
+    '\nRED: the engine reported "unchanged" for an action the bench knows mutated the ' +
+      'page — information is missing from the stream',
+  );
+  for (const r of midRunReds) console.log(`  - ${r}`);
   red = true;
 }
 

@@ -132,6 +132,27 @@ export interface PropDelta {
   name?: [string, string];
   value?: string;
   text?: [string, string];
+  /**
+   * Old and new link target.
+   *
+   * Both sides are kept for consumers that want to reason about the move; the
+   * renderer emits only `[1]`, the same convention `name` follows. A stable
+   * label over a mutated href is a wrong-element action the agent cannot
+   * detect from the stream — see docs/design/security.md.
+   */
+  href?: [string, string];
+  /**
+   * The table's rows, RESTATED in full rather than edited row by row.
+   *
+   * Rows have no identity, so a row-level edit script would need a second
+   * matching pass — the exact thing `REPLACE_MATCH_RATIO` exists to avoid. The
+   * restatement is bounded: the walker caps a table at 50 rows with truncated
+   * cells, and the engine's size valve turns anything pathological into a full
+   * resync.
+   */
+  rows?: string[][];
+  /** Set with `rows` and never alone — dims is derived from rows. */
+  dims?: { rows: number; cols: number };
   statesOn?: StateBits;
   statesOff?: StateBits;
 }

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shipment roster</title>
+  </head>
+  <body>
+    <main>
+      <h1>Roster</h1>
+
+      <!-- The control. It never changes, in any step. If this line ever moves
+           in the stream, the scenario is measuring something other than what
+           it claims to. -->
+      <p id="control">Dispatch runs at 17:00 from the Southbank depot.</p>
+
+      <!-- A DATA table: plain text cells, no links, no buttons, no inputs, no
+           tabindex — so `hasInteractiveDescendant` is false and the walker
+           flattens it into `rows` + `dims` (walker.ts:277-284). Everything in
+           here is therefore PURE CONTENT: it reaches the agent only through
+           the fields propDelta was blind to. -->
+      <table id="shipments" aria-label="Shipments">
+        <thead>
+          <tr><th>Order</th><th>Status</th><th>Stage</th></tr>
+        </thead>
+        <tbody>
+          <tr id="row-1001"><td>#1001</td><td>PENDING</td><td>packing</td></tr>
+          <tr id="row-1002"><td>#1002</td><td>PENDING</td><td>packing</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Each click rewrites two known cells to known literals, and touches
+           nothing else on the page. Its own label never changes, so the button
+           itself contributes no diff. -->
+      <button id="advance">Advance shipment</button>
+
+      <!-- The href rotates under a label that never moves. This is the
+           security case from docs/design/security.md: the agent reads
+           "Continue to checkout", the target becomes something else, and
+           nothing in the stream says so. -->
+      <p><a id="checkout" href="/checkout">Continue to checkout</a></p>
+      <button id="rotate">Rotate link</button>
+
+      <!-- No testid, no id, no name attribute: an S-tier identity key, whose
+           key CONTAINS the accessible name (walker.ts:388). Toggling the label
+           therefore changes the key, and the element dies and is reborn. The
+           scenario asserts only that the new content ARRIVES, never which ops
+           carried it — tier2b P2 may turn this pair into one update, and this
+           fixture must stay green across that change. -->
+      <button>Follow</button>
+    </main>
+
+    <script>
+      // Two clicks, two rows, four cells, all literal. No timers, no random,
+      // no Date — nothing on this page changes unless a click changes it.
+      var advances = [
+        { row: 'row-1001', status: 'SHIPPED', stage: 'dispatched' },
+        { row: 'row-1002', status: 'CANCELLED', stage: 'voided' },
+      ];
+      var advanced = 0;
+      document.getElementById('advance').addEventListener('click', function () {
+        if (advanced >= advances.length) return;
+        var next = advances[advanced++];
+        var cells = document.getElementById(next.row).cells;
+        cells[1].textContent = next.status;
+        cells[2].textContent = next.stage;
+      });
+
+      document.getElementById('rotate').addEventListener('click', function () {
+        document.getElementById('checkout').setAttribute('href', '/checkout-v2');
+      });
+
+      var follow = document.querySelector('main > button:last-of-type');
+      follow.addEventListener('click', function () {
+        follow.textContent = follow.textContent === 'Follow' ? 'Following' : 'Follow';
+      });
+    </script>
+  </body>
+</html>

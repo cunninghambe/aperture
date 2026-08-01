@@ -294,7 +294,23 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     let attribution;
     let landed = null;
     if (errored) {
-      attribution = shadowHad ? 'engine_ref_loss' : 'model_bookkeeping';
+      // A VALIDATION error is the agent's, and it is neither of the other two.
+      //
+      // Every `^error:` used to be routed through the ref test, and `shadowHad`
+      // defaults to TRUE for a ref-less act — so `error: unsupported key: s` and
+      // `error: text required for type`, which name no ref and lose no ref, both
+      // landed in `engine_ref_loss`. Measured cost of that in wave 2: 3 of the
+      // 6 `engine_ref_loss` acts in the whole 251-episode store were malformed
+      // arguments (wave2-evaluation.md §5), i.e. the single metric that would
+      // most incriminate the engine was half noise from the agent.
+      //
+      // REF_ERROR is what makes the distinction: only an error that says a ref
+      // is gone can be about a ref.
+      attribution = !REF_ERROR.test(text)
+        ? 'invalid_action'
+        : shadowHad
+          ? 'engine_ref_loss'
+          : 'model_bookkeeping';
       ep.errors.push(text.slice(0, 200));
     } else if (landedEvents.length === 0) {
       attribution = 'no_page_effect';

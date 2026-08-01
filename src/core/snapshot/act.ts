@@ -20,6 +20,8 @@ import { ipcMain, type WebContents } from 'electron';
 
 let wired = false;
 const pending = new Map<string, (payload: unknown) => void>();
+const armings = new Map<string, (payload: unknown) => void>();
+const witnesses = new Map<string, (payload: unknown) => void>();
 
 function wireOnce(): void {
   if (wired) return;
@@ -27,6 +29,14 @@ function wireOnce(): void {
   ipcMain.on('aperture:resolve-result', (_e, requestId: string, payload: unknown) => {
     pending.get(requestId)?.(payload);
     pending.delete(requestId);
+  });
+  ipcMain.on('aperture:witness-armed', (_e, requestId: string, payload: unknown) => {
+    armings.get(requestId)?.(payload);
+    armings.delete(requestId);
+  });
+  ipcMain.on('aperture:witness-result', (_e, requestId: string, payload: unknown) => {
+    witnesses.get(requestId)?.(payload);
+    witnesses.delete(requestId);
   });
 }
 
@@ -59,6 +69,92 @@ export async function resolveRef(
     });
     wc.send('aperture:resolve', { requestId, key });
   });
+}
+
+/**
+ * Did the input we dispatched actually reach the page?
+ *
+ * `landed`  — an event of the expected type was observed in the page.
+ * `lost`    — the witness was armed and NOTHING arrived. The input path is
+ *             dead; `ok` would be a lie.
+ * `unknown` — no witness could be armed (element gone, preload silent). The
+ *             act proceeds and is reported normally: a mechanism that turns
+ *             its own unavailability into an error would invent failures.
+ */
+export type DispatchVerdict = 'landed' | 'lost' | 'unknown';
+
+export interface InputWitness {
+  /** Wait up to `ms` AFTER dispatch for the page to confirm arrival. */
+  settle(ms?: number): Promise<DispatchVerdict>;
+}
+
+/** Beyond this the listener is a leak, not a witness. Preload-side cleanup. */
+const WITNESS_CLEANUP_MS = 5000;
+/** The post-dispatch window. Wave-2's wedge produced silence for 40 minutes. */
+const WITNESS_WINDOW_MS = 500;
+
+/**
+ * Install a one-shot page-side witness, then let the caller dispatch.
+ *
+ * The two-step (arm, ack, dispatch) is not ceremony: a synthesized click can
+ * beat an `addEventListener` into place, and a witness that loses that race
+ * reports `lost` for input that landed perfectly — a false alarm on the exact
+ * path an agent must be able to trust.
+ *
+ * `settle` counts its window from the moment it is called, i.e. from AFTER the
+ * dispatch, which is the only interval the 500ms is meaningfully about.
+ */
+export async function armInputWitness(
+  wc: WebContents,
+  key: string,
+  types: string[],
+  armTimeoutMs = 1000,
+): Promise<InputWitness> {
+  wireOnce();
+  const requestId = randomUUID();
+
+  const result = new Promise<unknown>((resolve) => {
+    witnesses.set(requestId, resolve);
+  });
+
+  const armed = await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      armings.delete(requestId);
+      resolve(false);
+    }, armTimeoutMs);
+    armings.set(requestId, (p) => {
+      clearTimeout(timer);
+      resolve((p as { ok?: boolean } | null)?.ok === true);
+    });
+    wc.send('aperture:witness', {
+      requestId,
+      key,
+      types,
+      timeoutMs: WITNESS_CLEANUP_MS,
+    });
+  });
+
+  if (!armed) {
+    witnesses.delete(requestId);
+    return { settle: async () => 'unknown' };
+  }
+
+  return {
+    settle: (ms = WITNESS_WINDOW_MS) =>
+      new Promise<DispatchVerdict>((resolve) => {
+        // The resolver is deliberately LEFT registered when this window
+        // expires: the preload always answers, at the latest on its own
+        // cleanup timer, and letting that answer land is what frees the entry.
+        // `resolve` after the first call is a no-op, so the late reply cannot
+        // change a verdict already returned.
+        const timer = setTimeout(() => resolve('lost'), ms);
+        void result.then((p) => {
+          clearTimeout(timer);
+          const r = p as { witnessed?: boolean } | null;
+          resolve(r?.witnessed === true ? 'landed' : 'lost');
+        });
+      }),
+  };
 }
 
 async function cdp(wc: WebContents, method: string, params: object): Promise<void> {

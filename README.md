@@ -308,8 +308,8 @@ token and your profile. So:
   whole event if a secret survived, precisely because it doesn't depend on the
   structural pass being correct.
 
-37 tests cover this, including "an unknown top-level field is dropped" and "a
-malformed event fails closed."
+A dedicated envelope suite covers this, including "an unknown top-level field is
+dropped" and "a malformed event fails closed."
 
 **Verify it end-to-end, not just in unit tests.** `npx electron . --test-crash`
 sends a probe error deliberately containing a URL, an email, a bearer token and
@@ -425,7 +425,7 @@ direction.
 | Vault | Crypto, origin binding (bundled PSL) and API shape done; **MCP fill path deliberately refuses** rather than pretending |
 | Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
 | Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
-| 2FA (TOTP) | **Working** — verified against RFC 6238 test vectors |
+| 2FA (TOTP) | **Working** — verified against the test vectors in RFC 6238 |
 | Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
 | Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
 | Token benchmark | **Working** — synthetic (`npm run bench`) plus real-site head-to-head vs playwright-mcp, see [bench/RESULTS.md](bench/RESULTS.md) |
@@ -475,7 +475,7 @@ claude mcp add --transport http aperture http://127.0.0.1:8817/mcp -H "Authoriza
 ```
 
 ```bash
-npm test         # 187 tests, 49 of them on the snapshot engine
+npm test         # full suite — snapshot engine, security, vault, bench readers
 npm run typecheck
 ```
 
