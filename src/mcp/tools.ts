@@ -6,11 +6,13 @@ import { normalizeUrl } from '@main/tabs.js';
 import { containers } from '@privacy/containers.js';
 import { vault } from '@vault/vault.js';
 import {
+  agentTouched,
   attachFiles,
   markTainted,
   observe,
   keyForRef,
   redactFreeText,
+  requestRead,
   taintedValues,
   requestFill,
   stateFor,
@@ -121,7 +123,7 @@ function text(s: string) {
 }
 
 /**
- * In-page reader.
+ * In-page reader for the WHOLE document.
  *
  * Strips the furniture — nav, header, footer, aside, script, style — before
  * taking innerText, because "boilerplate stripped" was promised in the tool
@@ -130,13 +132,11 @@ function text(s: string) {
  * needs no bundling into the preload, and the failure mode is "you get a bit
  * more text", not a wrong answer.
  *
- * `scopeKey` is unused inside the page (the isolated-world index lives in the
- * preload); scoping is applied by the caller via the walker instead. When a
- * scope is requested we fall back to the whole document and say so, rather
- * than silently ignoring the parameter.
+ * Ref-scoped reads do NOT come through here — they go through the preload's
+ * isolated-world index (`requestRead`), which resolves the same identity key
+ * that acting uses.
  */
-function readScript(scopeKey: string | null): string {
-  void scopeKey;
+function readScript(): string {
   return `(() => {
     const doc = document.cloneNode(true);
     for (const sel of ['script','style','noscript','template','nav','header','footer','aside','[aria-hidden="true"]']) {
@@ -354,18 +354,26 @@ export function registerBrowserTools(
       // got the whole document and had no way to know. A tool description that
       // lies to the agent is worse here than in an ordinary API, because the
       // consumer is a model and nobody human reads the response and notices.
-      let scopeKey: string | null = null;
+      // Scoped reads now resolve through the isolated-world index — the same
+      // identity keys acting uses — and fail loudly when the element is gone.
+      let body: string;
       if (ref) {
-        scopeKey = keyForRef(id, ref);
+        const scopeKey = keyForRef(id, ref);
         if (!scopeKey) {
           return text(`error: ${ref} is not a known element on this page`);
         }
+        agentTouched(id, scopeKey);
+        const r = await requestRead(wc, scopeKey);
+        if (!r.ok) {
+          return text(
+            `error: ${ref} could not be read (${r.reason ?? 'unknown'}) — it may ` +
+              'have left the page. Call browser_snapshot to re-read.',
+          );
+        }
+        body = r.text ?? '';
+      } else {
+        body = (await wc.executeJavaScript(readScript(), true)) as string;
       }
-
-      const body = (await wc.executeJavaScript(
-        readScript(scopeKey),
-        true,
-      )) as string;
 
       // innerText bypasses the snapshot tree entirely, so redaction has to be
       // applied here too. Without this, a page could copy a filled national ID
@@ -555,6 +563,9 @@ export function registerBrowserTools(
           `error: ${ref} is not a known element. Call browser_snapshot to re-read the page.`,
         );
       }
+      // Acting on an element is the strongest possible signal that the agent
+      // cares about it — clear any volatility suppression it accumulated.
+      agentTouched(id, key2);
 
       const r = await resolveRef(wc, key2);
       if (!r.ok) {
@@ -602,7 +613,10 @@ export function registerBrowserTools(
         }
       }
 
-      const { text: obs } = await observe(id, wc, { afterAction: true });
+      const { text: obs } = await observe(id, wc, {
+        afterAction: true,
+        actedKey: key2,
+      });
       return text(
         untrusted(t.info(id)?.url ?? '', `ok ${action} ${ref}\n${obs}`),
       );

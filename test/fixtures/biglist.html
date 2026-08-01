@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Big list stress</title>
+  </head>
+  <body>
+    <main>
+      <h1>Widget catalogue</h1>
+      <label for="q">Search</label>
+      <input id="q" name="q" autocomplete="off" placeholder="Filter widgets" />
+      <p id="count"></p>
+      <ul id="results"></ul>
+    </main>
+
+    <script>
+      // 40 items whose row shapes deliberately VARY (three rotating layouts),
+      // so the renderer cannot collapse them into "… N more". That is the
+      // point: filtering to nothing and clearing back to everything produces a
+      // replace diff far over the 60-line cap, which forces the engine's
+      // "diff too big → full resync" fallback — a path no benchmark exercised
+      // before this fixture existed.
+      const KINDS = ['Anvil', 'Bracket', 'Coupler', 'Dynamo', 'Flange', 'Gasket', 'Sprocket', 'Washer'];
+      const PRODUCTS = Array.from({ length: 40 }, (_, i) => `Widget ${String(i + 1).padStart(2, '0')} ${KINDS[i % KINDS.length]}`);
+
+      const results = document.getElementById('results');
+      const count = document.getElementById('count');
+      const q = document.getElementById('q');
+
+      function render() {
+        const term = q.value.toLowerCase();
+        const items = PRODUCTS.filter((p) => p.toLowerCase().includes(term));
+
+        results.replaceChildren();
+        count.textContent = items.length + ' widgets';
+
+        items.forEach((name, i) => {
+          const li = document.createElement('li');
+          const a = document.createElement('a');
+          a.href = '/w/' + encodeURIComponent(name);
+          a.textContent = name;
+          li.append(a);
+
+          if (i % 3 === 0) {
+            const btn = document.createElement('button');
+            btn.textContent = 'Add to cart';
+            li.append(btn);
+          } else if (i % 3 === 2) {
+            const span = document.createElement('span');
+            span.textContent = 'In stock';
+            li.append(span);
+            const btn = document.createElement('button');
+            btn.textContent = 'Add to cart';
+            li.append(btn);
+          }
+          results.append(li);
+        });
+      }
+
+      q.addEventListener('input', render);
+      render();
+    </script>
+  </body>
+</html>

@@ -23,6 +23,16 @@ export interface DiffResult {
   ops: DiffOp[];
   suppressed: number;
   unreadChanges: number;
+  /**
+   * The changes behind the `unreadChanges` count, with key and new text.
+   *
+   * The engine needs these to feed the volatility tracker. Without them, a
+   * clock that lives behind the unread gate (never rendered, so never
+   * emitted) generated a "changes in regions you have not read" note on every
+   * single observation forever — the tracker only ever heard about emitted
+   * ops, so the clock could never be demoted to volatile.
+   */
+  unread: { key: string; text?: string }[];
 }
 
 /**
@@ -43,7 +53,7 @@ export function diffSnapshots(
 ): DiffResult {
   const ops: DiffOp[] = [];
   let suppressed = 0;
-  let unreadChanges = 0;
+  const unread: { key: string; text?: string }[] = [];
 
   const oldByKey = indexByKey(oldRoot);
   const newByKey = indexByKey(newRoot);
@@ -52,7 +62,7 @@ export function diffSnapshots(
   const wasEmitted = opts.wasEmitted ?? (() => true);
 
   walk(oldRoot, newRoot);
-  return { ops, suppressed, unreadChanges };
+  return { ops, suppressed, unreadChanges: unread.length, unread };
 
   function walk(o: SnapshotNode, n: SnapshotNode): void {
     const delta = propDelta(o, n);
@@ -65,8 +75,12 @@ export function diffSnapshots(
         suppressed++;
       } else {
         const ref = reg.ensureRef(n);
-        if (!wasEmitted(ref)) unreadChanges++;
-        else ops.push({ op: 'update', ref, delta });
+        if (!wasEmitted(ref)) {
+          unread.push({
+            key: n.key,
+            text: delta.text?.[1] ?? delta.name?.[1] ?? delta.value,
+          });
+        } else ops.push({ op: 'update', ref, delta });
       }
     }
 

@@ -1,4 +1,5 @@
 import type { Rect, RefEntry, Role, SnapshotNode } from './types.js';
+import { isAddressableRole } from './walker.js';
 
 /**
  * Allocates and resolves agent-facing element refs.
@@ -103,6 +104,29 @@ export class RefRegistry {
     }
     return died;
   }
+}
+
+/**
+ * Assign refs across a fresh walk tree, in document order.
+ *
+ * Two classes of node get a ref re-attached:
+ *   1. Addressable roles — the normal case.
+ *   2. Any node whose identity key the registry already knows.
+ *
+ * Case 2 is the fix for the `wasEmitted` deadlock. A non-addressable node (a
+ * product-count paragraph, say) can be *given* a ref mid-diff when its content
+ * changes — but on every later walk it arrived here ref-less, so the renderer
+ * never showed its ref, `markEmitted` never ran, and the `wasEmitted` gate in
+ * diff.ts suppressed its changes permanently, even after a full re-read.
+ * Re-attaching the ref means the next full snapshot renders it, marks it
+ * emitted, and unlocks its diff channel — a full re-read now actually heals
+ * the blind spot instead of leaving it.
+ */
+export function assignRefs(root: SnapshotNode, reg: RefRegistry): void {
+  if (isAddressableRole(root.role) || reg.byKeyLookup(root.key)) {
+    reg.ensureRef(root);
+  }
+  for (const c of root.children) assignRefs(c, reg);
 }
 
 // ---------------------------------------------------------------------------

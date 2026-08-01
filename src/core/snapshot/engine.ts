@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, type WebContents } from 'electron';
-import { RefRegistry } from './registry.js';
+import { RefRegistry, assignRefs } from './registry.js';
 import { diffSnapshots } from './diff.js';
 import { renderDiff, renderFull } from './render.js';
 import { VolatilityTracker } from './volatility.js';
@@ -94,6 +94,10 @@ function wireOnce(): void {
     pending.get(requestId)?.(payload as WalkPayload);
     pending.delete(requestId);
   });
+  ipcMain.on('aperture:read-result', (_e, requestId: string, payload: unknown) => {
+    pending.get(requestId)?.(payload as WalkPayload);
+    pending.delete(requestId);
+  });
 }
 
 export function stateFor(tabId: string): TabSnapshotState {
@@ -154,6 +158,13 @@ export interface ObserveOptions {
   budgetTokens?: number;
   /** True when this observation follows an agent action, so changes are signal. */
   afterAction?: boolean;
+  /**
+   * Identity key of the element the action targeted, when there was one.
+   * The volatility tracker uses it to tell "the field I typed a time into"
+   * (signal, never suppress) from "a clock that ticked while I was typing"
+   * (noise, suppress on shape).
+   */
+  actedKey?: string;
   /** Render `… N more` runs in full. Only meaningful on a full snapshot. */
   expand?: boolean;
 }
@@ -185,8 +196,10 @@ export async function observe(
   redactTainted(r.root, st.tainted);
 
   // Assign refs across the whole tree before diffing, so both sides speak the
-  // same names.
-  assignRefs(r.root, st);
+  // same names. This also re-attaches refs to nodes the registry already
+  // knows even when their role is not addressable — see registry.assignRefs
+  // for why that matters (the wasEmitted deadlock).
+  assignRefs(r.root, st.registry);
 
   if (forced || !st.last) {
     const snap: Snapshot = {
@@ -220,9 +233,17 @@ export async function observe(
         refKey(st, op.ref) ?? op.ref,
         now,
         opts.afterAction === true,
-        op.delta.text?.[1] ?? op.delta.value,
+        op.delta.text?.[1] ?? op.delta.name?.[1] ?? op.delta.value,
+        opts.actedKey,
       );
     }
+  }
+  // Unread changes never become ops, but the tracker must still hear about
+  // them. Before this, a clock that lived behind the unread gate (never
+  // rendered, so never emitted) could not be demoted and generated a
+  // "changes in regions you have not read" note on every observation forever.
+  for (const u of result.unread) {
+    st.volatility.noteChange(u.key, now, opts.afterAction === true, u.text, opts.actedKey);
   }
 
   if (result.ops.length === 0) {
@@ -237,16 +258,17 @@ export async function observe(
 
   const baseSeq = st.last.seq;
   const seq = st.nextDiffSeq();
-  const rendered = renderDiff(
-    {
-      seq,
-      baseSeq,
-      ops: result.ops,
-      suppressed: result.suppressed,
-      unreadChanges: result.unreadChanges,
-    },
-    st.registry,
-  );
+  const diffPayload = {
+    seq,
+    baseSeq,
+    ops: result.ops,
+    suppressed: result.suppressed,
+    unreadChanges: result.unreadChanges,
+  };
+  // Dry render: sizes the candidate WITHOUT marking anything emitted. If this
+  // diff loses to a full resync below, its subtree refs were never shown to
+  // the model, and marking them would poison the wasEmitted gate.
+  const rendered = renderDiff(diffPayload, st.registry, false);
 
   // Past a certain size a diff stops saving anything and starts risking a
   // misapplied mental model. Restating the page is the cheaper failure.
@@ -287,34 +309,17 @@ export async function observe(
         unreadChanges: result.unreadChanges,
       },
     },
-    text: rendered,
+    // Commit render: byte-identical to the dry pass, but this text is what
+    // the model actually receives, so emission marks are applied.
+    text: renderDiff(diffPayload, st.registry, true),
   };
 }
 
-/**
- * Assign refs in document order, so e1 is the first thing on the page.
- *
- * Ref numbers are opaque, but an agent reading a form where the first field is
- * e17 and the submit button is e3 has to work harder than one reading e1..e17
- * top to bottom — and so does a human debugging a transcript.
- */
-function assignRefs(root: SnapshotNode, st: TabSnapshotState): void {
-  if (isAddressable(root)) st.registry.ensureRef(root);
-  for (const c of root.children) assignRefs(c, st);
-}
-
-function isAddressable(n: SnapshotNode): boolean {
-  switch (n.role) {
-    case 'button': case 'link': case 'textbox': case 'searchbox':
-    case 'combobox': case 'checkbox': case 'radio': case 'slider':
-    case 'tab': case 'menuitem': case 'iframe': case 'scrollable':
-    case 'dialog': case 'list': case 'table': case 'form':
-    case 'region': case 'nav': case 'main':
-      return true;
-    default:
-      return false;
-  }
-}
+// Ref assignment lives in registry.assignRefs — one addressable set, shared
+// with the walker. The engine used to carry a private copy of both, and the
+// copies drifted: banner and contentinfo were addressable to the walker but
+// never received refs here, and nodes the registry knew from diffing never
+// got their refs re-attached (the wasEmitted deadlock).
 
 function refKey(st: TabSnapshotState, ref: string): string | undefined {
   return st.registry.resolve(ref)?.key;
@@ -404,6 +409,43 @@ export function markTainted(tabId: string, keys: string[]): void {
 /** Resolve a ref to the identity key the page-side index is keyed on. */
 export function keyForRef(tabId: string, ref: string): string | null {
   return stateFor(tabId).registry.resolve(ref)?.key ?? null;
+}
+
+/**
+ * The agent explicitly acted on this element. Suppression must never hide
+ * something the agent is paying attention to — caring is expressed through
+ * the tools, and this is where the engine hears it.
+ */
+export function agentTouched(tabId: string, key: string): void {
+  states.get(tabId)?.volatility.onAgentTouch(key);
+}
+
+/**
+ * Read the rendered text of one element, resolved through the isolated-world
+ * index. This is what makes `browser_read`'s `ref` parameter real: the scoped
+ * read happens against the same identity keys acting uses, in a world the
+ * page cannot tamper with.
+ */
+export async function requestRead(
+  wc: WebContents,
+  key: string,
+  timeoutMs = 5000,
+): Promise<{ ok: boolean; text?: string; reason?: string }> {
+  wireOnce();
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pending.delete(requestId);
+      resolve({ ok: false, reason: 'read timed out' });
+    }, timeoutMs);
+
+    pending.set(requestId, (payload) => {
+      clearTimeout(timer);
+      resolve(payload as unknown as { ok: boolean; text?: string; reason?: string });
+    });
+
+    wc.send('aperture:read', { requestId, key });
+  });
 }
 
 /**

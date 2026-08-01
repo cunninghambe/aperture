@@ -20,7 +20,6 @@
 const HALF_LIFE_MS = 10_000;
 const STREAK_THRESHOLD = 3;
 const EWMA_THRESHOLD = 3;
-const FAST_STREAK_THRESHOLD = 1;
 
 interface Entry {
   ewma: number;
@@ -49,13 +48,24 @@ export class VolatilityTracker {
    *
    * `causedByAgentAction` is the important argument: a change that followed
    * the agent clicking something is signal, by definition, and must never be
-   * suppressed. Only unprompted changes count toward volatility.
+   * suppressed. Only unprompted changes count toward the *statistical* path.
+   *
+   * The shape path is different. In a pure act-observe loop EVERY observation
+   * follows an action, so `causedByAgentAction` is always true and the
+   * statistical path can never demote anything — which meant a ticking clock
+   * rode along in every action diff forever, in exactly the loop this class
+   * exists to protect. A clock is recognizable on sight regardless of what
+   * the agent was doing, so the shape check now runs even after an action —
+   * for every key EXCEPT the element the action actually targeted
+   * (`actedKey`). Typing "10:30" into a time field must never mark that
+   * field volatile.
    */
   noteChange(
     key: string,
     now: number,
     causedByAgentAction: boolean,
     text?: string,
+    actedKey?: string,
   ): void {
     const prev = this.entries.get(key);
     const e: Entry = prev ?? { ewma: 0, last: now, streak: 0, shapeVolatile: false };
@@ -67,12 +77,7 @@ export class VolatilityTracker {
 
     // A clock does not need to prove itself statistically — it is recognizable
     // on sight, and waiting three ticks just means emitting three junk diffs.
-    if (
-      !causedByAgentAction &&
-      text &&
-      TIMER_SHAPE.test(text.trim()) &&
-      e.streak >= FAST_STREAK_THRESHOLD
-    ) {
+    if (text && TIMER_SHAPE.test(text.trim()) && key !== actedKey) {
       e.shapeVolatile = true;
     }
 
@@ -82,7 +87,7 @@ export class VolatilityTracker {
   isVolatile(key: string): boolean {
     const e = this.entries.get(key);
     if (!e) return false;
-    if (e.shapeVolatile && e.streak >= FAST_STREAK_THRESHOLD) return true;
+    if (e.shapeVolatile) return true;
     return e.streak >= STREAK_THRESHOLD && e.ewma >= EWMA_THRESHOLD;
   }
 

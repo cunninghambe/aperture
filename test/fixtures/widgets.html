@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Widget lab</title>
+  </head>
+  <body>
+    <main>
+      <h1>Widget lab</h1>
+
+      <!-- A real clock: the volatility case. It must end up SUPPRESSED in the
+           diff stream even though every bench observation follows an action. -->
+      <div id="clock">--:--:--</div>
+
+      <!-- Click → text change on an addressable, emitted element. -->
+      <button id="counter">Count: 0</button>
+
+      <!-- Click → state flip (+checked). -->
+      <input type="checkbox" id="notify" name="notify" />
+      <label for="notify">Notify me</label>
+
+      <!-- Click → +expanded plus an added subtree. -->
+      <button id="details-toggle" aria-expanded="false">Show details</button>
+      <section id="details" aria-label="Details" hidden>
+        <p>The fine print: none of this is legally binding.</p>
+      </section>
+
+      <!-- A button inside an open shadow root. Clicking it exercises the
+           composed hit-test (elementFromPoint stops at the host) and diff
+           fidelity through a shadow boundary. -->
+      <div id="shadowhost"></div>
+    </main>
+
+    <script>
+      const clock = document.getElementById('clock');
+      function tick() {
+        clock.textContent = new Date().toLocaleTimeString('en-GB');
+      }
+      tick();
+      setInterval(tick, 1000);
+
+      let n = 0;
+      const counter = document.getElementById('counter');
+      counter.addEventListener('click', () => {
+        n += 1;
+        counter.textContent = 'Count: ' + n;
+      });
+
+      const toggle = document.getElementById('details-toggle');
+      const details = document.getElementById('details');
+      toggle.addEventListener('click', () => {
+        const open = details.hasAttribute('hidden');
+        if (open) details.removeAttribute('hidden');
+        else details.setAttribute('hidden', '');
+        toggle.setAttribute('aria-expanded', String(open));
+      });
+
+      const host = document.getElementById('shadowhost');
+      const root = host.attachShadow({ mode: 'open' });
+      const sbtn = document.createElement('button');
+      // data-testid keeps the identity key stable while the label changes.
+      sbtn.setAttribute('data-testid', 'shadow-action');
+      let s = 0;
+      sbtn.textContent = 'Shadow count: 0';
+      sbtn.addEventListener('click', () => {
+        s += 1;
+        sbtn.textContent = 'Shadow count: ' + s;
+      });
+      root.append(sbtn);
+    </script>
+  </body>
+</html>

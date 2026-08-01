@@ -62,12 +62,29 @@ export interface WalkContext {
   seen?: Map<string, number>;
 }
 
-/** Roles that get a ref, because an agent can address them. */
-const ADDRESSABLE = new Set<Role>([
+/**
+ * Roles that get a ref, because an agent can address them.
+ *
+ * This is THE addressable set — engine.ts and the tests import it from here.
+ * It used to be duplicated in three places, and the copies had drifted
+ * (engine's lacked banner/contentinfo, so those landmarks never received refs
+ * even though the walker indexed them for acting). One list, one truth.
+ *
+ * `option` is deliberately absent: no ref was ever assigned to one (the
+ * engine's copy lacked it), and a ref would be a lie anyway — a native
+ * dropdown is OS-rendered, so clicking an option by coordinates cannot work.
+ * Selects need a dedicated `select` action on browser_act; until that exists,
+ * giving options refs would bait agents into actions that always fail.
+ */
+export const ADDRESSABLE = new Set<Role>([
   'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio',
-  'slider', 'tab', 'menuitem', 'option', 'iframe', 'scrollable', 'dialog',
+  'slider', 'tab', 'menuitem', 'iframe', 'scrollable', 'dialog',
   'list', 'table', 'form', 'region', 'nav', 'main', 'banner', 'contentinfo',
 ]);
+
+export function isAddressableRole(role: Role): boolean {
+  return ADDRESSABLE.has(role);
+}
 
 /**
  * Ref discipline is where the tokens are. Playwright MCP puts ~789 refs on a

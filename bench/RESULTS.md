@@ -275,3 +275,78 @@ This is also the argument for the fidelity check existing at all: the loop
 looked completely healthy from the outside — actions succeeded, diffs were
 small, refs looked stable — while the agent's model was quietly drifting from
 the page.
+
+---
+
+# Update 2026-07-31: the benchmark itself went under review
+
+This suite had produced two false results that were believed for a while (the
+phantom-refs RED off a collapsed ground truth, and the flawless GREEN off an
+empty model). Both were bugs in the *measurement*. This pass assumed there
+were more, and found them.
+
+## False-green vectors found in the harness, all now closed
+
+| vector | fix |
+|---|---|
+| Hardcoded positional refs (`e3`, `e4`, …) — the root cause of the historical empty-model green | Steps now target elements **by label**, resolved against the agent-side model each step. Verified: a scenario run in a dirty session resolved its target to `e1241` and still measured correctly |
+| Step-failure guard matched only two error strings; timeouts, empty responses, and other errors scored as silent no-ops | Every step must carry an `ok <action>` acknowledgement AND a `page #`/`FULL SNAPSHOT` observation; anything else exits 3 |
+| No minimum counts — an empty model or an all-resync run scored perfect | Scenarios declare `minRefs` / `minDiffs` / `resync`; violations exit **4 (vacuous)** with no verdict printed at all |
+| Only `value` was compared. Wrong labels, roles, and state flags (disabled, checked, expanded) all scored green | Role, label, value, and state flags are all compared now |
+| Ground truth and model both come from the same walker/renderer, so a shared bug is invisible | Partially pierced by **independent checks**: values the bench itself typed must round-trip through the diff stream, and states the bench itself caused (clicking a checkbox) must arrive. These compare against what the bench *did*, not what the engine *said* |
+| Escaped quotes broke the line parser identically on both sides, hiding whole elements consistently | Escape-aware parser, shared by both sides deliberately |
+| Nameless-ref lines (`form e2`) were invisible to both sides — a later `~ e2` would count as a phantom | Nameless elements are tracked with an empty label |
+| Truth snapshot could be empty/failed and still be "compared" | Truth must be a full snapshot with at least `minRefs` entries, else exit 2 |
+
+## What the fidelity bench proves, and what it does not
+
+`applyObservation` is a mechanical rule-follower, not a language model. A
+green proves the stream is **complete and unambiguous for a rule-following
+reader**: every element the reader ends up believing in exists on the page
+with the stated role, label, value, and states. It licenses exactly this
+claim: *if an agent's model drifts, the fault is the agent's bookkeeping, not
+missing or wrong information in the stream.* It does NOT prove an LLM will do
+that bookkeeping correctly — that is the task-success benchmark, still
+unbuilt. It also does not check containment structure or position: a stream
+that reordered the world would still pass.
+
+## Current results — four scenarios, one freshly started Aperture each
+
+| scenario | what it exercises | result |
+|---|---|---|
+| `form` (14 typed fields) | typing; **MAX_DIFFS_PER_EPOCH resync fired mid-run at step 13** and the model survived the restatement | **GREEN** — 18/18 refs, 13 diffs + 1 resync, all typed values round-tripped |
+| `rerender` (3 filters, full DOM teardown per keystroke) | replace ops with `gone:` lists, granular add/remove, ref revival | **GREEN** — 17/17 refs, 0 phantoms, 4 elided items honestly reported as never-seen |
+| `widgets` (5 clicks) | click actions, `+checked`/`+expanded` state fidelity, an added subtree, a **shadow-DOM** button, and a **ticking clock that must be suppressed** | **GREEN** — 6/6 refs, suppression note seen; step 2 targets the label step 1's diff delivered, so label fidelity is load-bearing |
+| `biglist` (filter to zero, clear back to 40) | mass ref death (70 → 3), mass revival, and the **DIFF_SIZE_RATIO "too big → full resync" fallback** | **GREEN** — 71/71 refs; the resync announced the count paragraph's mid-diff ref (the wasEmitted deadlock heal, observed live) |
+
+Engine paths now exercised by at least one scenario: type, click, clear,
+diff updates, adds, removes, replaces with `gone:`, revival, both resync
+fallbacks (12-diff cap and 30%-size cap), volatility suppression in an
+act-observe loop, shadow-DOM piercing and acting, and the unread-changes gate
+plus its heal-on-full.
+
+## Live numbers, re-measured after the addressable-set unification
+
+banner/contentinfo landmarks now receive refs (they were indexed for acting
+but never got one — three drifted copies of the addressable set, now one):
+
+| site | tokens | refs (was) | stability |
+|---|---|---|---|
+| Hacker News | 9,519 | 233 (233) | 100% |
+| GitHub repo | 5,269 | 100 (97) | 100% |
+| Wikipedia | 6,197 | 209 (206) | 100% |
+| MDN | 7,102 | 163 (161) | 100% |
+
+No-change floor unchanged at ~112–115 tokens.
+
+## Honest claim status after this pass
+
+| claim | status |
+|---|---|
+| Diff stream is information-complete on static pages, re-renders, clicks/states, shadow DOM, and through both resync fallbacks | **GREEN, measured**, with vacuity guards |
+| Volatility suppression works in a real act-observe loop | **Measured** (`widgets`) — it did NOT work before this pass; every observation is `afterAction` and the statistical path can never fire there. Clocks are now suppressed by shape regardless, except on the acted element |
+| `browser_read` ref scoping | **Implemented and verified live** (scoped read of the results list excluded the rest of the page; unknown ref errors) |
+| Structure/containment/position fidelity | **Not measured** — outside the bench's definition of faithful |
+| Model-side budget truncation (agent on a page bigger than its budget) | **Not measured** |
+| iframes, modal-obstruction recovery | **Not measured by any benchmark** |
+| Agents succeed as often on diffs | **Still unmeasured** — the task-success suite remains the single largest gap |

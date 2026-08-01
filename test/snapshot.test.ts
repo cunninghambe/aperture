@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { RefRegistry, fuzzyRescue, nameSimilarity } from '../src/core/snapshot/registry.js';
+import {
+  RefRegistry,
+  assignRefs,
+  fuzzyRescue,
+  nameSimilarity,
+} from '../src/core/snapshot/registry.js';
 import {
   diffSnapshots,
   longestIncreasingSubsequence,
   propDelta,
 } from '../src/core/snapshot/diff.js';
-import { estimateTokens, renderDiff, renderFull, quote } from '../src/core/snapshot/render.js';
+import {
+  estimateTokens,
+  renderDiff,
+  renderFull,
+  renderLine,
+  quote,
+} from '../src/core/snapshot/render.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
 import { looksGenerated } from '../src/core/snapshot/walker.js';
 import type { Role, Snapshot, SnapshotNode } from '../src/core/snapshot/types.js';
@@ -52,18 +63,9 @@ function snapshot(root: SnapshotNode, s = '1.0'): Snapshot {
   };
 }
 
-/** Mirrors engine.ts `isAddressable` — note that listitem is NOT addressable. */
-const ADDRESSABLE = new Set<string>([
-  'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio',
-  'slider', 'tab', 'menuitem', 'iframe', 'scrollable', 'dialog', 'list',
-  'table', 'form', 'region', 'nav', 'main',
-]);
-
-/** What engine.ts does before every diff: refs assigned over the whole tree. */
-function assignRefs(n: SnapshotNode, reg: RefRegistry): void {
-  if (ADDRESSABLE.has(n.role)) reg.ensureRef(n);
-  for (const c of n.children) assignRefs(c, reg);
-}
+// `assignRefs` is the REAL one from registry.ts — this file used to carry a
+// third private copy of the addressable set, which is exactly how the
+// engine/walker drift went unnoticed. Note that listitem is NOT addressable.
 
 function refsIn(n: SnapshotNode, out: string[] = []): string[] {
   if (n.ref) out.push(n.ref);
@@ -307,11 +309,15 @@ describe('diffSnapshots', () => {
     const before = k('main', 'm', undefined, { children: [k('text', 'footer', 'a')] });
     const after = k('main', 'm', undefined, { children: [k('text', 'footer', 'b')] });
 
-    const { ops, unreadChanges } = diffSnapshots(before, after, reg, {
+    const { ops, unreadChanges, unread } = diffSnapshots(before, after, reg, {
       wasEmitted: () => false,
     });
     expect(ops).toHaveLength(0);
     expect(unreadChanges).toBe(1);
+    // The withheld change still carries key + new text, so the volatility
+    // tracker can hear about it — otherwise a clock behind the unread gate
+    // ticks out an "unread changes" note forever.
+    expect(unread).toEqual([{ key: 'footer', text: 'b' }]);
   });
 });
 
@@ -552,5 +558,138 @@ describe('VolatilityTracker', () => {
     expect(v.isVolatile('price')).toBe(true);
     v.onAgentTouch('price');
     expect(v.isVolatile('price')).toBe(false);
+  });
+
+  it('suppresses a clock even when every observation follows an action', () => {
+    // In a pure act-observe loop every observation has afterAction=true, so
+    // the statistical path can never demote anything — the shape path must
+    // work regardless, or a ticking clock rides along in every action diff.
+    const v = new VolatilityTracker();
+    v.noteChange('clock', 1000, true, '12:04:37', 'search-field');
+    expect(v.isVolatile('clock')).toBe(true);
+  });
+
+  it('never shape-suppresses the element the action targeted', () => {
+    // Typing "10:30" into a time field looks like a clock by shape. The acted
+    // element is signal by definition and must stay unsuppressed.
+    const v = new VolatilityTracker();
+    v.noteChange('field', 1000, true, '10:30', 'field');
+    expect(v.isVolatile('field')).toBe(false);
+  });
+});
+
+// -- what the model was actually told ----------------------------------------
+
+describe('emission bookkeeping', () => {
+  it('heals the wasEmitted deadlock: a mid-diff ref is announced by the next full', () => {
+    const reg = new RefRegistry();
+    const page = (label: string) =>
+      k('main', 'm', undefined, {
+        children: [k('textbox', 'q', 'Search'), k('generic', 'count', label)],
+      });
+
+    const a = page('12 products');
+    assignRefs(a, reg);
+    renderFull(snapshot(a, '1.0'), { registry: reg });
+    // Not addressable, never changed: no ref exists yet.
+    expect(reg.byKeyLookup('count')).toBeUndefined();
+
+    // Its content changes during a diff: a ref is allocated, but the change
+    // is (correctly) gated as unread — the model has never seen this ref.
+    const b = page('7 products');
+    assignRefs(b, reg);
+    const r1 = diffSnapshots(a, b, reg, { wasEmitted: (x) => reg.wasEmitted(x) });
+    expect(r1.ops).toHaveLength(0);
+    expect(r1.unreadChanges).toBe(1);
+    const ref = reg.byKeyLookup('count')!.ref;
+    expect(reg.wasEmitted(ref)).toBe(false);
+
+    // A fresh walk arrives ref-less; assignRefs must re-attach the known ref
+    // so the full snapshot renders it and marks it emitted. Before the fix
+    // this never happened and the node's changes were suppressed forever.
+    const b2 = page('7 products');
+    assignRefs(b2, reg);
+    const full = renderFull(snapshot(b2, '2.0'), { registry: reg });
+    expect(full).toContain(`generic ${ref} "7 products"`);
+    expect(reg.wasEmitted(ref)).toBe(true);
+
+    // From now on its changes flow as ordinary updates.
+    const c = page('3 products');
+    assignRefs(c, reg);
+    const r2 = diffSnapshots(b2, c, reg, { wasEmitted: (x) => reg.wasEmitted(x) });
+    expect(r2.ops).toHaveLength(1);
+    expect(r2.ops[0]).toMatchObject({ op: 'update', ref });
+  });
+
+  it('does not mark refs emitted for lines the budget cut dropped', () => {
+    const reg = new RefRegistry();
+    const root = catalogue(30, 'x');
+    assignRefs(root, reg);
+    const out = renderFull(snapshot(root), {
+      registry: reg,
+      budgetTokens: 200,
+      expand: true,
+    });
+    expect(out).toContain('more lines beyond budget');
+
+    const first = reg.byKeyLookup('x0l')!.ref;
+    const last = reg.byKeyLookup('x29l')!.ref;
+    expect(reg.wasEmitted(first)).toBe(true);
+    // The last item's line fell to the budget: the model never received it,
+    // so it must not be marked as shown.
+    expect(out).not.toContain(`${last} `);
+    expect(reg.wasEmitted(last)).toBe(false);
+  });
+
+  it('a dry-rendered diff marks nothing; the commit render marks everything', () => {
+    const reg = new RefRegistry();
+    const before = catalogue(10, 'a');
+    const after = catalogue(10, 'b');
+    assignRefs(before, reg);
+    renderFull(snapshot(before), { registry: reg });
+    assignRefs(after, reg);
+    const { ops } = diffSnapshots(before, after, reg, {
+      wasEmitted: (x) => reg.wasEmitted(x),
+    });
+    const newRef = reg.byKeyLookup('b0l')!.ref;
+
+    const d = { seq: '1.1', baseSeq: '1.0', ops, suppressed: 0, unreadChanges: 0 };
+    const dry = renderDiff(d, reg, false);
+    expect(reg.wasEmitted(newRef)).toBe(false);
+
+    const committed = renderDiff(d, reg, true);
+    expect(committed).toBe(dry); // byte-identical, only the bookkeeping differs
+    expect(reg.wasEmitted(newRef)).toBe(true);
+  });
+
+  it('shows the ref on a text line once the node has one', () => {
+    // Without this, a text node that earned a ref mid-diff gets `~ eN` updates
+    // the model can never anchor: the full snapshot shows its text bare.
+    const plain = k('text', 't1', undefined, { text: 'hello' });
+    expect(renderLine(plain, 1)).toBe('  "hello"');
+    const withRef = k('text', 't2', undefined, { text: 'hello', ref: 'e9' });
+    expect(renderLine(withRef, 1)).toBe('  text e9 "hello"');
+  });
+});
+
+describe('one addressable set (drift regression)', () => {
+  it('assigns refs to banner and contentinfo landmarks', () => {
+    const reg = new RefRegistry();
+    const root = k('generic', 'root', undefined, {
+      children: [k('banner', 'hdr', 'Site header'), k('contentinfo', 'ftr', 'Footer')],
+    });
+    assignRefs(root, reg);
+    expect(root.children[0]!.ref).toBeDefined();
+    expect(root.children[1]!.ref).toBeDefined();
+  });
+
+  it('does not give options refs, because no action can use one', () => {
+    const reg = new RefRegistry();
+    const root = k('combobox', 'sel', 'State', {
+      children: [k('option', 'o1', 'VIC')],
+    });
+    assignRefs(root, reg);
+    expect(root.ref).toBeDefined();
+    expect(root.children[0]!.ref).toBeUndefined();
   });
 });

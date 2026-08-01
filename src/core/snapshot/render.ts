@@ -60,10 +60,12 @@ export function renderFull(snap: Snapshot, opts: RenderOptions = {}): string {
   out.push('');
 
   const body: string[] = [];
+  const marks: [number, string][] = [];
   renderNode(snap.root, 0, body, {
     reg: opts.registry,
     seq: snap.seq,
     expand: opts.expand === true,
+    marks,
   });
 
   // Budget enforcement degrades by dropping offscreen detail before it ever
@@ -71,21 +73,35 @@ export function renderFull(snap: Snapshot, opts: RenderOptions = {}): string {
   // "there is more below".
   const budgetChars = budget * CHARS_PER_TOKEN;
   let joined = body.join('\n');
+  const kept = new Set<number>();
   if (joined.length > budgetChars) {
-    const kept: string[] = [];
+    const keptLines: string[] = [];
     let used = 0;
     let dropped = 0;
-    for (const line of body) {
+    body.forEach((line, i) => {
       if (used + line.length > budgetChars) {
         dropped++;
-        continue;
+        return;
       }
-      kept.push(line);
+      keptLines.push(line);
+      kept.add(i);
       used += line.length + 1;
-    }
-    joined = kept.join('\n');
+    });
+    joined = keptLines.join('\n');
     if (dropped > 0) {
       joined += `\n… ${dropped} more lines beyond budget — use browser_find or browser_read to reach them`;
+    }
+  } else {
+    body.forEach((_, i) => kept.add(i));
+  }
+
+  // Emission marks are applied only for lines that SURVIVED the budget cut.
+  // Marking a ref emitted for a line the model never received poisons the
+  // wasEmitted bookkeeping every diff gate relies on — the model would then
+  // get `~ eN` updates for an element it was never shown.
+  if (opts.registry) {
+    for (const [i, ref] of marks) {
+      if (kept.has(i)) opts.registry.markEmitted(ref, snap.seq);
     }
   }
 
@@ -98,6 +114,14 @@ interface RenderCtx {
   seq: string;
   /** Suppress run collapsing entirely; every child gets its own line. */
   expand: boolean;
+  /**
+   * When present, emission marks are recorded as [lineIndex, ref] rather than
+   * applied immediately. renderFull needs the indirection because the budget
+   * cut can drop a rendered line after the fact; renderDiff's dry pass needs
+   * it because a candidate diff the engine discards for a full snapshot must
+   * not mark anything as shown to the model.
+   */
+  marks?: [number, string][];
 }
 
 function renderNode(
@@ -111,7 +135,10 @@ function renderNode(
     const line = renderLine(n, depth);
     if (line !== null) {
       out.push(line);
-      if (ctx.reg && n.ref) ctx.reg.markEmitted(n.ref, ctx.seq);
+      if (ctx.reg && n.ref) {
+        if (ctx.marks) ctx.marks.push([out.length - 1, n.ref]);
+        else ctx.reg.markEmitted(n.ref, ctx.seq);
+      }
     }
   }
 
@@ -185,7 +212,12 @@ export function renderLine(n: SnapshotNode, depth: number): string | null {
   if (n.role === 'heading' && n.headingLevel) parts.push(`h${n.headingLevel}`);
   else if (n.role === 'text') {
     const t = n.text ?? n.name ?? '';
-    return t ? `${pad}${quote(t)}` : null;
+    if (!t) return null;
+    // A text node normally has no ref, and a bare quoted line is cheapest.
+    // But a text node that CHANGED during a diff was given a ref so the
+    // update could be named — from then on the full line must show that ref,
+    // or the model holds `~ eN` updates for a name it has never seen.
+    return n.ref ? `${pad}text ${n.ref} ${quote(t)}` : `${pad}${quote(t)}`;
   } else parts.push(n.role);
 
   if (n.ref) parts.push(n.ref);
@@ -252,14 +284,20 @@ function describeShape(n: SnapshotNode): string {
 // Diff rendering
 // ---------------------------------------------------------------------------
 
-export function renderDiff(d: SnapshotDiff, reg?: RefRegistry): string {
+/**
+ * `commit: false` renders the identical text but records no emission marks.
+ * The engine uses it to size a candidate diff before deciding between the
+ * diff and a full resync — a diff that is then thrown away must not mark its
+ * subtree refs as shown to the model, because they were not.
+ */
+export function renderDiff(d: SnapshotDiff, reg?: RefRegistry, commit = true): string {
   if (d.ops.length === 0) {
     const extra = d.suppressed ? ` (${d.suppressed} live-region updates suppressed)` : '';
     return `page #${d.seq} (no visible change)${extra}`;
   }
 
   const out: string[] = [`page #${d.seq} (diff from #${d.baseSeq})`];
-  for (const op of d.ops) out.push(renderOp(op, reg, d.seq));
+  for (const op of d.ops) out.push(renderOp(op, reg, d.seq, commit));
 
   const notes: string[] = [];
   if (d.suppressed) notes.push(`${d.suppressed} live-region updates suppressed`);
@@ -269,7 +307,15 @@ export function renderDiff(d: SnapshotDiff, reg?: RefRegistry): string {
   return out.join('\n');
 }
 
-function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string {
+function renderOp(
+  op: DiffOp,
+  reg: RefRegistry | undefined,
+  seq: string,
+  commit: boolean,
+): string {
+  // In a dry render the marks land in a throwaway array; in a commit render
+  // they are applied immediately (diffs have no budget cut to survive).
+  const marks: [number, string][] | undefined = commit ? undefined : [];
   switch (op.op) {
     case 'update': {
       const bits: string[] = [];
@@ -284,7 +330,7 @@ function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string
       const lines: string[] = [];
       // Diffs are the production stream and stay collapsed; `expand` is an
       // explicit, opt-in request on a full snapshot.
-      renderNode(op.subtree, 1, lines, { reg, seq, expand: false });
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: false, marks });
       const where = op.after ? `after ${op.after}` : `under ${op.parent}`;
       return `+ ${where}:\n${lines.join('\n')}`;
     }
@@ -295,7 +341,7 @@ function renderOp(op: DiffOp, reg: RefRegistry | undefined, seq: string): string
       return `> ${op.ref} moved ${op.after ? `after ${op.after}` : `into ${op.parent}`}`;
     case 'replace': {
       const lines: string[] = [];
-      renderNode(op.subtree, 1, lines, { reg, seq, expand: false });
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: false, marks });
       // Naming the refs the replace destroyed is what stops the model going on
       // believing in elements that no longer exist — the phantom refs the
       // fidelity check caught. A replace that reports only what it created is

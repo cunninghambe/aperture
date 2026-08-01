@@ -126,9 +126,23 @@ ipcRenderer.on(
       const x = r.left + r.width / 2;
       const y = r.top + r.height / 2;
 
-      const atPoint = document.elementFromPoint(x, y);
+      // `document.elementFromPoint` stops at a shadow HOST, and
+      // `Node.contains` does not cross shadow boundaries — so a target inside
+      // an open shadow root always compared unequal to the host and reported
+      // as "obstructed", making every shadow-DOM element unclickable. Descend
+      // through shadow roots to the real element at the point, and compare
+      // containment along the composed tree.
+      let atPoint = document.elementFromPoint(x, y);
+      while (atPoint?.shadowRoot) {
+        const inner = atPoint.shadowRoot.elementFromPoint(x, y);
+        if (!inner || inner === atPoint) break;
+        atPoint = inner;
+      }
       const obstructed =
-        atPoint !== null && atPoint !== el && !el.contains(atPoint) && !atPoint.contains(el);
+        atPoint !== null &&
+        atPoint !== el &&
+        !composedContains(el, atPoint) &&
+        !composedContains(atPoint, el);
 
       reply({
         ok: true,
@@ -144,6 +158,37 @@ ipcRenderer.on(
           el instanceof HTMLTextAreaElement ||
           (el as HTMLElement).isContentEditable,
       });
+    } catch (err) {
+      reply({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+    }
+  },
+);
+
+/** Ancestor test that crosses shadow boundaries via the host chain. */
+function composedContains(ancestor: Element, node: Element): boolean {
+  let cur: Node | null = node;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parentNode ?? (cur instanceof ShadowRoot ? cur.host : null);
+  }
+  return false;
+}
+
+/**
+ * Scoped read: the rendered text of one element, found through the same
+ * identity index that acting uses. `browser_read`'s `ref` parameter used to
+ * be accepted and silently ignored — the whole document came back, and the
+ * agent had no way to know.
+ */
+ipcRenderer.on(
+  'aperture:read',
+  (_event, req: { requestId: string; key: string }) => {
+    const reply = (payload: unknown): void =>
+      ipcRenderer.send('aperture:read-result', req.requestId, payload);
+    try {
+      const el = index.get(req.key);
+      if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
+      reply({ ok: true, text: el.innerText });
     } catch (err) {
       reply({ ok: false, reason: err instanceof Error ? err.message : String(err) });
     }

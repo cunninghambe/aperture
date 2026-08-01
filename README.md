@@ -5,7 +5,7 @@ the one who stays in charge.
 
 > **Status: v0.2, early but real.** The browser runs, the MCP server works, and
 > Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI, tested crypto, and PSL-backed origin binding. 179
+> vault has a working UI, tested crypto, and PSL-backed origin binding. 187
 > tests pass, including regression tests for every finding of the security
 > review. See
 > [Honest status](#honest-status) for what is *not* done — nothing below is
@@ -80,13 +80,18 @@ Making that safe rather than merely small is the actual engineering:
   navigation, on >30% change, or after 12 diffs, the engine emits a full
   snapshot headed `FULL SNAPSHOT — replaces all prior state`, which tells a
   model whose context was compacted to discard its mental model.
-- **Noise suppression.** A clock is recognized by shape and suppressed after one
-  unprompted tick; anything changing repeatedly on its own is demoted; anything
-  the agent reads or acts on is promoted straight back. Without this, one
-  ticking timestamp defeats the entire diff argument.
+- **Noise suppression.** A clock is recognized by shape and suppressed — even
+  mid-task, when every observation follows an action (this specifically did
+  not work until it was benchmarked: in an act-observe loop the statistical
+  demotion path can never fire, and the shape path was gated behind it).
+  Anything changing repeatedly on its own is demoted; the element the agent
+  acts on or reads is promoted straight back. Measured end-to-end by
+  `bench:fidelity widgets`, which requires a ticking clock to be suppressed
+  during a click sequence. Without this, one ticking timestamp defeats the
+  entire diff argument.
 - **Positional fallback, acknowledged as fragile.** Elements distinguishable only by position (ten identical "Add to cart" buttons) get a document-order ordinal appended to their key. That makes those refs positional, and reordering is exactly what breaks positional identity — a real limitation, and the honest trade against the alternative, which was one ref for ten buttons and a silent click on the wrong product.
 - **Ref discipline.** Only actionable elements get refs. Measured against
-  playwright-mcp on the same pages: 97 refs vs 446 on a GitHub repo page, 206 vs
+  playwright-mcp on the same pages: 100 refs vs 446 on a GitHub repo page, 209 vs
   611 on a Wikipedia article. That makes each snapshot **~1.9× smaller** — the
   README previously claimed 4.5×, which was a third-party number for a
   different tool. See [bench/RESULTS.md](bench/RESULTS.md).
@@ -421,9 +426,10 @@ direction.
 | Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
 | `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
 | Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** (positional keys can mis-target). See [bench/RESULTS.md](bench/RESULTS.md) |
-| Diff fidelity, static page | **GREEN** (`npm run bench:fidelity`) |
-| Diff fidelity, full re-render | **GREEN** — the earlier RED was a lossy benchmark, not an engine fault |
-| Task-success benchmark | **Not started** — now genuinely unblocked |
+| Diff fidelity — typing, clicks, state flips, full re-renders, both resync fallbacks, shadow DOM | **GREEN** across four scenarios (`npm run bench:fidelity`), with vacuity guards so an empty run cannot score. See `bench/RESULTS.md` for what a green does and does not license |
+| `browser_read` ref scoping | **Working** — verified live (was accepted and silently ignored) |
+| Diff fidelity: containment/position; model-side budget truncation; iframes | **Not measured by any benchmark** |
+| Task-success benchmark | **Not started** — the largest open gap; nothing above measures whether agents *succeed* on diffs |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**
@@ -463,7 +469,7 @@ claude mcp add --transport http aperture http://127.0.0.1:8817/mcp -H "Authoriza
 ```
 
 ```bash
-npm test         # snapshot engine (37 tests)
+npm test         # 187 tests, 49 of them on the snapshot engine
 npm run typecheck
 ```
 
