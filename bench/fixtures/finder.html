@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Catalogue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Catalogue</h1>
+      <input
+        id="search"
+        name="search"
+        type="search"
+        data-bench="search"
+        aria-label="Search the catalogue"
+      />
+      <p id="count">12 products</p>
+      <ul id="results"></ul>
+
+      <h2>Shortlist</h2>
+      <ul id="shortlist"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // Twelve same-shape rows: the initial list collapses to "… 9 more" in a
+      // default snapshot, exactly as a real catalogue does. Filtering is the
+      // only way to see the whole matching set, which is the point — the prices
+      // an agent needs arrive in the DIFF that follows its own typing.
+      var products = [
+        { id: 'usb-c-cable-1m', name: 'USB-C cable 1m', price: 7.5 },
+        { id: 'wireless-mouse', name: 'Wireless mouse', price: 24.0 },
+        { id: 'hdmi-cable-2m', name: 'HDMI cable 2m', price: 11.2 },
+        { id: 'mechanical-keyboard', name: 'Mechanical keyboard', price: 89.0 },
+        { id: 'laptop-stand', name: 'Laptop stand', price: 32.0 },
+        { id: 'ethernet-cable-5m', name: 'Ethernet cable 5m', price: 9.4 },
+        { id: 'webcam-1080p', name: 'Webcam 1080p', price: 45.0 },
+        { id: 'desk-mat', name: 'Desk mat', price: 18.0 },
+        { id: 'lightning-cable-1m', name: 'Lightning cable 1m', price: 12.0 },
+        { id: 'monitor-arm', name: 'Monitor arm', price: 76.0 },
+        { id: 'usb-hub-4-port', name: 'USB hub 4-port', price: 21.5 },
+        { id: 'headphone-stand', name: 'Headphone stand', price: 15.0 },
+      ];
+
+      var shortlist = [];
+      var resultsEl = document.getElementById('results');
+      var shortlistEl = document.getElementById('shortlist');
+      var countEl = document.getElementById('count');
+      var searchEl = document.getElementById('search');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function matches() {
+        var q = searchEl.value.trim().toLowerCase();
+        if (!q) return products;
+        return products.filter(function (p) {
+          return p.name.toLowerCase().indexOf(q) >= 0;
+        });
+      }
+
+      function render() {
+        var m = matches();
+        var rows = m.map(function (p) {
+          var li = document.createElement('li');
+          li.append(el('span', p.name));
+          li.append(el('span', '$' + p.price.toFixed(2)));
+          li.append(
+            el('button', 'Add ' + p.name + ' to shortlist', { 'data-bench': 'add:' + p.id }),
+          );
+          return li;
+        });
+        resultsEl.replaceChildren.apply(resultsEl, rows);
+        countEl.textContent = m.length + ' products';
+
+        var picks = shortlist.map(function (n) { return el('li', n); });
+        shortlistEl.replaceChildren.apply(shortlistEl, picks);
+      }
+
+      searchEl.addEventListener('input', render);
+
+      resultsEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench').split(':')[1];
+        for (var i = 0; i < products.length; i++) {
+          if (products[i].id === id && shortlist.indexOf(products[i].name) < 0) {
+            shortlist.push(products[i].name);
+          }
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return { query: searchEl.value, shortlist: shortlist.slice() };
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Inbox</title>
+  </head>
+  <body>
+    <main>
+      <h1>Inbox</h1>
+      <p id="count">6 messages</p>
+      <ul id="messages"></ul>
+      <h2>Archived</h2>
+      <ul id="archived"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // The one fixture whose buttons are ALL labelled the same. Which "Archive"
+      // is which is carried by containment, not by the button's own name — the
+      // positional-ref hazard, live, and the case where a stale model does real
+      // damage. The attachment badges break the same-shape run so that a default
+      // snapshot does not collapse the list out from under the task.
+      var messages = [
+        { id: 'm1', from: 'Priya Raman', subject: 'Q3 forecast', att: false },
+        { id: 'm2', from: 'Tom Bexley', subject: 'Lunch?', att: true },
+        { id: 'm3', from: 'Priya Raman', subject: 'Re: Q3 forecast', att: false },
+        { id: 'm4', from: 'Alice Fenn', subject: 'Invoice 2231', att: false },
+        { id: 'm5', from: 'Tom Bexley', subject: 'Parking permit', att: true },
+        { id: 'm6', from: 'Priya Raman', subject: 'Board pack', att: false },
+      ];
+      var archived = [];
+
+      var listEl = document.getElementById('messages');
+      var archEl = document.getElementById('archived');
+      var countEl = document.getElementById('count');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var rows = messages.map(function (m) {
+          var li = document.createElement('li');
+          li.append(el('span', m.from));
+          li.append(el('span', m.subject));
+          if (m.att) li.append(el('span', 'Has attachment'));
+          // Visible text is the same on every row — the accessible name is
+          // what distinguishes them, as on any icon-button mail client. The
+          // engine's sibling discriminator keys these by their row's own text,
+          // so the ref does not silently become "whichever row is third now".
+          li.append(
+            el('button', 'Archive', {
+              'data-bench': 'archive:' + m.id,
+              'aria-label': 'Archive message from ' + m.from + ' about ' + m.subject,
+            }),
+          );
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+        countEl.textContent = messages.length + ' messages';
+        archEl.replaceChildren.apply(
+          archEl,
+          archived.map(function (m) { return el('li', m.from + ' — ' + m.subject); }),
+        );
+      }
+
+      listEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench').split(':')[1];
+        for (var i = 0; i < messages.length; i++) {
+          if (messages[i].id === id) {
+            archived.push(messages[i]);
+            messages.splice(i, 1);
+            break;
+          }
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          inbox: messages.map(function (m) { return { from: m.from, subject: m.subject }; }),
+          archived: archived.map(function (m) { return { from: m.from, subject: m.subject }; }),
+        };
+      });
+    </script>
+  </body>
+</html>

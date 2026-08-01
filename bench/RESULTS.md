@@ -501,3 +501,187 @@ vector found so far: it needs no bug at all, only an edit.
   destroys a subtree, and the reader previously deleted only its root — every
   ref underneath stayed alive in the model. Closing a dropdown is the commonest
   way to hit it.
+
+---
+
+# Task-success benchmark (2026-07-31)
+
+`bench/task.mjs`. Ten tasks over nine fixtures, driven by a real language model
+through a sealed three-tool MCP surface and scored against the fixtures' own
+JavaScript. **Built and self-tested; the scored suite has not been run.**
+
+## The runner is the SDK, and the objection that ruled it out is closed
+
+`tier1.md` rejected Claude Code headless for a decisive reason — it ships
+filesystem tools, so the agent could read the fixture HTML off disk and bypass
+observation entirely. That objection is closed rather than waved away: the
+surface is sealed twice over. `disallowedTools` removes the tool *definitions*
+from the request, `allowedTools` is a true allowlist, and — the part that does
+not depend on the SDK behaving — `browser_navigate` and `browser_read` are
+**not registered on the proxy at all**, so no allowlist bug can bring them back.
+
+The one fact the design could not confirm from documentation was whether the SDK
+inherits Claude Code's credentials. Measured, not assumed (`bench/authprobe.mjs`
+deletes the key-shaped variables from its own child environment):
+
+```
+ANTHROPIC_API_KEY in child env: undefined
+assistant text: "PONG"
+result subtype: success   is_error: false
+AUTH OK — the SDK authenticated with NO ANTHROPIC_API_KEY.
+```
+
+## The arm is applied at a proxy, never in the prompt
+
+`bench/lib/proxy.mjs` stands between the agent and Aperture and injects
+`observe:"full"` for the re-dump arm. The prompt bytes are identical across arms
+and hashed into the report. The proxy also feeds the **shadow model** — the same
+`applyObservation` the fidelity bench uses, now extracted to
+`bench/lib/streamModel.mjs` and imported by both, so a failure attributed to
+`model_bookkeeping` cannot secretly be two parsers disagreeing.
+
+One deliberate deviation, recorded because it is the kind of thing that turns
+into a false result: `browser_act`'s description is written in the proxy rather
+than forwarded, because Aperture's own says "The result is a DIFF against the
+page state you already hold" — true in one arm and false in the other.
+
+## What the guards caught, before any budget was spent
+
+**G2 rejected a task that could not have measured anything.** `inbox-archive`
+declared `mustObserve: /Alice Fenn/` — the senders that SURVIVE an archive. They
+never appear in a diff, because they never change: nothing restates a row that
+was not touched. The information that actually decides that task is which
+Archive refs just **died**, and the guard printed the stream that proved it:
+
+```
+- e3 removed (was: button "Archive message from Priya Raman about Q3 forecast")
+```
+
+**The witness was miscounting, twice.** The scripted solver performs a known
+number of actions, so `pageActions` must equal `solve.length` exactly — and it
+did not. One click on a checkbox emits both `click` and `input`; Aperture's
+`type` focuses the field first. Worse, the witness's input debounce meant a
+typed field's event landed *after the next action's click*:
+
+```
++    0ms click  search
++  226ms click  add:usb-c-cable-1m
++  226ms input  search              <- attributed to the wrong act
+```
+
+That was corrupting `identity_mismatch` attribution, not merely a count. Fixed
+by choosing the attribution event by action kind, widening the settle window
+past the debounce, and folding inputs backwards onto their own element. All ten
+tasks now report actions == solve steps in both arms.
+
+**A first deduplication rule silently ate real work.** A plain 500ms
+same-element window collapsed `steppers-balance`'s three deliberate clicks on
+one button into one, printing four actions for seven — consecutive MCP
+round-trips land ~350ms apart. Only an `input` folds now; two clicks are two
+clicks however fast they arrive.
+
+## Deliberate sabotage — every guard fires
+
+| Sabotage | Result |
+|---|---|
+| A predicate that always returns true | G1 RED: "SUCCEEDS ON AN UNTOUCHED PAGE" |
+| Solver stops one step short | G2 RED, with the fixture's own state printed |
+| Solver clicks an element outside the allowed set | G2 RED: "touched 2 element(s) outside the allowed set" |
+| `observe:"full"` injection disabled | G3 RED + G5 RED + mustObserve RED + predicate RED |
+
+G3 is now stated as a whitelist — every re-dump observation must be a FULL
+SNAPSHOT — rather than a blacklist of known diff shapes. An observation the
+shape predicates fail to classify is exactly where a diff would hide.
+
+## Selftest (no API budget)
+
+```
+G1 null-agent — every predicate must be FALSE on an untouched page
+  todo-complete        todo.html          predicate FALSE  snapshot 1391 chars
+  finder-cheapest      finder.html        predicate FALSE  snapshot  826 chars  [collapsed: … 9 more listitems]
+  … 10/10 FALSE
+G1 PASS
+
+G2 scripted solver
+  todo-complete    diff   SOLVED 2 page actions · obs 1F/2D/0N · 1970 chars
+  todo-complete    redump SOLVED 2 page actions · obs 3F/0D/0N · 4254 chars
+  steppers-balance diff   SOLVED 7 page actions · obs 1F/7D/0N · 3332 chars
+  steppers-balance redump SOLVED 7 page actions · obs 8F/0D/0N · 7965 chars
+  … 10/10 solved in both arms, every mustObserve matched
+G2 PASS
+```
+
+## Pilot (8 episodes, real agent) — and the number that matters
+
+```
+[  1/8] cart-adjust     diff    PASS wrong=0 steps=5 obs=1F/3D/1N · 2309ch · $0.0830 · 19s
+[  2/8] cart-adjust     redump  PASS wrong=0 steps=4 obs=4F/0D/0N · 4414ch · $0.0982 · 18s
+[  5/8] settings-config diff    PASS wrong=0 steps=4 obs=1F/3D/0N · 1317ch · $0.0873 · 19s
+[  6/8] settings-config redump  PASS wrong=0 steps=4 obs=4F/0D/0N · 2769ch · $0.0851 · 17s
+
+diff arm   : 2048 chars/episode  (73.7% of observations were diffs)
+re-dump arm: 3592 chars/episode        ratio 0.57x
+success 4/4 vs 4/4 · wrong-element 0.000 vs 0.000 · $0.0925/episode
+RESULT: INCONCLUSIVE (exit 2)   [G8: below the N=5 floor — a PILOT, not a result]
+```
+
+**The agent gives back much of the diff advantage by re-snapshotting
+voluntarily.** The scripted solver observes 2171 vs 4481 chars on `cart-adjust`
+(0.48x); the language model observes 2779 vs 4414 (0.63x), because it takes full
+snapshots nobody asked it to take. Intention-to-treat scoring counts those
+rescues against the diff arm, which is the honest choice and is production
+reality.
+
+**The first pilot tripped G4 at 57.1%**, below the preregistered 60% floor. The
+threshold was not touched. Diagnosing it found a fidelity bug in the harness
+instead: the proxy's `browser_act` description said "you do not need to call
+browser_snapshot after every action" where the product says "That is the whole
+point: do not call browser_snapshot after every action" — permissive where
+production is imperative, which inflates exactly the behaviour that was
+breaching the floor. Restoring the product's own strength (arm-symmetric, so it
+cannot bias the comparison between arms) moved the diff share 63.6% → 73.7% and
+the cost ratio 0.80x → 0.57x. **This change was made after seeing a pilot
+result and is recorded here for that reason.**
+
+Short tasks stay structurally fragile for G4: with three acts, two voluntary
+snapshots alone breach the floor. The full run may still abort on G4, and that
+would be a real finding about instruction-following, not a harness defect.
+
+## Both arms scored 100% on the pilot tasks — read G10
+
+`tier1.md` flagged the ceiling problem and it is live: a suite both arms solve
+every time cannot detect a bookkeeping penalty even if one exists. G10 refuses
+to call that PARITY and returns INCONCLUSIVE. Sonnet rather than Opus is the
+sensitivity choice already made against this; if the full run ceilings anyway,
+the tasks are too easy and the honest response is harder tasks, not a verdict.
+
+## Known limitations, stated rather than papered over
+
+- The SDK exposes no temperature control, only `effort`. Runs are stochastic.
+  That affects both arms identically, but a single episode is noise.
+- **An `ok click` that did not land.** Once in roughly 450 scripted acts,
+  Aperture returned `ok click e6` followed by `(no visible change)` and the
+  witness recorded no event at all — the click never reached the button. Not
+  reproducible in three cold starts. It is an Aperture-side flake, and the
+  concerning half is that the tool said `ok`.
+- No fixture forces purely positional identity. `inbox.html` was built for it —
+  six identical "Archive" buttons — but the walker's sibling discriminator keys
+  each one by its own row's text, so the hazard does not arise. Accessible names
+  distinguish them, and `identity_mismatch` therefore has no dedicated fixture.
+- `browser_read` is withheld by design; innerText re-reads would route around
+  diff bookkeeping and dilute the variable under test.
+- Fixtures use `data-bench`, never `data-testid`: `data-testid` is Tier-1 input
+  to the identity-key scheme, so using it would change the behaviour being
+  measured.
+
+## Running it
+
+```bash
+npm run bench:task -- --selftest                      # G1+G2, no API budget
+npm run bench:task -- --tasks cart-adjust --n 2       # pilot
+npm run bench:task                                    # 10 tasks x N=20 x 2 arms
+```
+
+The runner owns its whole world: it refuses to start if 8817 is already in use,
+then starts its own Aperture, a `no-store` fixture server on 8899, the witness
+collector on 8898 and the MCP proxy on 8896, and tears all of it down on exit.

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sign up</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign up</h1>
+      <p id="progress">Step 1 of 3</p>
+      <div id="panel"></div>
+      <p id="outcome"></p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // Every step replaces the whole panel. That is mass ref death by design:
+      // nothing an agent learned about step 1 survives into step 2, and the
+      // only announcement it gets is the diff.
+      var state = { fullname: '', email: '', plan: '', step: 1, submitted: false };
+
+      var panel = document.getElementById('panel');
+      var progress = document.getElementById('progress');
+      var outcome = document.getElementById('outcome');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function field(labelText, name, bench, value) {
+        var wrap = document.createElement('div');
+        var input = el('input', null, {
+          name: name,
+          'data-bench': bench,
+          'aria-label': labelText,
+        });
+        input.value = value;
+        input.addEventListener('input', function () {
+          state[name] = input.value;
+        });
+        wrap.append(input);
+        return wrap;
+      }
+
+      function radio(labelText, value, checked) {
+        var wrap = document.createElement('div');
+        var input = el('input', null, {
+          type: 'radio',
+          name: 'plan',
+          value: value,
+          'data-bench': 'plan-' + value,
+          'aria-label': labelText,
+        });
+        if (checked) input.checked = true;
+        input.addEventListener('change', function () {
+          if (input.checked) state.plan = value;
+        });
+        wrap.append(input);
+        wrap.append(el('span', labelText));
+        return wrap;
+      }
+
+      function render() {
+        progress.textContent = 'Step ' + state.step + ' of 3';
+        var kids = [];
+        if (state.step === 1) {
+          kids.push(el('h2', 'Your details'));
+          kids.push(field('Full name', 'fullname', 'fullname', state.fullname));
+          kids.push(field('Email address', 'email', 'email', state.email));
+          kids.push(el('button', 'Continue to plan', { 'data-bench': 'next-1' }));
+        } else if (state.step === 2) {
+          kids.push(el('h2', 'Choose a plan'));
+          kids.push(radio('Basic plan', 'basic', state.plan === 'basic'));
+          kids.push(radio('Standard plan', 'standard', state.plan === 'standard'));
+          kids.push(radio('Pro plan', 'pro', state.plan === 'pro'));
+          kids.push(el('button', 'Back to your details', { 'data-bench': 'back-2' }));
+          kids.push(el('button', 'Continue to review', { 'data-bench': 'next-2' }));
+        } else {
+          kids.push(el('h2', 'Review'));
+          kids.push(el('p', 'Name: ' + (state.fullname || 'not set')));
+          kids.push(el('p', 'Email: ' + (state.email || 'not set')));
+          kids.push(el('p', 'Plan: ' + (state.plan || 'not set')));
+          kids.push(el('button', 'Back to plan', { 'data-bench': 'back-3' }));
+          kids.push(el('button', 'Submit application', { 'data-bench': 'submit' }));
+        }
+        panel.replaceChildren.apply(panel, kids);
+      }
+
+      panel.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench');
+        if (id === 'next-1') state.step = 2;
+        else if (id === 'next-2') state.step = 3;
+        else if (id === 'back-2') state.step = 1;
+        else if (id === 'back-3') state.step = 2;
+        else if (id === 'submit') {
+          state.submitted = true;
+          outcome.textContent = 'Application submitted.';
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          fullname: state.fullname,
+          email: state.email,
+          plan: state.plan,
+          step: state.step,
+          submitted: state.submitted,
+        };
+      });
+    </script>
+  </body>
+</html>

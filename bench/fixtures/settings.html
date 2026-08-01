@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Settings</title>
+  </head>
+  <body>
+    <main>
+      <h1>Settings</h1>
+
+      <input type="checkbox" id="marketing" name="marketing" data-bench="marketing" />
+      <label for="marketing">Marketing emails</label>
+
+      <input type="checkbox" id="notifications" name="notifications" data-bench="notifications" />
+      <label for="notifications">Enable notifications</label>
+
+      <div id="sub"></div>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // The delivery controls DO NOT EXIST until notifications are on. There is
+      // no ref to hold, no ref to go stale — the agent has to learn they arrived,
+      // and in the diff arm the only place it can learn that is the diff.
+      var state = { marketing: false, notifications: false, method: '', digest: false };
+
+      var sub = document.getElementById('sub');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        if (!state.notifications) {
+          sub.replaceChildren();
+          return;
+        }
+        var kids = [el('h2', 'Delivery')];
+        [['email', 'Email'], ['sms', 'SMS'], ['push', 'Push']].forEach(function (m) {
+          var wrap = document.createElement('div');
+          var r = el('input', null, {
+            type: 'radio',
+            name: 'method',
+            value: m[0],
+            'data-bench': 'method-' + m[0],
+            'aria-label': m[1] + ' delivery',
+          });
+          if (state.method === m[0]) r.checked = true;
+          r.addEventListener('change', function () {
+            if (r.checked) state.method = m[0];
+          });
+          wrap.append(r);
+          wrap.append(el('span', m[1] + ' delivery'));
+          kids.push(wrap);
+        });
+
+        var d = el('input', null, {
+          type: 'checkbox',
+          name: 'digest',
+          id: 'digest',
+          'data-bench': 'digest',
+          'aria-label': 'Weekly digest',
+        });
+        d.checked = state.digest;
+        d.addEventListener('change', function () { state.digest = d.checked; });
+        kids.push(d);
+        kids.push(el('span', 'Weekly digest'));
+
+        sub.replaceChildren.apply(sub, kids);
+      }
+
+      document.getElementById('marketing').addEventListener('change', function (ev) {
+        state.marketing = ev.target.checked;
+      });
+      document.getElementById('notifications').addEventListener('change', function (ev) {
+        state.notifications = ev.target.checked;
+        if (!state.notifications) {
+          state.method = '';
+          state.digest = false;
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          marketing: state.marketing,
+          notifications: state.notifications,
+          method: state.method,
+          digest: state.digest,
+        };
+      });
+    </script>
+  </body>
+</html>

@@ -49,6 +49,11 @@
  *      file exists to prevent.
  */
 
+import {
+  applyObservation,
+  parseElementLine,
+} from './lib/streamModel.mjs';
+
 const TOKEN = process.argv[2];
 if (!TOKEN) {
   console.error('usage: node bench/fidelity.mjs <token> [scenario]');
@@ -82,122 +87,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // deliberately: the comparison must be apples-to-apples. The escaped-quote
 // handling matters; the previous parser broke identically on both sides for
 // labels containing quotes, which hid the breakage completely.
+//
+// The parser itself now lives in bench/lib/streamModel.mjs and is imported at
+// the top of this file. The task-success bench imports the SAME module as its
+// shadow model, so a failure it attributes to the agent cannot be a parser
+// disagreement between the two benches.
 // ---------------------------------------------------------------------------
-
-const STATE_WORDS = new Set([
-  'checked', 'disabled', 'expanded', 'selected', 'required',
-  'focused', 'modal', 'readonly', 'invalid', 'live',
-]);
-
-const unesc = (s) => s.replace(/\\(.)/g, '$1');
-
-/** Full-snapshot / subtree line: `role eN "label" ="value" … states`. */
-function parseElementLine(line) {
-  const m = /^\s*(\w+) (e\d+)(.*)$/.exec(line);
-  if (!m) return null;
-  const [, role, ref, restRaw] = m;
-  let rest = restRaw;
-  let label = '';
-  let value = '';
-
-  const nm = /^ "((?:[^"\\]|\\.)*)"/.exec(rest);
-  if (nm) {
-    label = unesc(nm[1]);
-    rest = rest.slice(nm[0].length);
-  }
-  const vm = / ="((?:[^"\\]|\\.)*)"/.exec(rest);
-  if (vm) {
-    value = unesc(vm[1]);
-    rest = rest.slice(0, vm.index) + rest.slice(vm.index + vm[0].length);
-  }
-
-  const states = new Set();
-  const words = rest.trim().split(/\s+/).filter(Boolean);
-  for (let i = words.length - 1; i >= 0; i--) {
-    if (STATE_WORDS.has(words[i])) states.add(words[i]);
-    else break;
-  }
-  return { role, ref, label, value, states };
-}
-
-/**
- * The agent's mental model, built ONLY from what it was told.
- * ref -> { role, label, value, states:Set }.
- */
-function applyObservation(model, text) {
-  for (const line of text.split('\n')) {
-    if (/^FULL SNAPSHOT #/.test(line)) {
-      model.clear();
-      continue;
-    }
-
-    // Replace destroys refs: `! e3 replaced (gone: e8 e9):` — subtree lines
-    // that follow re-add the survivors and newcomers.
-    const rep = /^! (e\d+) replaced(?: \(gone: ([^)]*)\))?:/.exec(line);
-    if (rep) {
-      if (rep[2]) for (const r of rep[2].trim().split(/\s+/)) model.delete(r);
-      continue;
-    }
-
-    // A removal destroys a SUBTREE: `- e3 removed (was: list "Colours")
-    // (gone: e8 e9)`. The gone list names the refs that died inside it, which
-    // no reader can infer — nothing else in the stream says what the removed
-    // node contained. Same rule as `replace`'s gone list, on the path that
-    // closes a dropdown or dismisses a dialog.
-    const rm = /^- (e\d+) removed/.exec(line);
-    if (rm) {
-      model.delete(rm[1]);
-      const inside = /\(gone: ([^)]*)\)/.exec(line);
-      if (inside) for (const r of inside[1].trim().split(/\s+/)) model.delete(r);
-      continue;
-    }
-
-    if (/^> e\d+ moved/.test(line)) continue; // position is not tracked
-
-    // Diff update: `~ e3 "name" ="value" "text" +focused -checked`
-    const upd = /^~ (e\d+)(.*)$/.exec(line);
-    if (upd) {
-      const entry = model.get(upd[1]) ?? { role: '?', label: '', value: '', states: new Set() };
-      let rest = upd[2];
-
-      const vm = / ="((?:[^"\\]|\\.)*)"/.exec(rest);
-      if (vm) {
-        entry.value = unesc(vm[1]);
-        rest = rest.slice(0, vm.index) + rest.slice(vm.index + vm[0].length);
-      }
-      // First remaining quoted string is the new name; a second is the text
-      // delta, which a full snapshot cannot verify and is ignored here.
-      const nm = / "((?:[^"\\]|\\.)*)"/.exec(rest);
-      if (nm) {
-        entry.label = unesc(nm[1]);
-        rest = rest.slice(0, nm.index) + rest.slice(nm.index + nm[0].length);
-      }
-      // Strip any remaining quoted segments (the text delta) BEFORE the state
-      // token loop — quoted page text containing "+... checked" must not be
-      // able to inject state flags into the model.
-      rest = rest.replace(/ "((?:[^"\\]|\\.)*)"/g, '');
-      let mode = null;
-      for (const tok of rest.trim().split(/\s+/)) {
-        if (!tok) continue;
-        if (tok.startsWith('+')) mode = 'on';
-        else if (tok.startsWith('-')) mode = 'off';
-        const word = tok.replace(/^[+-]/, '');
-        if (mode && STATE_WORDS.has(word)) {
-          if (mode === 'on') entry.states.add(word);
-          else entry.states.delete(word);
-        }
-      }
-      model.set(upd[1], entry);
-      continue;
-    }
-
-    // Anything else that looks like an element line (full snapshots, add and
-    // replace subtrees) restates the element outright.
-    const el = parseElementLine(line);
-    if (el) model.set(el.ref, el);
-  }
-  return model;
-}
 
 // ---------------------------------------------------------------------------
 // Ground truth

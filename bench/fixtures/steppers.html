@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dials</title>
+  </head>
+  <body>
+    <main>
+      <h1>Dials</h1>
+      <div id="dials"></div>
+      <p id="sum">Sum: 19</p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // The buttons never change their names, so their refs are stable; the
+      // VALUES live in text that changes on every click. An agent that stops
+      // reading the stream will still be able to press buttons — it just will
+      // not know when to stop. Nine correct actions, and every one of them
+      // depends on a number that only a diff delivered.
+      var dials = [
+        { id: 'alpha', name: 'Alpha', value: 2 },
+        { id: 'bravo', name: 'Bravo', value: 7 },
+        { id: 'charlie', name: 'Charlie', value: 4 },
+        { id: 'delta', name: 'Delta', value: 6 },
+      ];
+
+      var host = document.getElementById('dials');
+      var sumEl = document.getElementById('sum');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var groups = dials.map(function (d) {
+          var box = document.createElement('div');
+          box.append(el('span', d.name + ': ' + d.value));
+          box.append(el('button', 'Increase ' + d.name, { 'data-bench': 'up:' + d.id }));
+          box.append(el('button', 'Decrease ' + d.name, { 'data-bench': 'down:' + d.id }));
+          return box;
+        });
+        host.replaceChildren.apply(host, groups);
+        sumEl.textContent =
+          'Sum: ' + dials.reduce(function (a, d) { return a + d.value; }, 0);
+      }
+
+      host.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        for (var i = 0; i < dials.length; i++) {
+          if (dials[i].id !== parts[1]) continue;
+          if (parts[0] === 'up') dials[i].value += 1;
+          else dials[i].value -= 1;
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        var out = {};
+        dials.forEach(function (d) { out[d.id] = d.value; });
+        return { dials: out };
+      });
+    </script>
+  </body>
+</html>

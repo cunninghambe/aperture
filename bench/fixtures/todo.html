@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Task list</title>
+  </head>
+  <body>
+    <main>
+      <h1>Task list</h1>
+      <p id="summary">0 of 7 done</p>
+      <ul id="list"></ul>
+
+      <h2>Add a task</h2>
+      <input id="new-task" name="newtask" data-bench="new-task" aria-label="New task title" />
+      <button id="add-task" data-bench="add-task">Add task</button>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // "Book dentist follow-up" is a deliberate near-miss for "Book dentist".
+      // A task that names one of them is only solvable by an agent whose model
+      // still distinguishes the two after the list has been rebuilt.
+      var items = [
+        { id: 'renew-passport', title: 'Renew passport', done: false, flag: '' },
+        { id: 'book-dentist', title: 'Book dentist', done: false, flag: 'Urgent' },
+        { id: 'water-plants', title: 'Water plants', done: false, flag: '' },
+        { id: 'pay-electricity', title: 'Pay electricity bill', done: false, flag: '' },
+        { id: 'email-landlord', title: 'Email the landlord', done: false, flag: 'Urgent' },
+        { id: 'order-ink', title: 'Order printer ink', done: false, flag: '' },
+        { id: 'book-dentist-followup', title: 'Book dentist follow-up', done: false, flag: '' },
+      ];
+
+      var list = document.getElementById('list');
+      var summary = document.getElementById('summary');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      // replaceChildren, as the design requires: every render kills every ref
+      // in the list and mints new ones. That churn is the phenomenon under test.
+      function render() {
+        var rows = items.map(function (it) {
+          var li = document.createElement('li');
+          if (it.flag) li.append(el('span', it.flag));
+          li.append(el('span', it.title));
+          li.append(
+            el(
+              'button',
+              (it.done ? 'Reopen: ' : 'Mark done: ') + it.title,
+              { 'data-bench': 'toggle:' + it.id },
+            ),
+          );
+          li.append(el('button', 'Delete: ' + it.title, { 'data-bench': 'del:' + it.id }));
+          return li;
+        });
+        list.replaceChildren.apply(list, rows);
+        var done = items.filter(function (i) { return i.done; }).length;
+        summary.textContent = done + ' of ' + items.length + ' done';
+      }
+
+      list.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        var idx = -1;
+        for (var i = 0; i < items.length; i++) if (items[i].id === parts[1]) idx = i;
+        if (idx < 0) return;
+        if (parts[0] === 'toggle') items[idx].done = !items[idx].done;
+        else if (parts[0] === 'del') items.splice(idx, 1);
+        render();
+      });
+
+      document.getElementById('add-task').addEventListener('click', function () {
+        var input = document.getElementById('new-task');
+        var title = input.value.trim();
+        if (!title) return;
+        items.push({
+          id: 'added-' + (items.length + 1),
+          title: title,
+          done: false,
+          flag: '',
+        });
+        input.value = '';
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          items: items.map(function (i) { return { title: i.title, done: i.done }; }),
+        };
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account portal</title>
+  </head>
+  <body>
+    <main>
+      <h1>Account portal</h1>
+      <div role="tablist" aria-label="Sections">
+        <button role="tab" data-bench="tab-billing" aria-selected="true">Billing</button>
+        <button role="tab" data-bench="tab-account" aria-selected="false">Account</button>
+        <button role="tab" data-bench="tab-support" aria-selected="false">Support</button>
+      </div>
+      <div id="panel"></div>
+      <p id="outcome"></p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // Billing is the DEFAULT tab, deliberately. The reference code the task
+      // needs is on Account, so it cannot be read from the first full snapshot:
+      // it can only arrive in the diff that follows the agent's own tab click.
+      // Billing also carries a decoy code of the same shape.
+      var state = { tab: 'billing', ref: '', message: '', submitted: false };
+
+      var panel = document.getElementById('panel');
+      var outcome = document.getElementById('outcome');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var tabs = document.querySelectorAll('[role="tab"]');
+        for (var i = 0; i < tabs.length; i++) {
+          var t = tabs[i];
+          t.setAttribute(
+            'aria-selected',
+            String(t.getAttribute('data-bench') === 'tab-' + state.tab),
+          );
+        }
+
+        var kids = [];
+        if (state.tab === 'billing') {
+          kids.push(el('h2', 'Billing'));
+          kids.push(el('p', 'Invoice reference: IN-9910'));
+          kids.push(el('p', 'Next payment: the first of the month.'));
+        } else if (state.tab === 'account') {
+          kids.push(el('h2', 'Account'));
+          kids.push(el('p', 'Plan: Standard'));
+          kids.push(el('p', 'Account reference code: RF-4827'));
+          kids.push(el('p', 'Seats in use: four of ten.'));
+        } else {
+          kids.push(el('h2', 'Support'));
+          var ref = el('input', null, {
+            name: 'ref',
+            'data-bench': 'ref',
+            'aria-label': 'Reference code',
+          });
+          ref.value = state.ref;
+          ref.addEventListener('input', function () { state.ref = ref.value; });
+          kids.push(ref);
+
+          var msg = document.createElement('textarea');
+          msg.setAttribute('name', 'message');
+          msg.setAttribute('data-bench', 'message');
+          msg.setAttribute('aria-label', 'Message');
+          msg.value = state.message;
+          msg.addEventListener('input', function () { state.message = msg.value; });
+          kids.push(msg);
+
+          kids.push(el('button', 'Submit ticket', { 'data-bench': 'submit-ticket' }));
+        }
+        panel.replaceChildren.apply(panel, kids);
+      }
+
+      document.querySelector('[role="tablist"]').addEventListener('click', function (ev) {
+        var b = ev.target.closest('[data-bench]');
+        if (!b) return;
+        state.tab = b.getAttribute('data-bench').replace('tab-', '');
+        render();
+      });
+
+      panel.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        if (b.getAttribute('data-bench') === 'submit-ticket') {
+          state.submitted = true;
+          outcome.textContent = 'Ticket submitted.';
+        }
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          tab: state.tab,
+          ref: state.ref,
+          message: state.message,
+          submitted: state.submitted,
+        };
+      });
+    </script>
+  </body>
+</html>

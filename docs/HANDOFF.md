@@ -50,6 +50,19 @@ TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
 node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects
 ```
 
+All five in one go, one fresh Aperture each: `bash bench/fidelity-all.sh`.
+
+The task-success bench owns its whole world instead — it refuses to start if
+8817 is already in use, then starts its own Aperture, a `no-store` fixture
+server on 8899, the witness collector on 8898 and the MCP proxy on 8896, and
+tears all of it down on exit:
+
+```bash
+npm run bench:task -- --selftest                # G1+G2 only, spends NO API budget
+npm run bench:task -- --tasks cart-adjust --n 2 # a pilot
+npm run bench:task                              # the full preregistered suite
+```
+
 Others: `npm run bench` (synthetic diff model), `npm run bench:live`
 (real-site sizes and ref stability). Results in `bench/RESULTS.md`.
 
@@ -144,9 +157,28 @@ must round-trip, a clicked checkbox must read `checked`.
 
 ## Next, in order
 
-1. **Task-success benchmark** — diff mode vs re-dump mode over a fixed task
-   set, scoring completion **and wrong-element actions**. Everything else on
-   this list is smaller than this.
+1. **Task-success benchmark** — **BUILT 2026-07-31, and the scored suite has
+   not been run.** `bench/task.mjs`: ten tasks over nine fixtures, a real
+   language model driving a sealed three-tool MCP surface, scored against the
+   fixtures' own JavaScript rather than against the snapshot pipeline (half of
+   which is the variable under test). The arm is applied at a proxy that
+   injects `observe:"full"`, so the prompt bytes are identical in both arms and
+   the model cannot tell which arm it is in. `npm run bench:task -- --selftest`
+   runs G1 + G2 and spends **no API budget**; it passes, and every guard was
+   confirmed by deliberate sabotage. What remains is the human's call, because
+   it spends their quota: 10 tasks x N=20 x 2 arms = 400 episodes, measured at
+   **$0.0925/episode and ~20s/episode** in the pilot, so roughly **$37 and
+   3-4 hours**. Read `bench/RESULTS.md` first — in particular G4 (the pilot sat
+   at 73.7% against a 60% floor, and short tasks are fragile) and G10 (both
+   arms scored 100% on the two pilot tasks, which is the ceiling problem
+   `tier1.md` warned about and would return INCONCLUSIVE rather than PARITY).
+
+   Two things worth carrying forward regardless of whether the suite is ever
+   run. The agent **gives back much of the diff saving by re-snapshotting
+   voluntarily**: the scripted solver observes 0.48x on `cart-adjust`, the
+   language model 0.63x. And once in ~450 acts, Aperture returned `ok click e6`
+   for a click that never reached the button — the witness recorded no event at
+   all. Not reproducible in three cold starts, but the tool said `ok`.
 2. ~~**Shorten the `<untrusted-page-content>` envelope on continuation
    responses**~~ — **DONE 2026-07-31.** Landed as one *uniform* minimal
    envelope rather than a first/continuation pair: the explanation moved into

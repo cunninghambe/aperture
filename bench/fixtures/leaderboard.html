@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaderboard</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaderboard</h1>
+      <p id="page">Page 1 of 3</p>
+      <ul id="rows"></ul>
+      <button data-bench="prev">Previous page</button>
+      <button data-bench="next">Next page</button>
+      <p id="chosen">Selected: nobody</p>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // Four rows per page, three pages, and the winner is on the LAST one.
+      // The scores that decide the answer are spread across three separate
+      // re-renders, so the answer exists nowhere in any single observation —
+      // the agent has to accumulate it across diffs.
+      var people = [
+        { id: 'nina-holt', name: 'Nina Holt', score: 71 },
+        { id: 'omar-diaz', name: 'Omar Diaz', score: 64 },
+        { id: 'sara-quinn', name: 'Sara Quinn', score: 83 },
+        { id: 'leo-abbott', name: 'Leo Abbott', score: 59 },
+
+        { id: 'ruth-kane', name: 'Ruth Kane', score: 90 },
+        { id: 'ivan-petrov', name: 'Ivan Petrov', score: 77 },
+        { id: 'mia-okafor', name: 'Mia Okafor', score: 68 },
+        { id: 'jonah-reyes', name: 'Jonah Reyes', score: 85 },
+
+        { id: 'marcus-webb', name: 'Marcus Webb', score: 98 },
+        { id: 'ella-fournier', name: 'Ella Fournier', score: 72 },
+        { id: 'sam-idris', name: 'Sam Idris', score: 61 },
+        { id: 'kara-lindqvist', name: 'Kara Lindqvist', score: 88 },
+      ];
+
+      var PER_PAGE = 4;
+      var page = 0;
+      var selected = '';
+
+      var rowsEl = document.getElementById('rows');
+      var pageEl = document.getElementById('page');
+      var chosenEl = document.getElementById('chosen');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var slice = people.slice(page * PER_PAGE, page * PER_PAGE + PER_PAGE);
+        var rows = slice.map(function (p) {
+          var li = document.createElement('li');
+          li.append(el('span', p.name));
+          li.append(el('span', 'Score ' + p.score));
+          li.append(el('button', 'Select ' + p.name, { 'data-bench': 'select:' + p.id }));
+          return li;
+        });
+        rowsEl.replaceChildren.apply(rowsEl, rows);
+        pageEl.textContent = 'Page ' + (page + 1) + ' of 3';
+        chosenEl.textContent = 'Selected: ' + (selected || 'nobody');
+      }
+
+      rowsEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var id = b.getAttribute('data-bench').split(':')[1];
+        for (var i = 0; i < people.length; i++) {
+          if (people[i].id === id) selected = people[i].name;
+        }
+        render();
+      });
+
+      document.querySelector('[data-bench="next"]').addEventListener('click', function () {
+        if (page < 2) page += 1;
+        render();
+      });
+      document.querySelector('[data-bench="prev"]').addEventListener('click', function () {
+        if (page > 0) page -= 1;
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return { page: page + 1, selected: selected };
+      });
+    </script>
+  </body>
+</html>
