@@ -299,15 +299,46 @@ async function startAperture() {
   throw new Error(`Aperture did not come up on ${APERTURE_PORT} within 60s.\n${log.slice(-2000)}`);
 }
 
-function killTree(child) {
+/**
+ * Kill the Aperture this run started, and do not return until it is gone.
+ *
+ * The await is load-bearing and was measured, not assumed. This used to fire
+ * `taskkill` and return immediately, and `main()` then called `process.exit()`
+ * before the kill had landed — so a completed run routinely left an Aperture
+ * holding 8817 and the NEXT invocation died on the port check with exit 3.
+ * Survivable when the suite was run once; not survivable when the whole point
+ * is running it in five phases back to back.
+ */
+async function killTree(child) {
   if (!child || child.exitCode !== null) return;
-  try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else child.kill('SIGTERM');
-  } catch {
-    /* best effort */
+  await new Promise((done) => {
+    try {
+      if (process.platform !== 'win32') {
+        child.kill('SIGTERM');
+        done();
+        return;
+      }
+      // The child is the npx shell wrapper; /T is what reaches Electron under it.
+      const t = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      t.on('exit', done);
+      t.on('error', done);
+      setTimeout(done, 10000).unref();
+    } catch {
+      done();
+    }
+  });
+  // Verified against the port rather than against the exit code of taskkill: a
+  // successful taskkill on a wrapper that has already lost track of its child
+  // reports success and leaves the listener up.
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if (!(await portIsOpen(APERTURE_PORT))) return;
+    await new Promise((r) => setTimeout(r, 400));
   }
+  console.log(
+    `\nWARNING: Aperture is STILL listening on ${APERTURE_PORT} after the teardown. The next\n` +
+      '         phase will refuse to start. Run: taskkill //F //IM electron.exe',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,7 +1272,7 @@ async function main() {
     if (proxy) await proxy.close().catch(() => {});
     await fixtures.close().catch(() => {});
     await collector.close().catch(() => {});
-    if (aperture && !opts.keepAlive) killTree(aperture.child);
+    if (aperture && !opts.keepAlive) await killTree(aperture.child);
   }
 }
 
