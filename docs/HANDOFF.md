@@ -1,34 +1,25 @@
-# Handoff — the one thing blocking everything else
+# Handoff
 
-## Current state
+## Current state — all benchmarks green
 
-175 tests pass. The browser runs, the MCP server works, `browser_act` closes
-the act-observe loop, and Claude Code can drive it end to end.
+179 tests pass. The browser runs, the MCP server works, `browser_act` closes the
+act-observe loop, and Claude Code can drive it end to end.
 
-**One benchmark is RED, and it gates the project's central claim.**
-
-```bash
-npm run bench:fidelity -- <token> form       # GREEN
-npm run bench:fidelity -- <token> rerender   # RED — 6 phantom refs
+```
+bench:fidelity form       GREEN   16/16 refs, 0 wrong, 0 phantom
+bench:fidelity rerender   GREEN   14/14 refs, 0 wrong, 0 phantom
 ```
 
-## Why this specific red matters more than it looks
+> A previous version of this file said the `rerender` bench was RED and warned
+> against using Aperture agentically on re-rendering pages. **That was wrong.**
+> The engine's diff stream was faithful the whole time; the *benchmark* was
+> reading a lossy ground truth. See below.
 
-A *phantom* is a ref the agent believes exists, per the diff stream it was
-given, that does not exist on the page. It is the precondition for a
-wrong-element click, and **it fails silently**: actions succeed, diffs stay
-small, refs look stable, and the agent's model drifts away from reality with
-no error anywhere.
+## Run the benchmarks
 
-Until `rerender` is green:
-
-- **Do not use Aperture agentically against re-rendering pages.** Static pages
-  and forms are fine and measured green.
-- **The task-success benchmark is not worth running.** Measuring whether a
-  model succeeds on an unfaithful diff stream tells you nothing about the
-  design, only about the bug.
-
-## How to reproduce
+**One scenario per freshly started Aperture.** Ref numbers count up per tab, so
+a second scenario in the same session types into refs that no longer exist. The
+bench now exits 3 rather than scoring such a run — see "the false green" below.
 
 ```bash
 npx http-server test/fixtures -p 8899 --silent &
@@ -38,65 +29,77 @@ TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
 node bench/fidelity.mjs "$TOK" rerender
 ```
 
-Fixture: `test/fixtures/rerender.html` — every keystroke calls
-`replaceChildren()` and rebuilds the list. No ids, no `data-testid`, no node
-reuse. Three successive filters: `anker`, `dock`, `a`.
+Others: `npm run bench` (synthetic diff model), `npm run bench:live` (real-site
+snapshot sizes and ref stability). Results in `bench/RESULTS.md`.
 
-## Already fixed — do not re-litigate
+## What the RED actually was
 
-| fix | file | effect |
-|---|---|---|
-| `! replaced` now names destroyed refs via `gone:` | `diff.ts`, `render.ts` | phantoms 8 → 6 |
-| Identical siblings key on a distinguishing neighbour | `walker.ts` `siblingDiscriminator` | button follows its product through a filter |
-| Containers take only an explicit name | `walker.ts` `explicitName` | container identity no longer changes when its contents do |
+The bench compared the agent's model against a **default** full snapshot — and
+the renderer collapses runs of ≥5 same-shape siblings into
+`… 3 more listitems (…) — read e3`. Refs behind that elision were absent from
+the ground truth while being perfectly real on the page, so every one was
+reported as a phantom. The agent's model was correct throughout.
 
-## Leading hypothesis — unverified, be skeptical
+`form` stayed green because collapse keys on `shapeHash` (child roles joined);
+leaf inputs have no children, so form fields can never collapse. That contrast
+was the whole tell, and it took instrumenting both streams to see it.
 
-`RefRegistry.ensureRef` **revives** a dead ref when its identity key reappears.
-That exists so a tabbed UI returning to a previous view keeps its refs. Across
-three successive filters a ref can die, revive, and die again, and the diff
-stream may not narrate that cycle unambiguously.
+**Fixes that landed:**
 
-There is a real open design question underneath: **is revival compatible with a
-diff stream at all?** If a ref can come back from the dead without an explicit
-announcement, no model can maintain an accurate mental model by construction.
+| fix | effect |
+|---|---|
+| `expand: true` on `browser_snapshot` | Uncollapsed rendering. Also a real product fix: collapsed items previously had **no reachable refs** — the elision says "read eN" but `browser_read`'s ref scoping is unimplemented |
+| Bench truth uses `expand: true`, and aborts (exit 2) if the truth is still elided or budget-cut | The bench refuses to judge rather than manufacturing phantoms |
+| `RefEntry.needsReannounce` | A run whose elided tail contains a revived, previously-emitted ref renders in full. Closes a latent silent-revival hole that this bench never triggered |
+| `gone:` list filtered to emitted refs | Token waste only; `markDead` still runs for every destroyed key |
 
-Other candidates not yet ruled out:
-- The retained old tree may be mutated in place between observations
-  (`redactTainted` and friends mutate nodes in `engine.ts`).
-- The harness itself may have a parsing gap — refs nested inside a
-  `! replaced` block are parsed by the same regex as top-level lines. **If the
-  harness is wrong, the engine may be fine and this RED is spurious.** That is
-  a legitimate outcome and should be checked first, not last.
+## The false green — read this before trusting any bench run
 
-## Method that has actually worked on this codebase
+While fixing the above, the implementer's first `rerender` run reported GREEN
+and was wrong. Running it in a session that had already run `form` meant every
+action failed with `e2 could not be acted on (gone)`, no diffs were produced,
+and **an empty model scored a flawless green**.
 
-Five times this session something marked "working" turned out broken the moment
-it was measured end to end: the crash pipeline, the HN snapshot, the UA client
-hints, and the benchmark harness twice. The pattern was always the same — the
-unit tests and the assumption agreed with each other, and only the real output
-disagreed.
+It was caught only because the tracked-ref count dropped 14 → 8 and the raw
+stream was dumped instead of the verdict being trusted.
 
-**Instrument and compare against ground truth. Do not reason from the code
-alone.** For this bug: dump, per step, the ops emitted, the `gone:` list, the
-refs in the new subtree, the harness model, and the true refs. Find the exact
-step and ref where they diverge. The six phantoms may not share one cause.
+The bench now exits 3 the moment a step is rejected. Verified firing.
 
-## Invariants any fix must preserve
+**The general lesson, earned repeatedly on this codebase:** a green that comes
+from an empty measurement looks identical to a green that comes from correct
+behaviour. Check the counts, not just the verdict.
 
-- A ref must never appear in `gone:` and in the new subtree of the same op.
-- A ref that is revived must be announced in a way a model can act on.
-- `form` must stay GREEN.
-- Refs must remain stable for named elements through a full re-render
-  (measured, see `bench/RESULTS.md`).
+## Known gaps, none blocking
 
-## After this is green
+- **`wasEmitted` deadlock.** Nodes that only receive a ref during diffing (the
+  product-count text in the rerender fixture) are gated by `wasEmitted === false`
+  in `diff.ts`, but `markEmitted` only runs when a ref-bearing line renders —
+  which never happens for them. Their changes are suppressed **permanently**,
+  even after a full re-read. It withholds rather than invents, so it cannot
+  cause phantoms, but it is a lasting blind spot.
+- **`isAddressable` drift** between `engine.ts` and `walker.ts` — the engine's
+  list lacks `option`, `banner`, `contentinfo`.
+- **`browser_read`'s `ref` scoping** is accepted and partially honoured; the
+  in-page scoping is not implemented, so it reads the whole document.
 
-1. Task-success benchmark: diff mode vs re-dump mode over a fixed task set,
-   scoring completion **and wrong-element actions**. The second metric is the
-   interesting one.
-2. Shorten the `<untrusted-page-content>` envelope on continuation responses —
-   measured at ~109 tokens against a ~15-token diff payload, so it dominates
-   small observations (`bench/RESULTS.md`).
-3. Vault fill path — unblocked now that the consent dialog exists.
-4. Web Bot Auth, before the 2026-09-15 Cloudflare deadline the README cites.
+## Next, in order
+
+1. **Task-success benchmark** — now genuinely unblocked. Diff mode vs re-dump
+   mode over a fixed task set, scoring completion **and wrong-element actions**.
+   The second metric is the interesting one and the reason to build it.
+2. **Shorten the `<untrusted-page-content>` envelope on continuation responses.**
+   Measured at ~109 tokens against a ~15-token diff payload, so it dominates
+   small observations and caps the small-page ratio at 2.2× (`bench/RESULTS.md`).
+3. **Vault fill path** — unblocked since the consent dialog exists.
+4. **Web Bot Auth**, before the 2026-09-15 Cloudflare deadline the README cites.
+
+## Method that has actually worked here
+
+Six times in one session, something marked "working" was broken the moment it
+was measured end to end: the crash pipeline, the HN snapshot, the UA client
+hints, the benchmark harness twice, and the fidelity ground truth. Every time,
+the unit tests and the assumption agreed with each other, and only the real
+output disagreed.
+
+Instrument and compare against ground truth. Do not reason from the code alone,
+and do not trust a verdict without looking at the numbers behind it.

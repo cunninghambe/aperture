@@ -5,7 +5,7 @@ the one who stays in charge.
 
 > **Status: v0.2, early but real.** The browser runs, the MCP server works, and
 > Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI, tested crypto, and PSL-backed origin binding. 167
+> vault has a working UI, tested crypto, and PSL-backed origin binding. 179
 > tests pass, including regression tests for every finding of the security
 > review. See
 > [Honest status](#honest-status) for what is *not* done — nothing below is
@@ -422,8 +422,8 @@ direction.
 | `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
 | Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** (positional keys can mis-target). See [bench/RESULTS.md](bench/RESULTS.md) |
 | Diff fidelity, static page | **GREEN** (`npm run bench:fidelity`) |
-| Diff fidelity, full re-render | **RED** — 6 phantom refs; do not use agentically on re-rendering pages yet |
-| Task-success benchmark | **Not started** — gated on the RED above |
+| Diff fidelity, full re-render | **GREEN** — the earlier RED was a lossy benchmark, not an engine fault |
+| Task-success benchmark | **Not started** — now genuinely unblocked |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**
