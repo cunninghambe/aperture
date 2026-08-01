@@ -808,3 +808,141 @@ COLLAPSE_RUN divider arithmetic for 16 rows.
 - `--selftest`/fidelity/guards were NOT run in this session (nothing was
   running and the bundle is unbuilt); Gate 2 ran them green at this HEAD, and
   §6 makes them the landing gate.
+
+---
+
+## Amendment A (spec author) — witness settle timing: the short-circuit ladder, APPROVED with two corrections
+
+Builder B implemented §1.3's settle path verbatim and flagged its cost: the
+old one-shot resolved on arrival (~0ms healthy); the specified path always
+waits the full 500ms before its first poll, so every act gains ~500ms —
+roughly an hour over wave 3's ~7,000 acts, which is both money and an hour of
+added wedge-recurrence exposure. B proposed a poll ladder at ~100/250/500ms,
+returning `landed` on the first advance, claiming verdict-identity. This
+amendment is the ruling. It supersedes §1.3's settle text (main side, steps
+3–4) and amends §1.3.2's poll reply shape and §1.6's matrix. Nothing else in
+§1 moves.
+
+### A.1 The verdict-identity claim — verified, and NOT airtight
+
+**Within one document the claim holds**, by monotonicity: the recorder's
+counters only increment, so `advanced(baseline, counts(t))` over a fixed
+relevant set is monotone in t — an advance visible at 100ms or 250ms is
+visible at 500ms, and a trace frozen through 500ms reaches the same 500ms
+poll the unamended path reads. Early rungs can only convert would-be-`landed`
+acts into earlier `landed`; the `lost`/`unknown` partition at 500/2500ms is
+untouched. The coordinator's unrelated-trusted-event case (a human wiggling
+the mouse mid-run) changes nothing: any event that advances a relevant
+counter inside [0, 100ms) also shows at 500ms, so WHICH acts get `landed` is
+identical — the false-landed exposure for a given act is a property of the
+0–2500ms span, not of how often it is sampled. The RELEVANT_COUNTERS sets are
+per-action constants; no set behaves differently at 100ms than at 500ms. Two
+conditions are required for even this half of the claim, and they become
+spec:
+
+1. **Early rungs are advance-only.** An unanswered or unhappy poll at 100ms
+   or 250ms is IGNORED — fall through to the next rung. Only the 500ms and
+   2500ms polls carry `unknown` authority. Without this rule, a
+   flaky-but-recovering IPC channel would turn traces the unamended path
+   scores `landed`-or-`lost` into `unknown`, and the claim would be false on
+   exactly the apparatus-degradation traces G6b cares about.
+2. **`lost` still requires the frozen poll at 500ms AND the frozen re-poll at
+   2500ms** — unchanged, as B proposed.
+
+**Across a document reset the claim is FALSE — and the counterexample exposed
+a real defect in §1.3 as written and as implemented.** The counters are
+per-document: the recorder and its counts die with the document, and a settle
+poll issued after a navigation commits is answered by the NEW document's
+preload with fresh counts. `advanced` compares with strict `>`, so reset
+counts read as frozen. Consequence in the implemented code: an act that
+CAUSES a navigation — a link click, an Enter that submits — whose commit
+beats the 500ms poll returns a false `lost`: the terminal restart-the-browser
+error on the commonest healthy action a real page has. The old one-shot was
+immune only by accident (it resolved at ~0ms, before teardown). The ladder is
+therefore NOT verdict-identical: a click whose navigation commits between
+100ms and 500ms is `landed` under the ladder and `lost` under §1.3 as
+written. That divergence is in the safe direction, which is one more reason
+to approve the ladder — but a fix that merely narrows a false-terminal-error
+window is not a fix, so:
+
+### A.2 Mandatory companion: the document-continuity token
+
+- **Preload (`src/preload/page.ts`):** the recorder generates `docToken` once
+  at init (any per-document random string; `crypto.randomUUID()` if available
+  in the sandboxed preload, else two concatenated `Math.random().toString(36)`
+  slices — uniqueness across two documents in one tab is the whole
+  requirement; it is not security-bearing). Every happy poll reply gains it:
+  `{ ok: true, top, docToken, counts }`. (§1.3.2's reply shape is amended
+  accordingly.)
+- **Main (`src/core/snapshot/act.ts`):** the baseline records `docToken`. Any
+  ANSWERED settle poll — any rung — whose token differs from the baseline's
+  returns `'unknown'` immediately: witness continuity is unrecoverable, a
+  later poll can never re-match, and there is nothing left to wait for. The
+  document changed under the act, which is the opposite of a dead input path.
+- **Why `unknown` and not `landed`:** the token proves the document turned
+  over, not that THIS act's input arrived. `unknown` never fails an act; the
+  observe that follows reports the navigation. Correct and sufficient.
+- **A wedge cannot escape through the token:** a wedged tab's act delivers no
+  input, so nothing navigates; same document, same token, frozen counters —
+  `lost` at 2500ms exactly as before. Residual, stated: a page that
+  self-navigates on a timer during settle yields `unknown` per act, so a
+  wedge on that page class is invisible to W1 — bounded by the bench liveness
+  canary, whose fixture does not navigate. The §1.4 contract gains a sibling
+  line: **a navigating act cannot produce `lost`.**
+
+### A.3 The amended settle text (replaces §1.3 main-side steps 3–4)
+
+`settle()` in recorder mode, all times measured from dispatch:
+
+1. Rung at **100ms**: poll (no key). Answered ∧ token matches ∧ relevant
+   counter advanced → `landed`. Answered ∧ token differs → `unknown`.
+   Unanswered or unhappy → ignore.
+2. Rung at **250ms**: same rules.
+3. Rung at **500ms** — authoritative: unanswered or unhappy → `unknown`;
+   token differs → `unknown`; advanced → `landed`; else continue.
+4. Re-poll at **2500ms** total: unanswered or unhappy → `unknown`; token
+   differs → `unknown`; advanced → `landed`; frozen → `lost`.
+
+Healthy-page cost: ~100ms per act (first rung; arrival is ~0–5ms), restoring
+the §3.5/§7 wall-clock estimate (~12 minutes of witness overhead across the
+wave, not ~an hour). Subframe and unknown modes are untouched by this
+amendment (verified in the working tree: the kept one-shot already maps
+timeout and not-witnessed to `unknown`).
+
+### A.4 Harness-side verification (no 500ms floor dependence)
+
+Checked in Builder A's working tree, read-only: nothing assumes the 500ms
+floor. The proxy's attribution window (`settle(collector, 260, 1500)`) and
+the canary's (`settle(collector, 200, 500)`) anchor on act RETURN and on
+collector quiet, not on witness timing — witness events arrive during the act
+call and are sliced from a pre-call index, so faster acts change nothing (the
+260ms quiet window still clears bench.js's 100ms input debounce).
+`deadActsFrom`/G6b are attribution-based. The preregistered rules condition
+on pooled levels and cost only. The G14 guard asserts reply text and page
+state, not latency. No amendment needed on the bench side; the ladder also
+shortens canary cadence slightly, in the safe direction.
+
+### A.5 Test amendments
+
+- **The 2.5s elapsed test stands as asserted** (`>= 2400ms` before `lost`):
+  the rungs add polls, not delay, on a frozen trace — total is still
+  500 + 2000. Its fake-preload reply queue must grow from three frozen
+  replies to FIVE (baseline + rungs at 100/250 + 500 + 2500), or the fake
+  must repeat its last reply; either is fine, the assertion is not.
+- **New cases, added to the §1.6 matrix:**
+  - 13. advance visible at the 100ms rung → `landed`, elapsed < 400ms (the
+    ladder's reason to exist, pinned so it cannot regress to a fixed wait).
+  - 14. rungs at 100/250 unanswered, 500ms poll advanced → `landed`, not
+    `unknown` (the advance-only rule).
+  - 15. token differs at the 100ms rung → `unknown` immediately, elapsed
+    < 400ms.
+  - 16. token differs at the 500ms poll, counters "frozen" → `unknown`,
+    never `lost` (the navigating-click regression test for A.2).
+  - 17. same token throughout, frozen at every rung and at 2500ms → `lost`
+    (the wedge still errors; A.2 did not soften the true positive).
+- G14 and the live battery are unaffected (suppressor.html does not
+  navigate).
+
+Approved with the above as binding spec; Builder B implements A.2/A.3/A.5.
+The error text's "within 2.5s (checked twice)" sentence remains accurate as
+written.

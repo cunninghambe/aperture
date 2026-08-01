@@ -32,7 +32,7 @@ import {
   untrusted,
 } from './envelope.js';
 import {
-  armInputWitness,
+  RELEVANT_COUNTERS,
   clearField,
   click,
   hover,
@@ -40,6 +40,7 @@ import {
   resolveRef,
   scroll,
   typeText,
+  witnessInput,
 } from '@core/snapshot/act.js';
 import { requestFillConsent } from '@main/consent.js';
 import { attachments } from '@vault/attachments.js';
@@ -114,6 +115,33 @@ browser_snapshot with mode:"full" rather than guessing.
 
 function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
+}
+
+/**
+ * The one place the W1 input-loss error is written.
+ *
+ * The clause **"input was dispatched but never reached the page"** is a
+ * CROSS-REPO CONTRACT, not prose. `bench/lib/proxy.mjs` matches on it to
+ * attribute the finding to the ENGINE (`engine_input_loss`) instead of to the
+ * agent, and `task.mjs`'s G6b quarantine predicate counts it as a dead act.
+ * Reword it and every future scored store silently refiles engine failures as
+ * model errors. docs/design/tier3.md §1.5, and §5's first atomicity seam.
+ *
+ * Everything the sentence claims is something the witness actually knows: the
+ * input was dispatched, no TRUSTED input event reached the page's
+ * document_start recorder across two windows totalling 2.5s, and — because the
+ * recorder is registered before any page script and counts only isTrusted
+ * events — no page behaviour can produce that silence. It does not claim the
+ * whole browser is broken, only this tab's input path.
+ */
+function inputLostError(action: string): string {
+  return (
+    `error: input was dispatched but never reached the page. The ${action} ` +
+    'was sent and no trusted input event was observed in the page within 2.5s ' +
+    '(checked twice). Aperture\'s input path to this tab is not working — ' +
+    'retrying will not take effect. The page was not changed by this call. ' +
+    'Tell the human; this needs the browser restarted.'
+  );
 }
 
 /**
@@ -527,8 +555,9 @@ export function registerBrowserTools(
         'typically 40-150 tokens rather than a full re-read. That is the whole ' +
         'point: do not call browser_snapshot after every action. ' +
         'A diff is complete: anything it does not mention is unchanged. ' +
-        '(Scroll positions and pixel layout are not tracked; everything ' +
-        'rendered — text, values, labels, states, links, table content — is.) ' +
+        '(Scroll positions, pixel layout and heading weight are not tracked; ' +
+        'everything rendered — text, values, labels, states, links, table ' +
+        'content — is.) ' +
         'Suppressed live-region churn and unread regions are called out ' +
         'explicitly when they exist. If an action reports "unchanged", that ' +
         'is a finding — the action had no visible effect — not a failure to ' +
@@ -614,15 +643,32 @@ export function registerBrowserTools(
 
       // Actions that do not target an element.
       if (action === 'scroll' || action === 'key') {
+        // Refusals that dispatch nothing settle first, before any witness
+        // traffic — the same ordering rule the element branch follows.
+        if (action === 'key' && !key) return text('error: key required');
+
+        // W1 covers scroll and key as of tier3 §1.3, closing the Gate-2 open
+        // item. Wave 2's wedge acknowledged scroll acts as freely as clicks
+        // (`queue-positional` run13), and an untargeted act is exactly as
+        // capable of going nowhere as a targeted one. No `key` goes to the
+        // poll: there is no element, and the recorder speaks for the whole top
+        // document, which is what `top: true` means here.
+        const witness = await witnessInput(wc, null, RELEVANT_COUNTERS[action]);
+
         if (action === 'scroll') await scroll(wc, 400, 400, deltaY ?? 600);
         else {
-          if (!key) return text('error: key required');
           try {
-            await pressKey(wc, key);
+            await pressKey(wc, key as string);
           } catch (e) {
+            // Unsupported key name: nothing was dispatched, so there is
+            // nothing to settle. The baseline poll is a pure read and leaves
+            // no listener behind, so dropping the witness here leaks nothing.
             return text(`error: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
+
+        if ((await witness.settle()) === 'lost') return text(inputLostError(action));
+
         const { text: obs } = await observe(id, wc, {
           afterAction: true,
           full: wantFull,
@@ -829,11 +875,12 @@ export function registerBrowserTools(
       // loaded, and the input path was dead. Nothing in the stack could tell
       // "the click did nothing" from "the click never happened", so the agent
       // was told the first when the truth was the second.
-      const witness = await armInputWitness(
-        wc,
-        key2,
-        action === 'hover' ? ['mousemove'] : ['mousedown'],
-      );
+      //
+      // The relevant counter set is per-action and any-of: a `click` is
+      // witnessed by pointerdown OR mousedown OR mouseup OR click, because a
+      // page that cancels one of them has not stopped the others from being
+      // delivered, and the question here is delivery.
+      const witness = await witnessInput(wc, key2, RELEVANT_COUNTERS[action]);
 
       switch (action) {
         case 'click':
@@ -858,20 +905,12 @@ export function registerBrowserTools(
         }
       }
 
-      // Only an armed-and-silent witness fails the act. A witness that could
-      // not be armed returns `unknown` and changes nothing — and a click that
-      // reached a dead button still returns `ok`, because "the action caused
-      // no visible change" is a finding about the PAGE and must not be
-      // recoloured as an engine failure.
-      if ((await witness.settle()) === 'lost') {
-        return text(
-          `error: input was dispatched but never reached the page. The ${action} ` +
-            `on ${ref} was sent and no matching event arrived in the page, so ` +
-            'Aperture\'s input path to this tab is not working — retrying this or ' +
-            'any other action here will not take effect either. The page was not ' +
-            'changed by this call. Tell the human; this needs the browser restarted.',
-        );
-      }
+      // Only a LIVE recorder covering the top document, silent across both
+      // windows, fails the act. A witness that could not speak returns
+      // `unknown` and changes nothing — and a click that reached a dead button
+      // still returns `ok`, because "the action caused no visible change" is a
+      // finding about the PAGE and must not be recoloured as an engine failure.
+      if ((await witness.settle()) === 'lost') return text(inputLostError(action));
 
       const { text: obs } = await observe(id, wc, {
         afterAction: true,

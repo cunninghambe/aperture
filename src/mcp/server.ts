@@ -1,5 +1,6 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { app } from 'electron';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import {
   toNodeHandler,
@@ -62,6 +63,35 @@ export async function startMcpServer(
     if (auth !== `Bearer ${token}`) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    // GET /metrics — process metadata, behind the same bearer, same loopback
+    // bind, after the same rebinding checks. Deliberately BELOW the auth gate:
+    // pid and per-process memory are not secrets, but they are also not for
+    // any page that talks its way onto this port.
+    //
+    // WHY IT SHIPS IN THE PRODUCT AND NOT ONLY IN THE BENCH. Wave 2's input
+    // path wedged for forty minutes and the root cause is permanently
+    // undecidable because nothing recorded what the process tree was doing —
+    // the leading hypothesis, a GPU process crash and relaunch, would have
+    // been a single pid change in this reply. It costs nothing when nobody
+    // polls it, it is read-only, and the next wedge may happen under a human's
+    // use rather than the bench's. docs/design/tier3.md §2.2.
+    //
+    // No page data crosses this endpoint: `getAppMetrics` returns Electron's
+    // own per-process array (type, pid, cpu, memory) and nothing else. The
+    // array is passed through verbatim so a consumer reading only the fields
+    // it knows keeps working when Electron adds one.
+    if (req.method === 'GET' && (req.url ?? '').split('?')[0] === '/metrics') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          pid: process.pid,
+          uptimeS: Math.round(process.uptime()),
+          metrics: app.getAppMetrics(),
+        }),
+      );
       return;
     }
 

@@ -120,7 +120,39 @@ Two named residuals, stated rather than papered over:
   numbers are as audited 2026-07-31 and drift with the file. The dispatch
   witness added 2026-08-01 — `aperture:witness`, W1 — holds the discipline the
   audit asked for: its two reasons are the fixed literals `gone` and
-  `not-witnessed`, and it catches nothing it could interpolate.)
+  `not-witnessed`, and it catches nothing it could interpolate. Its tier3
+  successor `aperture:witness-poll` holds it too — `gone` and `poll-failed`,
+  both literals — and an unhappy poll produces the silent `unknown` verdict, so
+  none of its reasons reach agent-facing prose at all.)
+
+## `GET /metrics`: an authenticated read-only endpoint (2026-08-02)
+
+`src/mcp/server.ts` serves one non-MCP route beside the MCP handler:
+
+```
+GET /metrics  ->  { pid, uptimeS, metrics: [ { type, pid, cpu, memory }, … ] }
+```
+
+It sits on the same loopback-bound HTTP server, behind the same per-launch
+bearer token, after the same Host and Origin validation — the DNS-rebinding
+defence above covers it unchanged, and a page that resolves its own domain to
+127.0.0.1 still cannot reach it without the token.
+
+**No page data crosses it.** The body is `process.pid`, process uptime, and
+Electron's own `app.getAppMetrics()` array verbatim: per-process type, pid, cpu
+and memory for Aperture's own process tree. There is no tab, no URL, no title,
+no DOM, and nothing user-authored. The disclosure to a caller that already holds
+the bearer token is process metadata about a browser it is already driving.
+
+**Why it ships in the product rather than living in the bench.** Wave 2's input
+path wedged for forty minutes and the root cause is permanently undecidable
+because nothing recorded what the process tree was doing; the leading
+hypothesis — a GPU process crash and relaunch — would have shown up as a single
+pid change in this reply. It costs nothing when nobody polls it, and the next
+wedge may happen under a human's use rather than the bench's
+(docs/design/tier3.md §2.2). The counterpart, wrapping the product to capture
+its own child logs, is ruled OUT: the product IS the child, and a self-capture
+wrapper is its own project.
 
 ## Finding: a link's href could change under a stable label with no report (2026-08-01)
 

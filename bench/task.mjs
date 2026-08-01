@@ -40,19 +40,29 @@
  *   but it means a single episode is noise and only the pooled CIs are evidence.
  * - The model is Sonnet, not Opus, and that is a SENSITIVITY choice: if the
  *   model scores ~100% in both arms the suite cannot detect a bookkeeping
- *   penalty even if one exists. G10 refuses to call that PARITY.
+ *   penalty even if one exists. G10 refuses to call that a PASS.
  * - `browser_read` is withheld. innerText re-reads would let the agent route
  *   around diff bookkeeping and dilute the variable under test.
  *
  * RUNNING IT IN PHASES
  *
- * 280 episodes is hours, not minutes, so the suite is resumable. Every scored
+ * 290 episodes is hours, not minutes, so the suite is resumable. Every scored
  * episode is appended to `bench/task/results/episodes.jsonl` as it completes,
  * keyed by (task, arm, runIndex, codeVersion, model); a later invocation skips
  * every combination already on record and runs only what is missing. The
  * verdict is computed over the WHOLE accumulated store, not over one phase —
  * five partial runs that each score their own rows give five underpowered
  * verdicts and no result.
+ *
+ * PER-TASK QUOTAS AND THE TWO STRATA (wave 3, docs/design/tier3.md §3.2-3.3)
+ *
+ * `--n` is a PHASE CAP, not a target: each task stops accruing at its own
+ * `quota`, so the three discriminative tasks run to 45/arm while the two
+ * canaries stop at 5/arm however large `--n` gets. The report partitions on
+ * `stratum`: verdict arithmetic over the discriminative stratum only, apparatus
+ * guards over every scored row, canaries in no interval anywhere. Wave 2 pooled
+ * 210 ceilinged episodes with 35 informative ones and diluted the only signal
+ * it had; that is the failure this partition exists to make impossible.
  *
  * That is only sound if the thing under test did not change between phases, so
  * every episode is stamped with a content hash of the product source, the built
@@ -66,26 +76,26 @@
  *   npm run bench:task -- --selftest          G1+G2 only. Spends NO API budget.
  *   npm run bench:task -- --tasks a,b --n 2   a small scored pilot
  *   npm run bench:task -- --n 5               phase 1: 5 runs of every task
- *   npm run bench:task -- --n 20              phase 2: only the missing 15
+ *   npm run bench:task -- --n 45              the last phase: only what is missing
  *   npm run bench:task -- --report            score the store, run nothing
  *   npm run bench:task -- --new-cohort --n 5  archive the store, start again
  *
  * EXIT CODES — nonzero must never be read as "roughly green"
- *   0 PARITY · 1 REGRESSION · 2 INCONCLUSIVE · 3 INFRA · 4 VACUOUS · 5 SELFTEST
+ *   0 PASS · 1 REGRESSION · 2 INCONCLUSIVE · 3 INFRA · 4 VACUOUS · 5 SELFTEST
  *   6 INTEGRITY — the store holds episodes from a different experiment
  */
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-import { TASKS, FIXTURES, taskById } from './tasks.mjs';
+import { TASKS, FIXTURES, QUOTA_TOTAL, taskById } from './tasks.mjs';
 import { startCollector, settle, COLLECTOR_PORT } from './lib/collector.mjs';
 import { startProxy, PROXY_PORT, ARM_DEFINITION } from './lib/proxy.mjs';
+import { APERTURE_PORT, killTree, portIsOpen, runStamp, startAperture } from './lib/aperture.mjs';
 import { propDiffCI, meanDiffCI, mean, wilson, smallestDetectableDrop, fmtPct, fmtSigned } from './lib/stats.mjs';
 import {
   SUITE_VERSION,
@@ -105,11 +115,14 @@ import {
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const FIXTURE_DIR = join(ROOT, 'bench', 'fixtures');
 const FIXTURE_PORT = 8899;
-const APERTURE_PORT = 8817;
 const BASE = `http://127.0.0.1:${FIXTURE_PORT}`;
 
 export const EXIT = {
-  PARITY: 0,
+  // Renamed from PARITY for wave 3 (tier3.md §3.3.5). Exit-0 semantics are
+  // unchanged; the WORD is retired, because wave 2's -5pp "parity" rule was
+  // unreachable at any affordable N on an off-ceiling suite and cleared only
+  // by 0.25pp after a post-hoc quarantine. No wave-3 output prints it.
+  PASS: 0,
   REGRESSION: 1,
   INCONCLUSIVE: 2,
   INFRA: 3,
@@ -118,46 +131,62 @@ export const EXIT = {
   INTEGRITY: 6,
 };
 
-// The verdict rule, written down before the first scored run and not touched
-// since. Both must hold for PARITY.
-const PARITY_SUCCESS_MARGIN = -0.05; // success-delta CI lower bound >= this
-const PARITY_WRONG_MARGIN = 0.2; // wrong-element-delta CI upper bound <= this
-const N_FLOOR = 5;
-const N_PREREGISTERED = 20; // per task, per arm
-
 /**
- * The BOUNDED SECONDARY OUTCOME, preregistered for wave 2 — see
- * WAVE2_PREREGISTRATION below for why it exists and why it is -10pp and not
- * some number chosen after looking at the data.
+ * THE WAVE-3 VERDICT RULE, frozen before any wave-3 episode (tier3.md §3.4).
+ *
+ * `successBound` is the PRIMARY and the only success bound there is: -10pp,
+ * chosen for REACHABILITY at the quota (135 discriminative episodes per arm, a
+ * CI half-width of ~8.5pp at 85% pooled success) and stated as such rather
+ * than discovered afterwards. `wrongBound` replaces wave 2's pooled +0.2/run,
+ * which wave2-evaluation §4.2 retired with its arithmetic.
+ * `perTaskWrongTrip` is the mirror of wave 2's dilution lesson applied to the
+ * metric where one task can hide inside a pool of three. `stratumFloorPerArm`
+ * is G8, restated for the stratum.
  */
-const SECONDARY_SUCCESS_BOUND = -0.1;
+const SUCCESS_BOUND = -0.1; // stratum success-delta CI lower bound >= this
+const WRONG_BOUND = 0.4; // stratum wrong-element-delta CI upper bound <= this
+const PER_TASK_WRONG_TRIP = 1.0; // any discriminative task's own CI lower > this BLOCKS pass
+const STRATUM_FLOOR = 30; // per arm, discriminative stratum
 
-// The interim rule's thresholds. They condition ONLY on pooled success levels,
-// never on the delta between the arms — that is what keeps the peek legitimate.
+// The interim rule's thresholds (§3.4). They condition ONLY on pooled levels
+// and cost, never on the delta between the arms — that is what keeps the peek
+// legitimate.
 const INTERIM_PILOT_N = 5;
 const INTERIM_CEILING = 0.98;
-const INTERIM_REDUMP_FLOOR = 0.7;
+const INTERIM_REDUMP_FLOOR = 0.6;
+const INTERIM_COST_TRIM = 0.35; // $/discriminative episode above which later phases run --n 35
+const CANARY_GATE = 0.8; // a canary task-arm below 4/5 is an INFRA-grade stop
 
 /**
  * Stamped onto every episode and compared on resume. The thresholds are the
  * verdict; an episode scored under different ones is not poolable with these,
  * and this is the field that says so out loud.
- *
- * `secondaryBound` rides along for the same reason the margins do: it licenses
- * a sentence, so an episode scored without it on record is not evidence for
- * that sentence. Recording it here is what makes "preregistered" checkable
- * rather than asserted.
  */
 const VERDICT_RULE = {
-  successMargin: PARITY_SUCCESS_MARGIN,
-  wrongMargin: PARITY_WRONG_MARGIN,
-  nFloor: N_FLOOR,
-  secondaryBound: SECONDARY_SUCCESS_BOUND,
+  successBound: SUCCESS_BOUND,
+  wrongBound: WRONG_BOUND,
+  perTaskWrongTrip: PER_TASK_WRONG_TRIP,
+  stratumFloorPerArm: STRATUM_FLOOR,
 };
 
+/** Stratum lookup by task id. Unknown ids cannot survive the integrity guard. */
+const stratumOf = (taskId) =>
+  TASKS.find((t) => t.id === taskId)?.stratum ?? 'discriminative';
+const isDiscriminative = (r) => stratumOf(r.task) === 'discriminative';
+const isCanary = (r) => stratumOf(r.task) === 'canary';
+
 /**
- * WAVE-2 PREREGISTRATION — written before a single wave-2 episode was run, and
- * before the fixtures it describes had ever been driven by a language model.
+ * WAVE-2 PREREGISTRATION — ARCHIVED. Kept in the file, no longer printed.
+ *
+ * It is the record of what wave 2 committed to before its first episode, and
+ * `bench/RESULTS.md` cites it, so deleting it would delete the provenance of a
+ * scored cohort. Its numbers are frozen as literal text: a preregistration
+ * that moves when a constant moves is not a preregistration.
+ * WAVE3_PREREGISTRATION below is what this invocation prints.
+ *
+ * ---------------------------------------------------------------------------
+ * Written before a single wave-2 episode was run, and before the fixtures it
+ * describes had ever been driven by a language model.
  *
  * Wave 1 (ten tasks, N=5, 100 episodes) exited INCONCLUSIVE on G10: both arms
  * scored 50/50 on every task with zero wrong-element actions. This is the
@@ -185,7 +214,7 @@ export const WAVE2_PREREGISTRATION = {
     'inbox-archive', 'wizard-submit', 'leaderboard-max',
     'queue-positional', 'vault-code', 'catalog-revive', 'ledger-balance',
   ],
-  n: N_PREREGISTERED, // per task, per arm — 140/arm, 280 episodes
+  n: 20, // per task, per arm — 140/arm, 280 episodes
   model: 'claude-sonnet-5',
   armsAndForcing: 'unchanged from wave 1 (ARM_DEFINITION in bench/lib/proxy.mjs)',
   guards: 'G1-G11 unchanged, G10 (ceiling) unchanged',
@@ -197,9 +226,9 @@ export const WAVE2_PREREGISTRATION = {
     'bookkeeping-hard suite with claude-sonnet-5, no diff-bookkeeping penalty larger ' +
     'than 10pp was found." Nothing stronger, and no exit code changes.',
   interimRule:
-    `After the --n ${INTERIM_PILOT_N} wave, conditioning ONLY on pooled success levels and blind ` +
-    `to the arm delta: both arms >= ${Math.round(INTERIM_CEILING * 100)}% -> stop and invoke the Haiku ` +
-    `sensitivity contingency; re-dump arm < ${Math.round(INTERIM_REDUMP_FLOOR * 100)}% -> the tasks are too hard or ` +
+    'After the --n 5 wave, conditioning ONLY on pooled success levels and blind ' +
+    'to the arm delta: both arms >= 98% -> stop and invoke the Haiku ' +
+    'sensitivity contingency; re-dump arm < 70% -> the tasks are too hard or ' +
     'broken, fix them and --new-cohort; otherwise continue to N=20 and pool.',
   haikuContingency:
     'Same 7 tasks, --model claude-haiku-4-5, into its own store ' +
@@ -209,38 +238,110 @@ export const WAVE2_PREREGISTRATION = {
   estimatedCost: '280 episodes ~ $32 at wave-1 rates (the pilot wave ~ $8)',
 };
 
+/**
+ * WAVE-3 PREREGISTRATION — frozen before any wave-3 episode is run, and
+ * mechanically un-editable once the pilot has run: every field below is inside
+ * `bench/task.mjs`, which is inside `codeVersion`, so touching it severs the
+ * cohort and the integrity guard refuses to pool (exit 6). That is the point.
+ *
+ * The rules are tier3.md §3.4 verbatim. What is new relative to wave 2, and
+ * printed with every verdict, is in `marginProvenance`.
+ */
+export const WAVE3_PREREGISTRATION = {
+  tasks: TASKS.map((t) => `${t.id} [${t.stratum}, quota ${t.quota}]`),
+  design:
+    'per-task quotas, not a uniform N: 3 discriminative tasks x 45/arm = 135/arm, ' +
+    '2 canaries x 5/arm. 290 episodes total. --n is a phase cap.',
+  model: 'claude-sonnet-5',
+  armsAndForcing: 'unchanged (ARM_DEFINITION in bench/lib/proxy.mjs)',
+  guards: 'G1-G14 (G14 is the live suppressor guard; its pre-fix RED is in docs/design/g14-red-record.md)',
+  strata:
+    'Verdict arithmetic (success CI, wrong-el CI, G4, G7, G10, MDE, interim rule) runs over ' +
+    'the DISCRIMINATIVE stratum ONLY. Apparatus guards (G3, G5, G6, G6b, G9, G11) run over ' +
+    'ALL scored rows. Canaries enter no CI anywhere and license only "the apparatus and ' +
+    'easy-task floor held".',
+  primary:
+    'PASS iff the stratum success-delta CI lower >= -10pp AND the wrong-element co-primary ' +
+    'holds. REGRESSION iff CI upper < -10pp OR wrong-el CI lower > +0.40/run. Otherwise ' +
+    'INCONCLUSIVE. There is no secondary: the primary IS the bounded outcome.',
+  coPrimary:
+    'wrong-element, stratum-pooled, bootstrap 95% CI: holds iff CI upper <= +0.40/run. ' +
+    'PER-TASK TRIPWIRE: any discriminative task whose own wrong-el delta CI lower > +1.0/run ' +
+    'BLOCKS PASS (INCONCLUSIVE, task named), whatever the pooled CI says.',
+  floors: `G8: ${STRATUM_FLOOR}/arm stratum episodes. G10: ceiling on STRATUM rates only.`,
+  interimRule:
+    'After --n 5 (~50 episodes), conditioning ONLY on pooled levels and cost, never on the ' +
+    'arm delta: both arms >= 98% over the discriminative stratum -> STOP, the suite failed to ' +
+    'leave the ceiling; re-dump stratum < 60% -> STOP, tasks too hard or broken, fix and ' +
+    '--new-cohort; mean cost per discriminative episode > $0.35 -> remaining phases run --n 35; ' +
+    'any canary task-arm below 4/5 -> INFRA-grade stop; otherwise continue.',
+  ceilingCheckpoint:
+    'After --n 10: any DISCRIMINATIVE task at 10/10 in BOTH arms is ceilinged and excluded ' +
+    'from later phases via --tasks. Its episodes STAY in the pool — no post-hoc exclusion; ' +
+    'the preregistered sensitivity line is where the no-ceiling reading lives. Freed budget ' +
+    'is savings, not reallocation: raising a quota mid-cohort would move codeVersion and ' +
+    'sever the store, so reallocation is impossible BY CONSTRUCTION.',
+  budget:
+    '$65-75 estimated, $85 HARD CAP (~270 discriminative episodes at the measured $0.241/ep ' +
+    'queue-class rate, plus ~$2.50 of canaries), ~4-6h wall clock, ~$11 of it the pilot. If ' +
+    'the cap trips before quotas complete, stop and score the store as-is — the stop ' +
+    'conditions on cost, not on the delta.',
+  marginProvenance: [
+    'The -10pp bound is the PRIMARY for wave 3, and it is the same number wave 2 carried as',
+    'a SECONDARY. Nothing was loosened after seeing wave-3 data — there is no wave-3 data yet',
+    'as this is printed, and this file cannot be edited once the pilot has run without',
+    'severing the cohort.',
+    'The wave-2 -5pp / "parity" vocabulary is RETIRED: unreachable at any affordable n on',
+    'off-ceiling tasks, and wave 2 cleared it by 0.25pp only via a post-hoc quarantine. No',
+    'wave-3 output prints the word.',
+    'The +0.4/run wrong-element bound replaces the pooled +0.2/run, retired with the',
+    "arithmetic in wave2-evaluation.md §4.2 (a bound set against a 7-task pool that was",
+    'two-thirds ceiling is not a bound on a 3-task discriminative stratum).',
+    'Power, in advance: at full quotas the stratum is 135/arm; at ~85% pooled success the CI',
+    'half-width is ~8.5pp, so PASS has ~1.5pp of headroom if the true delta is ~0. At ~75% it',
+    'is ~9.8pp and PASS is knife-edge. Accepted, and a thin PASS is reported as thin.',
+  ],
+};
+
 function printPreregistration() {
-  const p = WAVE2_PREREGISTRATION;
+  const p = WAVE3_PREREGISTRATION;
+  const wrap = (label, text, width = 84) => {
+    const words = text.split(' ');
+    let line = '';
+    const out = [];
+    for (const w of words) {
+      if ((line + ' ' + w).trim().length > width) {
+        out.push(line.trim());
+        line = w;
+      } else line += ' ' + w;
+    }
+    if (line.trim()) out.push(line.trim());
+    out.forEach((l, i) => console.log(`  ${(i === 0 ? label : '').padEnd(10)}${i === 0 ? ': ' : '  '}${l}`));
+  };
+
   console.log('='.repeat(72));
-  console.log('WAVE-2 PREREGISTRATION — fixed before any wave-2 episode was run');
+  console.log('WAVE-3 PREREGISTRATION — fixed before any wave-3 episode was run');
   console.log('='.repeat(72));
-  console.log(`  tasks     : ${p.tasks.join(', ')}`);
-  console.log(`  design    : N=${p.n}/task/arm (${p.tasks.length * p.n}/arm), model ${p.model}`);
+  console.log('  tasks     :');
+  for (const t of p.tasks) console.log(`      ${t}`);
+  wrap('design', p.design);
+  console.log(`  model     : ${p.model}`);
   console.log(`  arms      : ${p.armsAndForcing}`);
   console.log(`  guards    : ${p.guards}`);
-  console.log(`  primary   : ${p.primary}`);
-  console.log('  secondary : bounded outcome at -10pp. At 140/arm and ~85% success the CI');
-  console.log('              half-width is ~8.4pp, so the -5pp PARITY rule requires observing');
-  console.log('              the diff arm AHEAD by >= +3.4pp — probability ~0.2 under true');
-  console.log('              parity. The primary is retained but is underpowered by');
-  console.log('              construction; the secondary exists so a true null has a');
-  console.log('              reachable, honestly-worded statement. No verdict, no exit code.');
-  console.log(`  interim   : ${p.interimRule}`);
+  wrap('strata', p.strata);
+  wrap('primary', p.primary);
+  wrap('co-primary', p.coPrimary);
+  console.log(`  floors    : ${p.floors}`);
+  wrap('interim', p.interimRule);
+  wrap('ceiling', p.ceilingCheckpoint);
+  wrap('budget', p.budget);
   console.log('');
-  // Printed with EVERY wave-2 verdict, whatever the outcome. A margin added
-  // after a failed run has to be visible to the reader, not buried in a design
-  // doc — otherwise the only people who know the rule moved are the people who
-  // moved it.
-  console.log('  MARGIN PROVENANCE (printed with every wave-2 verdict, always):');
-  console.log('    The -10pp secondary was added 2026-08-01, after wave 1 returned');
-  console.log('    INCONCLUSIVE and BEFORE any wave-2 episode was run. The primary -5pp');
-  console.log('    PARITY rule is unchanged from tier1.md 3 and is reported FIRST, always.');
-  console.log('    The secondary was chosen above the ~8.4pp MDE at 140/arm — i.e. chosen');
-  console.log('    for reachability, and that is stated rather than hidden. A');
-  console.log('    secondary-only result licenses exactly: "On this 7-task');
-  console.log('    bookkeeping-hard suite with claude-sonnet-5, no diff-bookkeeping');
-  console.log('    penalty larger than 10pp was found" — and NEVER the word "parity".');
-  console.log("    Wave 1's INCONCLUSIVE stands as recorded in the archived store.");
+  // Printed with EVERY wave-3 verdict, whatever the outcome. A margin that
+  // moved has to be visible to the reader, not buried in a design doc —
+  // otherwise the only people who know the rule moved are the people who moved
+  // it.
+  console.log('  MARGIN PROVENANCE (printed with every wave-3 verdict, always):');
+  for (const l of p.marginProvenance) console.log(`    ${l}`);
   console.log('');
 }
 
@@ -275,7 +376,9 @@ const SYSTEM_PROMPT = [
 
 function parseArgs(argv) {
   const out = {
-    selftest: false, n: N_PREREGISTERED, tasks: null, arms: ['diff', 'redump'],
+    // The default phase cap is the largest quota; every task still stops at
+    // its own. `--n` below that runs a smaller wave of everything.
+    selftest: false, n: Math.max(...WAVES), tasks: null, arms: ['diff', 'redump'],
     model: 'claude-sonnet-5', keepAlive: false, verbose: false,
     report: false, plan: false, newCohort: false, store: null,
   };
@@ -349,110 +452,52 @@ async function startFixtureServer() {
   return { close: () => new Promise((r) => server.close(() => r())) };
 }
 
-async function portIsOpen(port) {
-  try {
-    await fetch(`http://127.0.0.1:${port}/`, { method: 'GET', signal: AbortSignal.timeout(700) });
-    return true;
-  } catch (e) {
-    // A refused connection is "closed"; anything else (a 401, a 404, a reset
-    // mid-response) means something IS listening.
-    return !/ECONNREFUSED|refused/i.test(String(e?.cause?.code ?? e?.message ?? ''));
-  }
-}
+// `startAperture`, `killTree`, `portIsOpen` and the token helpers now live in
+// bench/lib/aperture.mjs — the extraction that gave the child a PERSISTENT LOG
+// (tier3.md §2.1). The wave-2 wedge's root cause is undecidable because that
+// output was held in a string and thrown away.
 
-function readApertureToken() {
-  const p = join(process.env.APPDATA ?? '', 'aperture', 'mcp.json');
-  if (!existsSync(p)) return null;
-  try {
-    const cfg = JSON.parse(readFileSync(p, 'utf8'));
-    const auth = cfg?.mcpServers?.aperture?.headers?.Authorization ?? '';
-    return auth.replace(/^Bearer /, '') || null;
-  } catch {
-    return null;
-  }
-}
+// ---------------------------------------------------------------------------
+// The apparatus sampler (tier3.md §2.2)
+// ---------------------------------------------------------------------------
 
-async function tokenWorks(token) {
-  try {
-    const res = await fetch(`http://127.0.0.1:${APERTURE_PORT}/mcp`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/event-stream',
-      },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
-      signal: AbortSignal.timeout(2000),
-    });
-    const body = await res.text();
-    return body.includes('browser_act');
-  } catch {
-    return false;
-  }
-}
-
-async function startAperture() {
-  if (!existsSync(join(ROOT, 'out', 'main', 'index.js'))) {
-    throw new Error('out/main/index.js is missing — run `npx electron-vite build` first');
-  }
-  const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['electron', '.'], {
-    cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: process.platform === 'win32',
-  });
-  let log = '';
-  child.stdout.on('data', (d) => (log += d));
-  child.stderr.on('data', (d) => (log += d));
-
-  const deadline = Date.now() + 60000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const token = readApertureToken();
-    if (token && (await tokenWorks(token))) return { child, token, log: () => log };
-  }
-  throw new Error(`Aperture did not come up on ${APERTURE_PORT} within 60s.\n${log.slice(-2000)}`);
+/**
+ * Pull the two fields §2.2 names out of a `GET /metrics` reply, and NOTHING
+ * else.
+ *
+ * ATOMICITY SEAM 2: Builder B serves `{pid, uptimeS, metrics: [...]}` with the
+ * Electron `getAppMetrics()` array verbatim; this reads only `metrics[].type`
+ * and the array's length. Extra fields — now or later, top level or per
+ * process — are tolerated by construction, because nothing here enumerates the
+ * shape.
+ */
+export function metricsStamp(json) {
+  const procs = Array.isArray(json?.metrics) ? json.metrics : null;
+  if (!procs) return { gpuPid: 'poll-failed', procs: 0 };
+  const gpu = procs.find((p) => p?.type === 'GPU');
+  return { gpuPid: gpu?.pid ?? null, procs: procs.length };
 }
 
 /**
- * Kill the Aperture this run started, and do not return until it is gone.
+ * One localhost GET, ~ms, immediately after each pre-episode canary.
  *
- * The await is load-bearing and was measured, not assumed. This used to fire
- * `taskkill` and return immediately, and `main()` then called `process.exit()`
- * before the kill had landed — so a completed run routinely left an Aperture
- * holding 8817 and the NEXT invocation died on the port check with exit 3.
- * Survivable when the suite was run once; not survivable when the whole point
- * is running it in five phases back to back.
+ * A GPU-process crash-and-relaunch shows up as a CHANGED gpu pid between two
+ * consecutive episodes, which is the leading hypothesis for the wave-2 wedge
+ * and the one thing the store could not answer afterwards. Sampling failure is
+ * RECORDED and never blocks an episode: the canary is the gate, this is the
+ * flight recorder.
  */
-async function killTree(child) {
-  if (!child || child.exitCode !== null) return;
-  await new Promise((done) => {
-    try {
-      if (process.platform !== 'win32') {
-        child.kill('SIGTERM');
-        done();
-        return;
-      }
-      // The child is the npx shell wrapper; /T is what reaches Electron under it.
-      const t = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-      t.on('exit', done);
-      t.on('error', done);
-      setTimeout(done, 10000).unref();
-    } catch {
-      done();
-    }
-  });
-  // Verified against the port rather than against the exit code of taskkill: a
-  // successful taskkill on a wrapper that has already lost track of its child
-  // reports success and leaves the listener up.
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    if (!(await portIsOpen(APERTURE_PORT))) return;
-    await new Promise((r) => setTimeout(r, 400));
+export async function sampleMetrics(token, url = `http://127.0.0.1:${APERTURE_PORT}/metrics`) {
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true, json: await res.json() };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
   }
-  console.log(
-    `\nWARNING: Aperture is STILL listening on ${APERTURE_PORT} after the teardown. The next\n` +
-      '         phase will refuse to start. Run: taskkill //F //IM electron.exe',
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -521,23 +566,42 @@ function resolveLabel(model, step) {
 // ---------------------------------------------------------------------------
 
 /**
- * Acknowledged element actions the witness never saw.
+ * Acknowledged element actions that went nowhere — BOTH signals, and their
+ * eras (tier3.md §1.5, §4.2).
  *
- * Scroll, hover and key are excluded, and that exclusion is measured rather
- * than assumed: across wave 2's 245 clean episodes the number of
- * `click`/`type`/`clear` acts attributed `no_page_effect` is ZERO, while the
- * single clean `no_page_effect` of any kind is a `scroll` in
- * `queue-positional redump run13`. Scroll, hover and key legitimately produce no
- * witness event, which is why the raw `no_page_effect` RATE is the wrong
- * predicate and this one is right.
+ *   `no_page_effect`     PRE-W1 STORES: the act was acknowledged `ok`, and the
+ *                        fixture's own witness never saw it. Retrospective by
+ *                        construction — it can only be seen after the fact.
+ *   `engine_input_loss`  W1-ERA STORES: the engine itself reported that input
+ *                        was dispatched and never arrived (the §1.5 error
+ *                        clause, classified in bench/lib/proxy.mjs).
+ *
+ * They are the same physical event — input that went nowhere — seen from two
+ * sides, so counting both is what makes the G6b predicate a LIVE FORWARD GUARD
+ * again rather than the retrospective one Gate 2 flagged: post-W1 a wedged act
+ * announces itself in the reply, in the turn it happens.
+ *
+ * Scroll, hover and key are excluded from the element-action list, and that
+ * exclusion is measured rather than assumed: across wave 2's 245 clean
+ * episodes the number of `click`/`type`/`clear` acts attributed
+ * `no_page_effect` is ZERO, while the single clean `no_page_effect` of any kind
+ * is a `scroll` in `queue-positional redump run13`. Scroll, hover and key
+ * legitimately produce no witness event, which is why the raw `no_page_effect`
+ * RATE is the wrong predicate and this one is right. (W1 now witnesses scroll
+ * and key too, but through `engine_input_loss`, which is an ENGINE report and
+ * carries no such ambiguity — so the action filter stays as it is.)
  *
  * Recomputable from `acts` alone, so it applies to stores recorded before the
  * `apparatus` stamp existed — including wave 2's, where it fires on exactly the
- * six wedged episodes and on nothing else.
+ * six wedged episodes and on nothing else. The wave-2 store contains no
+ * `engine_input_loss` string, so this extension is a no-op there; that is
+ * verified by running the recompute, not by this sentence.
  */
 export function deadActsFrom(acts) {
   return (acts ?? []).filter(
-    (a) => ['click', 'type', 'clear'].includes(a.action) && a.attribution === 'no_page_effect',
+    (a) =>
+      ['click', 'type', 'clear'].includes(a.action) &&
+      (a.attribution === 'no_page_effect' || a.attribution === 'engine_input_loss'),
   ).length;
 }
 
@@ -907,8 +971,12 @@ async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
         // That is precisely the shape of failure this project keeps hitting:
         // the unit tests and the assumption agree, and only the real output
         // disagrees.
+        // Two arguments since wave 3: the stream, and the episode record.
+        // `queue-resync`'s claim — that the forced restatement actually
+        // engaged mid-episode — is about `obsSeq`, which is not in the bytes.
+        // Single-argument asserts ignore the second and are unaffected.
         if (task.streamAssert) {
-          const why = task.streamAssert(r.diffStream);
+          const why = task.streamAssert(r.diffStream, r);
           if (why) {
             problems.push(
               `${task.id}: streamAssert FAILED — ${why}\n` +
@@ -925,7 +993,7 @@ async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
       // G3 and G7, run here rather than only after the scored run. Arm purity
       // is checkable for FREE with the scripted solver, and an experiment whose
       // two arms are secretly the same arm is the single worst thing this suite
-      // could print — it would come out as a confident PARITY.
+      // could print — it would come out as a confident PASS.
       if (arm === 'redump' && (r.kinds.diff > 0 || r.kinds.nochange > 0)) {
         problems.push(
           `G3 — ${task.id}: the re-dump arm received ${r.kinds.diff + r.kinds.nochange} ` +
@@ -1035,20 +1103,38 @@ function perEpisode(rows) {
 
 /**
  * The episode list a phase is asking for, WAVE-MAJOR: run 3 of every task
- * before run 4 of any.
+ * before run 4 of any — and QUOTA-CAPPED per task (tier3.md §3.3.1).
  *
  * The order is the whole point. A phase that dies halfway through — a laptop
  * sleeping, a rate limit, a Ctrl-C — leaves even coverage across the task set
  * rather than four finished tasks and six untouched ones, and the per-task
  * table stays comparable at every point on the way up.
+ *
+ * `--n` is a PHASE CAP, not a target: a task stops accruing at `task.quota`
+ * however large `--n` gets, so a quota-exhausted task simply drops out of
+ * later waves (the canaries stop at 5 while the discriminative tasks run to
+ * 45). Resume arithmetic is UNTOUCHED by this: `episodeKey` already carries
+ * runIndex and `splitByStore` works verbatim — a quota is only ever a
+ * statement about which keys are asked for.
  */
-function targetsFor(tasks, arms, n) {
+export function targetsFor(tasks, arms, n) {
   const out = [];
-  for (let k = 0; k < n; k++) {
-    for (const task of tasks) for (const arm of arms) out.push({ task, arm, runIndex: k });
+  const cap = Math.max(...tasks.map((t) => Math.min(n, quotaOf(t))), 0);
+  for (let k = 0; k < cap; k++) {
+    for (const task of tasks) {
+      if (k >= Math.min(n, quotaOf(task))) continue;
+      for (const arm of arms) out.push({ task, arm, runIndex: k });
+    }
   }
   return out;
 }
+
+/** A task with no quota field is asked for `--n` times, as before wave 3. */
+const quotaOf = (task) => (Number.isInteger(task.quota) ? task.quota : Infinity);
+
+/** What a phase at cap `n` asks for in total, both arms. */
+const phaseTotal = (tasks, n, arms = 2) =>
+  tasks.reduce((a, t) => a + Math.min(n, quotaOf(t)), 0) * arms;
 
 function splitByStore(targets, storedKeys, identity) {
   const todo = [];
@@ -1066,27 +1152,38 @@ function splitByStore(targets, storedKeys, identity) {
   return { todo, done };
 }
 
-const WAVES = [1, 5, 10, 15, N_PREREGISTERED];
+const WAVES = [1, 5, 10, 25, 45];
 
 function printPlan({ rows, storePath, identity, opts }) {
   const est = perEpisode(rows);
-  const perWave = TASKS.length * 2;
-  const total = perWave * N_PREREGISTERED;
+  const total = QUOTA_TOTAL;
 
   console.log('='.repeat(72));
   console.log('SUGGESTED PHASE PLAN');
   console.log('='.repeat(72));
   console.log(
-    `\nThe full preregistered suite is ${TASKS.length} tasks x 2 arms x N=${N_PREREGISTERED} = ${total} episodes,\n` +
+    `\nThe full preregistered suite is ${TASKS.length} tasks at their own quotas x 2 arms = ${total} episodes,\n` +
       `about ${fmtDuration((total * est.sec)).padEnd(1)} and $${(total * est.usd).toFixed(2)} at ${est.sec.toFixed(0)}s and $${est.usd.toFixed(4)} per episode (from ${est.source}).`,
+  );
+
+  console.log('\nquota table (episodes per arm; --n is a phase cap, never a target):');
+  for (const t of TASKS) {
+    console.log(
+      `  ${t.id.padEnd(20)} ${String(t.stratum ?? 'discriminative').padEnd(15)} quota ${String(t.quota ?? '—').padStart(3)}/arm  ` +
+        `${String(2 * (t.quota ?? 0)).padStart(4)} episodes`,
+    );
+  }
+  console.log(
+    `  ${'TOTAL'.padEnd(20)} ${''.padEnd(15)}             ${String(total).padStart(4)} episodes`,
   );
 
   console.log('\nSplit it by N in waves, not by task:');
   console.log(`  A partial run across ALL ${TASKS.length} tasks is far more informative than a complete`);
   console.log(`  run of two. ${TASKS.length} tasks at N=5 already shows you which tasks separate the arms`);
-  console.log('  and whether the whole thing is heading for the G10 ceiling; two tasks at N=20');
+  console.log('  and whether the whole thing is heading for the G10 ceiling; two tasks at N=45');
   console.log('  tells you a great deal about two tasks. The runner iterates wave-major for');
   console.log('  the same reason, so an interrupted phase also leaves even coverage.');
+  console.log('  Quota-exhausted tasks simply drop out of the later waves.');
 
   const row = (phase, cmd, add, cum, sec, usd) =>
     console.log(
@@ -1098,7 +1195,7 @@ function printPlan({ rows, storePath, identity, opts }) {
   console.log('  ' + '-'.repeat(76));
   let prev = 0;
   WAVES.forEach((n, i) => {
-    const cum = perWave * n;
+    const cum = phaseTotal(TASKS, n);
     const add = cum - prev;
     prev = cum;
     row(String(i + 1), `npm run bench:task -- --n ${n}`, add, cum, add * est.sec, add * est.usd);
@@ -1128,9 +1225,13 @@ function printPlan({ rows, storePath, identity, opts }) {
     const present = new Set(rows.map((r) => r.task));
     const perTaskArm = {};
     for (const r of rows) perTaskArm[`${r.task}|${r.arm}`] = (perTaskArm[`${r.task}|${r.arm}`] ?? 0) + 1;
-    const minRuns = Math.min(...TASKS.map((t) => Math.min(perTaskArm[`${t.id}|diff`] ?? 0, perTaskArm[`${t.id}|redump`] ?? 0)));
+    const haveFor = (t) =>
+      Math.min(perTaskArm[`${t.id}|diff`] ?? 0, perTaskArm[`${t.id}|redump`] ?? 0);
+    const minRuns = Math.min(...TASKS.map(haveFor));
     console.log(`  ${present.size}/${TASKS.length} tasks touched; every task has at least ${minRuns} run(s) in both arms.`);
-    const nextWave = WAVES.find((n) => n > minRuns);
+    // Quota-aware: a task sitting at its own quota does not hold a wave open,
+    // which is the whole reason the canaries cost 5 and not 45.
+    const nextWave = WAVES.find((n) => TASKS.some((t) => haveFor(t) < Math.min(n, quotaOf(t))));
     if (nextWave) console.log(`  Next suggested phase: npm run bench:task -- --n ${nextWave}`);
     else console.log('  The preregistered sample is complete. Next: npm run bench:task -- --report');
   }
@@ -1143,20 +1244,20 @@ function printPlan({ rows, storePath, identity, opts }) {
 
 /**
  * The smallest per-arm sample at which the success interval would clear the
- * parity margin, IF the observed rates held. Advice about how much further
- * there is to go, not a stopping rule.
+ * -10pp bound, IF the observed rates held. Advice about how much further there
+ * is to go, not a stopping rule.
  *
  * Returns null for "not inside the cap", which is NOT the same as "never" — a
- * true delta of −4.0pp against a −5.0pp margin needs an interval half-width
+ * true delta of −9.0pp against a −10.0pp bound needs an interval half-width
  * under 1pp and so needs thousands of episodes per arm. Reporting that as
  * "impossible" would be a different claim from the true one, so the caller
  * distinguishes the two.
  */
-const PARITY_SEARCH_CAP = 5000;
+const BOUND_SEARCH_CAP = 5000;
 
-function parityReachableAt(pd, pu, cap = PARITY_SEARCH_CAP) {
+function boundReachableAt(pd, pu, cap = BOUND_SEARCH_CAP) {
   for (let n = 5; n <= cap; n += 5) {
-    if (propDiffCI(Math.round(pd * n), n, Math.round(pu * n), n).lo >= PARITY_SUCCESS_MARGIN) return n;
+    if (propDiffCI(Math.round(pd * n), n, Math.round(pu * n), n).lo >= SUCCESS_BOUND) return n;
   }
   return null;
 }
@@ -1167,13 +1268,20 @@ function parityReachableAt(pd, pu, cap = PARITY_SEARCH_CAP) {
  * result to everyone who has not thought about the interval.
  *
  * It is ADVISORY. It computes nothing the verdict uses and changes no
- * threshold. The PARITY/REGRESSION/INCONCLUSIVE rule below runs exactly as it
+ * threshold. The PASS/REGRESSION/INCONCLUSIVE rule below runs exactly as it
  * did before this block existed.
  */
 function progressAdvisory(allRows, phaseRows, opts) {
-  const diff = summarise(allRows, 'diff');
-  const redump = summarise(allRows, 'redump');
-  const present = [...new Set(allRows.map((r) => r.task))];
+  // Everything below the coverage table is about the DISCRIMINATIVE stratum,
+  // because that is what the verdict is computed over. Pooling the canaries in
+  // here would reproduce, in the advisory, exactly the dilution the strata
+  // exist to prevent — and the advisory is what a human reads mid-wave.
+  const stratumRows = allRows.filter(isDiscriminative);
+  const canaryRows = allRows.filter(isCanary);
+  const diff = summarise(stratumRows, 'diff');
+  const redump = summarise(stratumRows, 'redump');
+  const present = [...new Set(stratumRows.map((r) => r.task))];
+  const stratumTasks = TASKS.filter((t) => t.stratum !== 'canary');
 
   console.log('\n' + '='.repeat(72));
   console.log('PROGRESS — advisory. Nothing in this block changes the verdict rule.');
@@ -1191,20 +1299,32 @@ function progressAdvisory(allRows, phaseRows, opts) {
   const line = (name, s) =>
     `  ${name.padEnd(8)} ${String(s.successes).padStart(4)}/${String(s.n).padEnd(5)} success ${fmtPct(s.n ? s.successes / s.n : 0).padStart(6)}   ` +
     `${mean(s.wrong).toFixed(3)} wrong-el/run   $${s.cost.toFixed(2)}`;
-  console.log('\non record, pooled across every phase:');
+  console.log('\non record, DISCRIMINATIVE stratum, pooled across every phase:');
   console.log(line('diff', diff));
   console.log(line('re-dump', redump));
   console.log(
-    `  ${present.length}/${TASKS.length} tasks touched · ` +
+    `  ${present.length}/${stratumTasks.length} discriminative tasks touched · ` +
       `${(diff.n / Math.max(1, present.length)).toFixed(1)} runs per task per arm`,
   );
+  if (canaryRows.length) {
+    const cd = summarise(canaryRows, 'diff');
+    const cu = summarise(canaryRows, 'redump');
+    console.log(
+      `  canaries (in NO interval, ever): diff ${cd.successes}/${cd.n} · re-dump ${cu.successes}/${cu.n}`,
+    );
+  }
 
-  console.log('\ncoverage (runs on record, diff / re-dump, target N per task per arm):');
+  console.log("\ncoverage (runs on record, diff / re-dump, against each task's OWN quota):");
   for (const t of TASKS) {
     const d = allRows.filter((r) => r.task === t.id && r.arm === 'diff').length;
     const u = allRows.filter((r) => r.task === t.id && r.arm === 'redump').length;
-    const bar = '#'.repeat(Math.min(N_PREREGISTERED, Math.min(d, u))).padEnd(N_PREREGISTERED, '.');
-    console.log(`  ${t.id.padEnd(20)} ${String(d).padStart(3)} / ${String(u).padEnd(3)}  ${bar}`);
+    const q = Number.isFinite(quotaOf(t)) ? quotaOf(t) : Math.max(d, u, 1);
+    const width = Math.min(q, 45);
+    const filled = Math.round((Math.min(q, Math.min(d, u)) / q) * width);
+    const bar = '#'.repeat(filled).padEnd(width, '.');
+    console.log(
+      `  ${t.id.padEnd(20)} ${(t.stratum ?? '').padEnd(15)} ${String(d).padStart(3)} / ${String(u).padEnd(3)} of ${String(q).padEnd(3)} ${bar}`,
+    );
   }
 
   const sD = wilson(diff.successes, diff.n);
@@ -1212,57 +1332,57 @@ function progressAdvisory(allRows, phaseRows, opts) {
   const perTask = diff.n / Math.max(1, present.length);
 
   console.log('\nCan this sample support a verdict yet?');
-  if (diff.n < N_FLOOR || redump.n < N_FLOOR) {
+  if (diff.n < STRATUM_FLOOR || redump.n < STRATUM_FLOOR) {
     console.log(
-      `  No. ${diff.n}/${redump.n} episodes per arm is below the hard floor of ${N_FLOOR} (G8). This exercises`,
+      `  No. ${diff.n}/${redump.n} stratum episodes per arm is below the floor of ${STRATUM_FLOOR} (G8). This`,
     );
-    console.log('  the loop; it is not a measurement, and the run will exit INCONCLUSIVE.');
+    console.log('  exercises the loop; it is not a measurement, and the run will exit INCONCLUSIVE.');
   } else {
-    const mde = smallestDetectableDrop(diff.n, redump.n, sU.p, PARITY_SUCCESS_MARGIN);
+    const mde = smallestDetectableDrop(diff.n, redump.n, sU.p, SUCCESS_BOUND);
     console.log(
-      `  At ${diff.n}/${redump.n} episodes per arm — about N=${perTask.toFixed(1)}/task/arm over ${present.length}/${TASKS.length} tasks —`,
+      `  At ${diff.n}/${redump.n} stratum episodes per arm — about N=${perTask.toFixed(1)}/task/arm over ${present.length}/${stratumTasks.length}`,
     );
     console.log(
-      `  and an observed re-dump rate of ${fmtPct(sU.p)}, the smallest true drop this sample can`,
+      `  discriminative tasks — and an observed re-dump rate of ${fmtPct(sU.p)}, the smallest true drop`,
     );
     console.log(
-      `  distinguish from the ${fmtSigned(PARITY_SUCCESS_MARGIN)} parity margin is about ${fmtPct(mde)}. Anything smaller than`,
+      `  this sample can distinguish from the ${fmtSigned(SUCCESS_BOUND)} bound is about ${fmtPct(mde)}. Anything smaller`,
     );
-    console.log('  that is inside the noise, however clean the percentages look.');
-    const need = parityReachableAt(sD.p, sU.p);
+    console.log('  than that is inside the noise, however clean the percentages look.');
+    const need = boundReachableAt(sD.p, sU.p);
     const gap = sD.p - sU.p;
-    if (gap <= PARITY_SUCCESS_MARGIN) {
+    if (gap <= SUCCESS_BOUND) {
       console.log(
-        `  The observed delta itself, ${fmtSigned(gap)}, is already at or past the ${fmtSigned(PARITY_SUCCESS_MARGIN)} margin. At`,
+        `  The observed delta itself, ${fmtSigned(gap)}, is already at or past the ${fmtSigned(SUCCESS_BOUND)} bound. At`,
       );
-      console.log('  these rates no sample size produces PARITY; more episodes buy precision about');
+      console.log('  these rates no sample size produces a PASS; more episodes buy precision about');
       console.log('  a gap, not a pass.');
     } else if (need === null) {
       console.log(
-        `  The observed gap of ${fmtSigned(gap)} sits close enough to the ${fmtSigned(PARITY_SUCCESS_MARGIN)} margin that the interval`,
+        `  The observed gap of ${fmtSigned(gap)} sits close enough to the ${fmtSigned(SUCCESS_BOUND)} bound that the interval`,
       );
       console.log(
-        `  would not fit inside it within ${PARITY_SEARCH_CAP} episodes per arm at these rates. Reaching`,
+        `  would not fit inside it within ${BOUND_SEARCH_CAP} episodes per arm at these rates. A PASS`,
       );
-      console.log('  PARITY here is not a matter of finishing the planned phases.');
+      console.log('  here is not a matter of finishing the planned phases.');
     } else if (need > diff.n) {
       console.log(
-        `  If these rates hold, the success interval would clear the margin at about ${need}`,
+        `  If these rates hold, the success interval would clear the bound at about ${need}`,
       );
       console.log(`  episodes per arm. You have ${diff.n}.`);
     } else {
-      console.log('  The success interval already clears the parity margin at this sample size.');
+      console.log('  The success interval already clears the bound at this sample size.');
     }
   }
   console.log(
-    `  The preregistered design is N=${N_PREREGISTERED}/task/arm over all ${TASKS.length} tasks = ` +
-      `${TASKS.length * N_PREREGISTERED} episodes per arm.`,
+    `  The preregistered design is per-task quotas: ${stratumTasks.map((t) => `${t.id} ${t.quota}`).join(', ')} ` +
+      `= ${stratumTasks.reduce((a, t) => a + t.quota, 0)} stratum episodes per arm (plus canaries at 5).`,
   );
 
   // Early stopping, stated as advice and nothing else. If the diff arm has
   // already fallen off a cliff, six more hours buys a tighter interval around a
   // disaster that is already unambiguous.
-  if (diff.n >= N_FLOOR && redump.n >= N_FLOOR) {
+  if (diff.n >= STRATUM_FLOOR && redump.n >= STRATUM_FLOOR) {
     const sCI = propDiffCI(diff.successes, diff.n, redump.successes, redump.n);
     if (sCI.hi < CATASTROPHE_THRESHOLD) {
       console.log('\n' + '!'.repeat(72));
@@ -1418,8 +1538,12 @@ async function main() {
 
   if (!opts.selftest) {
     const est = perEpisode(stored);
+    const capped = tasks.filter((t) => quotaOf(t) < opts.n).map((t) => `${t.id} at ${t.quota}`);
     console.log(
-      `this phase asks for ${targets.length} episode(s) — ${tasks.length} task(s) x ${opts.arms.length} arm(s) x N=${opts.n}`,
+      `this phase asks for ${targets.length} episode(s) — ${tasks.length} task(s) x ${opts.arms.length} arm(s), ` +
+        `phase cap N=${opts.n}, each task capped at its own quota` +
+        (capped.length ? `
+  quota-capped below the phase cap: ${capped.join(', ')}` : ''),
     );
     console.log(`  already on record, SKIPPING : ${done.length}`);
     console.log(
@@ -1468,7 +1592,10 @@ async function main() {
 
   try {
     console.log('starting Aperture…');
-    aperture = await startAperture();
+    // One stamp for this run's two artifacts: the child log and the apparatus
+    // samples. Same timestamp, so nobody has to correlate them by mtime.
+    const stamp = runStamp();
+    aperture = await startAperture({ root: ROOT, stamp });
     console.log(`Aperture up on ${APERTURE_PORT}\n`);
     proxy = await startProxy({
       apertureUrl: `http://127.0.0.1:${APERTURE_PORT}/mcp`,
@@ -1531,7 +1658,7 @@ async function main() {
 
     if (opts.selftest) {
       console.log('SELFTEST PASS — G1, G2 and the liveness canary green, no API budget spent.');
-      return (code = EXIT.PARITY);
+      return (code = EXIT.PASS);
     }
 
     // ---- scored run -----------------------------------------------------
@@ -1544,8 +1671,10 @@ async function main() {
       toolsHash,
       armDefinitions: ARM_DEFINITION,
     });
+    const apparatusPath = join(ROOT, 'bench', 'task', 'results', `apparatus.${stamp}.jsonl`);
     console.log(`cohort   : ${rel(cohortFile)}`);
-    console.log(`writing  : ${rel(storePath)}  (one line per episode, as it completes)\n`);
+    console.log(`writing  : ${rel(storePath)}  (one line per episode, as it completes)`);
+    console.log(`apparatus: ${rel(apparatusPath)}  (one /metrics sample per episode)\n`);
 
     const phaseRows = [];
     let i = 0;
@@ -1559,10 +1688,37 @@ async function main() {
       const pre = await livenessCanary({ proxy, collector });
       if (!pre.ok) return (code = canaryFailed(`before episode ${i}/${todo.length}`, pre));
 
+      // Immediately after the canary, one localhost GET (§2.2). Cheap and
+      // always-on. NEVER a gate: the canary is the gate, and a sampler that
+      // could stop an episode would be a new way for the apparatus to fail.
+      const sample = await sampleMetrics(aperture.token);
+      const stampFields = sample.ok
+        ? metricsStamp(sample.json)
+        : { gpuPid: 'poll-failed', procs: 0 };
+      try {
+        appendFileSync(
+          apparatusPath,
+          JSON.stringify({
+            at: new Date().toISOString(),
+            task: t.task.id,
+            arm: t.arm,
+            runIndex: t.runIndex,
+            ...(sample.ok ? { sample: sample.json } : { error: sample.error }),
+          }) + '\n',
+          'utf8',
+        );
+      } catch (e) {
+        console.log(`      (apparatus sample not written: ${e.message})`);
+      }
+
       const r = await runEpisode({
         proxy, collector, task: t.task, arm: t.arm, runIndex: t.runIndex,
         driver: agentDriver(proxy, t.task, opts),
       });
+      // The sampler's two fields ride on the episode row beside G6b's, so a
+      // GPU-process relaunch is visible in the store itself and not only in a
+      // sidecar nobody opens.
+      r.apparatus = { ...r.apparatus, ...stampFields };
       // Quarantine is stamped at write time so the store carries the ruling, and
       // recomputed at report time so stores written before G6b existed are held
       // to the same rule. The slot stays occupied: a quarantined episode is not
@@ -1611,7 +1767,29 @@ async function main() {
   }
 }
 
-function report(allRows, opts, tasks) {
+
+/**
+ * The stratified report (tier3.md §3.3.3).
+ *
+ * Order is the design, not presentation:
+ *   1. G6b QUARANTINE — applied before anything is computed from anything, and
+ *      PRESERVED VERBATIM from the wave-2 code (table, per-arm counts,
+ *      symmetry guard, disclosure sentence). §3.6 names it as an acceptance
+ *      item: the rewrite must not quietly drop the guard that saved wave 2.
+ *   2. The apparatus note — GPU pid transitions, advisory (§2.2).
+ *   3. Per-task table, every scored task, stratum marked.
+ *   4. APPARATUS GUARDS over ALL scored rows: G3, G5, G6, G6b, G9, G11. A
+ *      wedge or an arm leak in a canary episode is still a wedge.
+ *   5. The CANARY table and gate. They enter no interval anywhere.
+ *   6. VERDICT ARITHMETIC over the DISCRIMINATIVE STRATUM ONLY: success CI,
+ *      wrong-el CI, G4, G7, G10, MDE, the interim rule. Wave 2 pooled 210
+ *      ceilinged episodes with 35 informative ones and diluted its only
+ *      signal; that is why this partition exists, and this report says so.
+ *
+ * Exported so the §3.6 acceptance unit can feed it a synthetic row set and
+ * assert that the quarantine table and the symmetry guard still fire.
+ */
+export function report(allRows, opts, tasks) {
   // G6b — the quarantine, applied before anything is computed from anything.
   //
   // A wedged episode is an ABSENT measurement, not an unfavourable one: no
@@ -1622,8 +1800,12 @@ function report(allRows, opts, tasks) {
   const quarantined = allRows.filter(isWedged);
   const rows = allRows.filter((r) => !isWedged(r));
 
-  const diff = summarise(rows, 'diff');
-  const redump = summarise(rows, 'redump');
+  // THE STRATA. Everything the verdict is made of comes from `stratumRows`.
+  const stratumRows = rows.filter(isDiscriminative);
+  const canaryRows = rows.filter(isCanary);
+  const diff = summarise(stratumRows, 'diff');
+  const redump = summarise(stratumRows, 'redump');
+  const stratumTasks = tasks.filter((t) => t.stratum !== 'canary');
 
   console.log('\n' + '='.repeat(72));
   console.log('RESULTS');
@@ -1631,6 +1813,14 @@ function report(allRows, opts, tasks) {
   console.log(
     `pooled over ${rows.length} episode(s) on record — every phase of this cohort, not just\n` +
       'the most recent one. The verdict rule below is the preregistered one, unchanged.',
+  );
+  console.log(
+    `\nSTRATA — the verdict is computed over the DISCRIMINATIVE stratum ONLY\n` +
+      `  discriminative : ${stratumRows.length} episode(s) over ${stratumTasks.length} task(s) — the verdict\n` +
+      `  canary         : ${canaryRows.length} episode(s) over ${tasks.length - stratumTasks.length} task(s) — apparatus health, in NO interval\n` +
+      '  Wave 2 pooled 35 informative episodes with 210 ceilinged ones and diluted the only\n' +
+      '  signal it had (wave2-evaluation.md §4.2). This partition is the fix, and it is\n' +
+      '  preregistered rather than applied after seeing which way the numbers went.',
   );
 
   const qByArm = { diff: 0, redump: 0 };
@@ -1642,9 +1832,9 @@ function report(allRows, opts, tasks) {
     );
     console.log(
       '  Predicate: two or more acknowledged click/type/clear actions produced no witness\n' +
-        '  event, or the walker timed out. Such an episode measured a wedged browser, not an\n' +
-        '  arm. The episodes are kept, their slots stay occupied, and they re-run only under\n' +
-        '  --new-cohort.',
+        '  event OR were reported by the engine as input loss, or the walker timed out. Such\n' +
+        '  an episode measured a wedged browser, not an arm. The episodes are kept, their\n' +
+        '  slots stay occupied, and they re-run only under --new-cohort.',
     );
     for (const r of quarantined.slice(0, 12)) {
       const dead = r.apparatus?.deadActs ?? deadActsFrom(r.acts);
@@ -1661,6 +1851,15 @@ function report(allRows, opts, tasks) {
     );
   }
 
+  // ---- the apparatus note (§2.2) — advisory, no verdict effect ------------
+  //
+  // A GPU pid that CHANGES between consecutive episodes is a GPU process that
+  // crashed and relaunched, which is the leading hypothesis for the wave-2
+  // wedge and the one question that store could not answer. Printed here, next
+  // to the quarantine, because that is where a reader is already asking "what
+  // was the browser doing".
+  printApparatusNote(allRows);
+
   console.log('\nPer task (success diff / re-dump):');
   for (const t of tasks) {
     const d = rows.filter((r) => r.task === t.id && r.arm === 'diff');
@@ -1668,7 +1867,7 @@ function report(allRows, opts, tasks) {
     const pc = (a) => (a.length ? `${a.filter((r) => r.success).length}/${a.length}` : '   —');
     const w = (a) => (a.length ? (a.reduce((x, r) => x + r.wrongElement, 0) / a.length).toFixed(2) : '—');
     console.log(
-      `  ${t.id.padEnd(20)} ${pc(d).padStart(6)} / ${pc(u).padEnd(6)}   ` +
+      `  ${t.id.padEnd(20)} ${(t.stratum === 'canary' ? '[canary]' : '').padEnd(9)} ${pc(d).padStart(6)} / ${pc(u).padEnd(6)}   ` +
         `wrong-el ${w(d)} / ${w(u)}   obs ${Math.round(d.reduce((x, r) => x + r.obsChars, 0) / Math.max(1, d.length))} / ` +
         `${Math.round(u.reduce((x, r) => x + r.obsChars, 0) / Math.max(1, u.length))} chars`,
     );
@@ -1679,7 +1878,7 @@ function report(allRows, opts, tasks) {
 
   // Unclassified observations, surfaced before anything is concluded from the
   // counts they are missing from.
-  const odd = rows.flatMap((r) => r.unclassified.map((u) => ({ ...u, task: r.task, arm: r.arm })));
+  const odd = rows.flatMap((r) => (r.unclassified ?? []).map((u) => ({ ...u, task: r.task, arm: r.arm })));
   if (odd.length) {
     console.log(`\nUnclassified observations (${odd.length}) — neither full, diff, nor no-change:`);
     for (const u of odd.slice(0, 5)) {
@@ -1687,12 +1886,19 @@ function report(allRows, opts, tasks) {
     }
   }
 
+  // ---- APPARATUS GUARDS — over ALL scored rows, both strata ---------------
+  //
+  // A wedge, an arm leak, a silent witness or a truncated page in a CANARY
+  // episode is exactly as much of an apparatus failure as in a scored one. The
+  // stratum partition is about what the VERDICT is computed over; it is not a
+  // licence to stop looking at half the run.
+
   // G3 — the re-dump arm must receive nothing BUT full snapshots. Stated as a
   // whitelist, not a blacklist of diff shapes: an observation the shape
   // predicates fail to classify is exactly where a diff would hide, and a guard
   // that only looks for the shapes it already knows about would not see it.
-  const g3 = redump.rows.filter(
-    (r) => r.kinds.diff > 0 || r.kinds.nochange > 0 || r.kinds.other > 0,
+  const g3 = rows.filter(
+    (r) => r.arm === 'redump' && (r.kinds.diff > 0 || r.kinds.nochange > 0 || r.kinds.other > 0),
   );
   if (g3.length) {
     infra.push(
@@ -1713,17 +1919,6 @@ function report(allRows, opts, tasks) {
     );
   }
 
-  // G4 — the diff arm must not degenerate into a re-dump arm.
-  const dObs = diff.rows.reduce((a, r) => a + r.kinds.diff + r.kinds.nochange, 0);
-  const dAll = diff.rows.reduce((a, r) => a + r.kinds.full + r.kinds.diff + r.kinds.nochange + r.kinds.other, 0);
-  const diffShare = dAll ? dObs / dAll : 0;
-  if (diff.n && diffShare < 0.6) {
-    infra.push(
-      `G4: only ${fmtPct(diffShare)} of diff-arm observations were diffs (floor 60%). ` +
-        'The diff arm has degenerated into a second re-dump arm and measures nothing.',
-    );
-  }
-
   // G5 — the witness must have been alive throughout.
   const silent = rows.filter((r) => !r.loaded);
   if (silent.length) infra.push(`G5: ${silent.length} episodes where the fixture never reported to the collector.`);
@@ -1733,17 +1928,6 @@ function report(allRows, opts, tasks) {
   if (ghosts.length) {
     vacuous.push(
       `G6: ${ghosts.length} episodes scored SUCCESS having performed zero actions on the page.`,
-    );
-  }
-
-  // G7 — the diff arm must be cheaper to observe. If it is not, the arms are
-  // mislabelled somewhere upstream of everything else in this report.
-  const dChars = diff.obsChars.reduce((a, b) => a + b, 0) / Math.max(1, diff.n);
-  const uChars = redump.obsChars.reduce((a, b) => a + b, 0) / Math.max(1, redump.n);
-  if (diff.n && redump.n && dChars >= uChars) {
-    infra.push(
-      `G7: the diff arm observed ${Math.round(dChars)} chars/episode against the re-dump arm's ` +
-        `${Math.round(uChars)}. The cheaper arm is not the diff arm — the labels are wrong.`,
     );
   }
 
@@ -1763,12 +1947,34 @@ function report(allRows, opts, tasks) {
     );
   }
 
-  console.log('\nObservation cost:');
+  // ---- STRATUM-ONLY guards and cost (G4, G7) ------------------------------
+  const dObs = diff.rows.reduce((a, r) => a + r.kinds.diff + r.kinds.nochange, 0);
+  const dAll = diff.rows.reduce((a, r) => a + r.kinds.full + r.kinds.diff + r.kinds.nochange + r.kinds.other, 0);
+  const diffShare = dAll ? dObs / dAll : 0;
+  if (diff.n && diffShare < 0.6) {
+    infra.push(
+      `G4: only ${fmtPct(diffShare)} of diff-arm observations were diffs (floor 60%), over the ` +
+        'discriminative stratum. The diff arm has degenerated into a second re-dump arm and ' +
+        'measures nothing.',
+    );
+  }
+
+  const dChars = diff.obsChars.reduce((a, b) => a + b, 0) / Math.max(1, diff.n);
+  const uChars = redump.obsChars.reduce((a, b) => a + b, 0) / Math.max(1, redump.n);
+  if (diff.n && redump.n && dChars >= uChars) {
+    infra.push(
+      `G7: over the discriminative stratum the diff arm observed ${Math.round(dChars)} chars/episode ` +
+        `against the re-dump arm's ${Math.round(uChars)}. The cheaper arm is not the diff arm — ` +
+        'the labels are wrong.',
+    );
+  }
+
+  console.log('\nObservation cost (discriminative stratum):');
   console.log(`  diff arm   : ${Math.round(dChars)} chars/episode  (${fmtPct(diffShare)} of observations were diffs)`);
   console.log(`  re-dump arm: ${Math.round(uChars)} chars/episode`);
   console.log(`  ratio      : ${uChars ? (dChars / uChars).toFixed(2) : '—'}x`);
 
-  console.log('\nFailure attribution (acts, by arm):');
+  console.log('\nFailure attribution (acts, by arm, discriminative stratum):');
   const attrD = tally(diff.rows, 'attributions');
   const attrU = tally(redump.rows, 'attributions');
   for (const k of new Set([...Object.keys(attrD), ...Object.keys(attrU)])) {
@@ -1778,22 +1984,69 @@ function report(allRows, opts, tasks) {
     `  ${'(of those, within 2 steps of a FULL SNAPSHOT)'.padEnd(20)} diff ` +
       `${diff.rows.reduce((a, r) => a + r.postResyncFailures, 0)}   re-dump ${redump.rows.reduce((a, r) => a + r.postResyncFailures, 0)}`,
   );
+  if (canaryRows.length) {
+    const attrC = tally(canaryRows, 'attributions');
+    const notOk = Object.entries(attrC).filter(([k]) => k !== 'ok');
+    console.log(
+      `  canary acts, kept out of the table above: ${
+        notOk.length ? notOk.map(([k, v]) => `${k} ${v}`).join(', ') : 'all ok'
+      }`,
+    );
+  }
+
+  // ---- the canary table, and the canary gate (§3.3.3, §3.4) ---------------
+  if (canaryRows.length) {
+    console.log('\nCANARIES — apparatus health only. These numbers enter NO interval, ever.');
+    for (const t of tasks.filter((x) => x.stratum === 'canary')) {
+      const parts = ['diff', 'redump'].map((arm) => {
+        const a = canaryRows.filter((r) => r.task === t.id && r.arm === arm);
+        return { arm, n: a.length, s: a.filter((r) => r.success).length };
+      });
+      console.log(
+        `  ${t.id.padEnd(20)} ` +
+          parts.map((p) => `${p.arm.padEnd(7)} ${p.s}/${p.n}`).join('   ') +
+          `   quota ${t.quota ?? '—'}/arm`,
+      );
+      for (const p of parts) {
+        // The gate is evaluated at the quota, not on the way up: 0/1 in the
+        // pilot wave is noise, 3/5 at quota is an apparatus question.
+        if (p.n >= 5 && p.s < Math.ceil(CANARY_GATE * p.n)) {
+          infra.push(
+            `CANARY GATE: ${t.id} [${p.arm}] scored ${p.s}/${p.n}, below the preregistered 4/5 ` +
+              'floor. A ceilinged task that stops ceilinging is an apparatus finding, not a ' +
+              'result about the arms — investigate before continuing (§3.4).',
+          );
+        }
+      }
+    }
+    console.log(
+      '  They license exactly one sentence: "the apparatus and easy-task floor held".\n' +
+        '  Their numbers appear in no claim about diffs, in this run or any other.',
+    );
+  }
 
   console.log('\nCost:');
-  console.log(`  diff arm   : $${diff.cost.toFixed(4)} over ${diff.n} episodes ($${(diff.cost / Math.max(1, diff.n)).toFixed(4)}/episode)`);
-  console.log(`  re-dump arm: $${redump.cost.toFixed(4)} over ${redump.n} episodes ($${(redump.cost / Math.max(1, redump.n)).toFixed(4)}/episode)`);
-  console.log(`  total      : $${(diff.cost + redump.cost).toFixed(4)}`);
+  console.log(`  diff arm   : $${diff.cost.toFixed(4)} over ${diff.n} stratum episodes ($${(diff.cost / Math.max(1, diff.n)).toFixed(4)}/episode)`);
+  console.log(`  re-dump arm: $${redump.cost.toFixed(4)} over ${redump.n} stratum episodes ($${(redump.cost / Math.max(1, redump.n)).toFixed(4)}/episode)`);
+  const canaryCost = canaryRows.reduce((a, r) => a + (r.costUsd ?? 0), 0);
+  const totalCost = allRows.reduce((a, r) => a + (r.costUsd ?? 0), 0);
+  console.log(`  canaries   : $${canaryCost.toFixed(4)} over ${canaryRows.length} episodes`);
+  console.log(
+    `  total      : $${totalCost.toFixed(4)} (including quarantined episodes — the money was spent)` +
+      `\n               against the preregistered $85 hard cap.`,
+  );
 
   if (infra.length) return bail(EXIT.INFRA, 'INFRASTRUCTURE GUARD FAILED — no verdict:', infra);
   if (vacuous.length) return bail(EXIT.VACUOUS, 'VACUOUS RUN — no verdict:', vacuous);
 
-  // ---- the preregistered comparison ------------------------------------
+  // ---- the preregistered comparison, over the stratum ---------------------
   const sCI = propDiffCI(diff.successes, diff.n, redump.successes, redump.n);
   const wCI = meanDiffCI(diff.wrong, redump.wrong);
   const sD = wilson(diff.successes, diff.n);
   const sU = wilson(redump.successes, redump.n);
 
   console.log('\n' + '-'.repeat(72));
+  console.log('DISCRIMINATIVE STRATUM — the verdict arithmetic');
   console.log(`success  diff    : ${diff.successes}/${diff.n} = ${fmtPct(sD.p)}  [${fmtPct(sD.lo)}, ${fmtPct(sD.hi)}]`);
   console.log(`success  re-dump : ${redump.successes}/${redump.n} = ${fmtPct(sU.p)}  [${fmtPct(sU.lo)}, ${fmtPct(sU.hi)}]`);
   console.log(`success  delta   : ${fmtSigned(sCI.delta)}  95% CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}]   (Newcombe)`);
@@ -1802,113 +2055,223 @@ function report(allRows, opts, tasks) {
   console.log(`wrong-el delta   : ${wCI.delta >= 0 ? '+' : ''}${wCI.delta.toFixed(3)}/run  95% CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}]   (bootstrap, seeded)`);
   console.log('-'.repeat(72));
 
-  const mde = smallestDetectableDrop(diff.n, redump.n, sU.p, PARITY_SUCCESS_MARGIN);
+  const mde = smallestDetectableDrop(diff.n, redump.n, sU.p, SUCCESS_BOUND);
   console.log(
-    `\nPower, honestly: at n=${diff.n}/${redump.n} and a re-dump rate of ${fmtPct(sU.p)}, the smallest\n` +
-      `true drop this run could distinguish from the parity margin is about ${fmtPct(mde)}.\n` +
+    `\nPower, honestly: at n=${diff.n}/${redump.n} stratum episodes and a re-dump rate of ${fmtPct(sU.p)},\n` +
+      `the smallest true drop this run could distinguish from the ${fmtSigned(SUCCESS_BOUND)} bound is about ${fmtPct(mde)}.\n` +
       'Per-task numbers above are directional colour, not findings.',
   );
 
+  // ---- the per-task wrong-element TRIPWIRE (§3.4) -------------------------
+  //
+  // The mirror of wave 2's dilution lesson, applied to the metric where one
+  // task can hide inside a pool of three: a task can be quietly awful at
+  // wrong-element while the stratum-pooled CI still clears +0.40.
+  const tripped = [];
+  console.log('\nPer-task wrong-element tripwire (discriminative stratum, blocks PASS at +1.0/run):');
+  for (const t of stratumTasks) {
+    const d = stratumRows.filter((r) => r.task === t.id && r.arm === 'diff').map((r) => r.wrongElement);
+    const u = stratumRows.filter((r) => r.task === t.id && r.arm === 'redump').map((r) => r.wrongElement);
+    if (!d.length || !u.length) {
+      console.log(`  ${t.id.padEnd(20)} —  (no episodes in one arm yet)`);
+      continue;
+    }
+    const ci = meanDiffCI(d, u);
+    const trip = ci.lo > PER_TASK_WRONG_TRIP;
+    if (trip) tripped.push(`${t.id} (CI lower ${ci.lo.toFixed(3)}/run)`);
+    console.log(
+      `  ${t.id.padEnd(20)} delta ${(ci.delta >= 0 ? '+' : '') + ci.delta.toFixed(3)}/run  ` +
+        `CI [${ci.lo.toFixed(3)}, ${ci.hi.toFixed(3)}]${trip ? '   <-- TRIPPED' : ''}`,
+    );
+  }
+
+  // ---- the preregistered SENSITIVITY line (§3.3.3) ------------------------
+  printSensitivity(stratumRows, stratumTasks, sCI, wCI);
+
   // The preregistered interim rule, evaluated and printed rather than left for
-  // someone to apply from memory. It conditions ONLY on pooled success levels —
-  // never on the delta between the arms — which is the property that makes
+  // someone to apply from memory. It conditions ONLY on pooled levels and cost
+  // — never on the delta between the arms — which is the property that makes
   // looking at the pilot legitimate instead of a peek that biases the stop.
-  const perTaskN = Math.min(diff.n, redump.n) / Math.max(1, tasks.length);
+  const perTaskN = Math.min(diff.n, redump.n) / Math.max(1, stratumTasks.length);
+  const costPerEp = (diff.cost + redump.cost) / Math.max(1, diff.n + redump.n);
   const branch =
     sD.p >= INTERIM_CEILING && sU.p >= INTERIM_CEILING
-      ? `STOP — both arms are at or above ${fmtPct(INTERIM_CEILING)}. The suite is back on the ceiling; ` +
-        'invoke the preregistered Haiku sensitivity contingency (its own store).'
+      ? `STOP — both arms are at or above ${fmtPct(INTERIM_CEILING)} over the discriminative stratum. The ` +
+        'suite failed to leave the ceiling; redesign harder tasks and do not spend the rest.'
       : sU.p < INTERIM_REDUMP_FLOOR
-        ? `FIX — the re-dump arm is below ${fmtPct(INTERIM_REDUMP_FLOOR)}. The tasks are too hard or broken; ` +
-          'repair them and start a fresh cohort.'
-        : `CONTINUE — pooled rates are off the ceiling and the re-dump arm is healthy. ` +
-          `Run out to N=${N_PREREGISTERED}/task/arm and pool.`;
+        ? `STOP — the re-dump arm is below ${fmtPct(INTERIM_REDUMP_FLOOR)} over the stratum. The tasks are too hard ` +
+          'or broken; fix them and --new-cohort.'
+        : costPerEp > INTERIM_COST_TRIM
+          ? `TRIM — $${costPerEp.toFixed(3)}/discriminative episode is above the $${INTERIM_COST_TRIM.toFixed(2)} threshold. Run the ` +
+            'remaining phases at --n 35 instead of --n 45 (a uniform cap under quota; identity untouched).'
+          : 'CONTINUE — pooled stratum rates are off the ceiling, the re-dump arm is healthy, and ' +
+            'cost is inside the threshold. Run out to the quotas and pool.';
   console.log(
-    `\nInterim rule (preregistered; reads pooled success levels only, blind to the arm\n` +
-      `delta). At about N=${perTaskN.toFixed(1)}/task/arm — diff ${fmtPct(sD.p)}, re-dump ${fmtPct(sU.p)}:\n` +
-      `  ${branch}` +
+    `\nInterim rule (preregistered; reads pooled levels and cost only, blind to the arm\n` +
+      `delta). At about N=${perTaskN.toFixed(1)}/task/arm — diff ${fmtPct(sD.p)}, re-dump ${fmtPct(sU.p)}, $${costPerEp.toFixed(3)}/ep:\n` +
+      `  ${branch}\n` +
+      '  (The canary gate is the fourth branch and is enforced above as an INFRA stop.)' +
       (perTaskN < INTERIM_PILOT_N
         ? `\n  (Advisory only below N=${INTERIM_PILOT_N}/task/arm; the rule is meant to be applied at the pilot wave.)`
         : ''),
   );
 
-  // G8 — the hard floor on N.
-  if (diff.n < N_FLOOR || redump.n < N_FLOOR) {
-    return bail(EXIT.INCONCLUSIVE, 'G8: below the hard floor of N=5 per arm. This is a PILOT, not a result:', [
-      `diff n=${diff.n}, re-dump n=${redump.n}. The loop is exercised; the comparison is not evidence.`,
+  // G8 — the floor on the STRATUM, per arm.
+  if (diff.n < STRATUM_FLOOR || redump.n < STRATUM_FLOOR) {
+    return bail(EXIT.INCONCLUSIVE, `G8: below the floor of ${STRATUM_FLOOR} stratum episodes per arm. This is a PILOT, not a result:`, [
+      `diff n=${diff.n}, re-dump n=${redump.n} over the discriminative stratum. The loop is ` +
+        'exercised; the comparison is not evidence.',
     ]);
   }
 
-  // G10 — the ceiling. Two perfect arms cannot demonstrate parity.
+  // G10 — the ceiling, on STRATUM rates. Two perfect arms cannot demonstrate
+  // anything about a bookkeeping penalty.
   if (sD.p >= 0.98 && sU.p >= 0.98) {
-    return bail(EXIT.INCONCLUSIVE, 'G10: CEILING. Both arms are at or above 98%:', [
+    return bail(EXIT.INCONCLUSIVE, 'G10: CEILING. Both arms are at or above 98% over the discriminative stratum:', [
       'A task set both arms solve every time cannot detect a diff-bookkeeping penalty even',
       'if one exists. This licenses no claim. Make the tasks harder or the model smaller.',
     ]);
   }
 
-  const parity = sCI.lo >= PARITY_SUCCESS_MARGIN && wCI.hi <= PARITY_WRONG_MARGIN;
-  const regression = sCI.hi < PARITY_SUCCESS_MARGIN || wCI.lo > PARITY_WRONG_MARGIN;
+  const wrongHolds = wCI.hi <= WRONG_BOUND;
+  const pass = sCI.lo >= SUCCESS_BOUND && wrongHolds && tripped.length === 0;
+  const regression = sCI.hi < SUCCESS_BOUND || wCI.lo > WRONG_BOUND;
 
-  if (parity) {
-    console.log('\nRESULT: PARITY (exit 0)');
+  if (pass) {
+    const clearS = sCI.lo - SUCCESS_BOUND;
+    const clearW = WRONG_BOUND - wCI.hi;
+    console.log('\nRESULT: PASS (exit 0)');
     console.log(
       '\nWhat this licenses, and nothing more:\n' +
-        `  "On this ${tasks.length}-task fixture suite, with ${opts.model}, agents observing via diffs\n` +
-        `   completed tasks ${fmtSigned(sCI.delta)} as often as agents observing via full re-dumps\n` +
-        `   (95% CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}]), with ${wCI.delta >= 0 ? '+' : ''}${wCI.delta.toFixed(2)} wrong-element actions per run\n` +
-        `   (95% CI [${wCI.lo.toFixed(2)}, ${wCI.hi.toFixed(2)}]), at ${(dChars / uChars).toFixed(2)}x the observation cost."\n` +
-        '  It says nothing about other models, real websites, longer tasks, larger pages,\n' +
-        '  the budget-truncation regime, browser_read workflows, or iframes.',
+        `  "On this ${stratumTasks.length}-task positional-identity suite (post-P1 engine) with ${opts.model},\n` +
+        '   no diff-bookkeeping penalty larger than 10pp in task success or +0.4\n' +
+        '   wrong-element actions per run was found."\n' +
+        `\n  MDE beside it, always: at n=${diff.n}/${redump.n} the smallest true drop this run could\n` +
+        `  distinguish from the bound is about ${fmtPct(mde)}.\n` +
+        `\n  Margin clearance: success CI lower ${fmtSigned(sCI.lo)} clears the bound by ${fmtSigned(clearS)};\n` +
+        `  wrong-element CI upper ${wCI.hi.toFixed(3)} clears +${WRONG_BOUND} by ${clearW.toFixed(3)}/run.` +
+        (clearS < 0.02
+          ? '\n  THIS IS A THIN PASS. It is reported as thin, on purpose — wave 2 cleared its\n' +
+            '  bound by 0.25pp and the number was read as if it were comfortable.'
+          : '') +
+        '\n\n  It is NOT parity and NOT equivalence. It says nothing about other models, real\n' +
+        '  websites, insert-mutation pages (tier3.md §3.1.2), larger pages, longer tasks, or\n' +
+        '  iframes. The canaries license only "the apparatus and easy-task floor held", and\n' +
+        '  any comparison with wave 2 is directional narrative — different engine, never\n' +
+        '  pooled, never CI\'d.',
     );
-    return EXIT.PARITY;
+    return EXIT.PASS;
   }
   if (regression) {
     return bail(EXIT.REGRESSION, 'RESULT: REGRESSION — diffs cost the agent something real:', [
-      `success delta CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}] against a margin of ${fmtSigned(PARITY_SUCCESS_MARGIN)}`,
-      `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}] against a margin of +${PARITY_WRONG_MARGIN}`,
+      `success delta CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}] against a bound of ${fmtSigned(SUCCESS_BOUND)}`,
+      `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}] against a bound of +${WRONG_BOUND}`,
+      'Computed over the discriminative stratum; the canaries are not in it.',
     ]);
-  }
-  // The preregistered SECONDARY outcome. It is evaluated only here, on the
-  // INCONCLUSIVE path, because that is the only place it was ever meant to
-  // apply — and it changes neither the verdict nor the exit code, only what the
-  // run is permitted to say. Its bound was fixed in WAVE2_PREREGISTRATION
-  // before any wave-2 episode existed, for a reason spelled out there: at
-  // N=20/task/arm the -5pp parity margin is unreachable once the tasks are hard
-  // enough to be worth running, so a design without a bounded fallback
-  // guarantees this branch and licenses nothing from it.
-  const secondaryHolds = sCI.lo >= SECONDARY_SUCCESS_BOUND && wCI.hi <= PARITY_WRONG_MARGIN;
-  console.log('\nPreregistered secondary outcome:');
-  if (secondaryHolds) {
-    console.log(
-      `  Bound HOLDS — success-delta CI lower ${fmtSigned(sCI.lo)} >= ${fmtSigned(SECONDARY_SUCCESS_BOUND)}, and the\n` +
-        `  wrong-element CI upper ${wCI.hi.toFixed(3)} <= +${PARITY_WRONG_MARGIN}. The licensed sentence, in full:\n` +
-        `\n    "On this ${tasks.length}-task bookkeeping-hard suite with ${opts.model}, no\n` +
-        '     diff-bookkeeping penalty larger than 10pp was found."\n' +
-        '\n  Nothing stronger. It is not PARITY, it is not evidence of equivalence, and it\n' +
-        '  says nothing about other models, real websites, larger pages or longer tasks.',
-    );
-  } else {
-    console.log(
-      `  Bound does NOT hold — success-delta CI lower ${fmtSigned(sCI.lo)} against ${fmtSigned(SECONDARY_SUCCESS_BOUND)}, ` +
-        `wrong-element CI upper ${wCI.hi.toFixed(3)} against +${PARITY_WRONG_MARGIN}.\n` +
-        '  No secondary sentence is licensed either.',
-    );
   }
 
   return bail(EXIT.INCONCLUSIVE, 'RESULT: INCONCLUSIVE — the intervals do not decide it:', [
-    `success delta CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}], margin ${fmtSigned(PARITY_SUCCESS_MARGIN)}`,
-    `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}], margin +${PARITY_WRONG_MARGIN}`,
-    secondaryHolds
-      ? 'The primary verdict is undecided; the preregistered secondary sentence above is the ' +
-        'only claim this run supports.'
-      : 'This licenses no README claim. More episodes, or a harder suite.',
+    `success delta CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}], bound ${fmtSigned(SUCCESS_BOUND)}`,
+    `wrong-element delta CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}], bound +${WRONG_BOUND}`,
+    ...(tripped.length
+      ? [
+          `PER-TASK TRIPWIRE: ${tripped.join(', ')} — its own wrong-element CI lower is above ` +
+            `+${PER_TASK_WRONG_TRIP.toFixed(1)}/run, which BLOCKS a PASS whatever the pooled CI says. ` +
+            'One task can hide inside a pool of three; this is the rule that stops it.',
+        ]
+      : []),
+    'This licenses no README claim. More episodes, or a harder suite.',
   ]);
 }
 
-main()
-  .then((c) => process.exit(c ?? EXIT.INFRA))
-  .catch((e) => {
-    console.error('\nRUNNER FAILED:', e?.stack ?? e);
-    process.exit(EXIT.INFRA);
+/**
+ * GPU-process pid transitions across consecutive episodes (§2.2). Advisory:
+ * it changes no verdict and no exit code. It exists because after the wave-2
+ * wedge nobody could say whether the GPU process had died, and that is the
+ * single most likely explanation on record.
+ */
+function printApparatusNote(allRows) {
+  const seen = allRows.filter((r) => r.apparatus && 'gpuPid' in r.apparatus);
+  if (!seen.length) return;
+  const transitions = [];
+  for (let i = 1; i < seen.length; i++) {
+    const a = seen[i - 1];
+    const b = seen[i];
+    if (a.apparatus.gpuPid !== b.apparatus.gpuPid) {
+      transitions.push(
+        `    ${String(a.apparatus.gpuPid)} -> ${String(b.apparatus.gpuPid)}  between ` +
+          `${a.task} [${a.arm}] run${a.runIndex} and ${b.task} [${b.arm}] run${b.runIndex}` +
+          (b.recordedAt ? `  (${b.recordedAt})` : ''),
+      );
+    }
+  }
+  if (!transitions.length) return;
+  console.log(
+    `\nAPPARATUS NOTE — the GPU process pid changed ${transitions.length} time(s) across the store.`,
+  );
+  console.log('  A changed GPU pid is a GPU process that crashed and relaunched — the leading');
+  console.log('  hypothesis for the wave-2 wedge. ADVISORY ONLY: no verdict effect. Cross-check');
+  console.log('  against the aperture.<stamp>.log for the same window.');
+  for (const t of transitions.slice(0, 12)) console.log(t);
+  if (transitions.length > 12) console.log(`    … and ${transitions.length - 12} more`);
+}
+
+/**
+ * The preregistered SENSITIVITY line (§3.3.3), never the headline.
+ *
+ * The §3.4 ceiling checkpoint retires a discriminative task that scored 10/10
+ * in BOTH arms over its first ten runs — its later slots are simply not asked
+ * for, while the episodes it already produced STAY in the pool (no post-hoc
+ * exclusion, ever). This line is where the no-ceiling reading lives: the same
+ * stratum verdict, recomputed with those tasks' episodes removed, so a reader
+ * can see whether the headline depends on a task that stopped discriminating.
+ */
+function printSensitivity(stratumRows, stratumTasks, sCI, wCI) {
+  const retired = stratumTasks.filter((t) => {
+    for (const arm of ['diff', 'redump']) {
+      const a = stratumRows.filter((r) => r.task === t.id && r.arm === arm && r.runIndex < 10);
+      if (a.length < 10 || a.some((r) => !r.success)) return false;
+    }
+    return true;
   });
+
+  console.log('\nSENSITIVITY (preregistered, never the headline):');
+  if (!retired.length) {
+    console.log(
+      '  No discriminative task was 10/10 in both arms over its first ten runs, so the\n' +
+        '  ceiling checkpoint retired nothing and this line is identical to the headline.',
+    );
+    return;
+  }
+  const kept = stratumRows.filter((r) => !retired.some((t) => t.id === r.task));
+  const d = summarise(kept, 'diff');
+  const u = summarise(kept, 'redump');
+  if (!d.n || !u.n) {
+    console.log(`  Excluding ${retired.map((t) => t.id).join(', ')} leaves an empty arm — nothing to recompute.`);
+    return;
+  }
+  const s2 = propDiffCI(d.successes, d.n, u.successes, u.n);
+  const w2 = meanDiffCI(d.wrong, u.wrong);
+  console.log(
+    `  Ceiling-checkpoint retirees: ${retired.map((t) => t.id).join(', ')} (10/10 in both arms at N=10).\n` +
+      '  Their episodes STAY in the headline pool. Recomputed WITHOUT them:\n' +
+      `    success delta ${fmtSigned(s2.delta)}  95% CI [${fmtSigned(s2.lo)}, ${fmtSigned(s2.hi)}]  (headline: ${fmtSigned(sCI.delta)} [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}])\n` +
+      `    wrong-el delta ${(w2.delta >= 0 ? '+' : '') + w2.delta.toFixed(3)}/run  95% CI [${w2.lo.toFixed(3)}, ${w2.hi.toFixed(3)}]  (headline: ${(wCI.delta >= 0 ? '+' : '') + wCI.delta.toFixed(3)} [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}])\n` +
+      `    n = ${d.n}/${u.n} per arm.`,
+  );
+  console.log('  This is a sensitivity reading. The verdict below is the headline one.');
+}
+
+// The runner runs when it IS the entry point, and only then. Importing this
+// file (the §3.6 report unit does) must not start a benchmark.
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main()
+    .then((c) => process.exit(c ?? EXIT.INFRA))
+    .catch((e) => {
+      console.error('\nRUNNER FAILED:', e?.stack ?? e);
+      process.exit(EXIT.INFRA);
+    });
+}

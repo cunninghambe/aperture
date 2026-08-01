@@ -408,6 +408,71 @@ const beta = refFor('Beta action', 'button');
   );
 }
 
+// --- G14: a page that suppresses input listeners is not a broken browser ----
+//
+// The Gate-2 HIGH, made permanent (docs/design/tier3.md §1.1, §1.6). The
+// shipped W1 arms its witness on `window` at ACT TIME; a page that registered
+// `stopImmediatePropagation` capture handlers at parse time silences it,
+// because listener order on a node is registration order. The click LANDS —
+// suppressor.html's acknowledgement line grows — and W1 answers with the
+// terminal "the browser is broken, tell the human" error. That is a healthy
+// page (the drag/overlay/editor-library class) converted into a false alarm.
+//
+// The two halves are BOTH load-bearing and neither implies the other:
+//   - `ok click` alone would pass on a build whose witness was simply deleted.
+//   - "acknowledged 1 time" alone proves the click landed, which is exactly
+//     what is true in the RED case too — it is what makes the alarm FALSE.
+// Together they say: the input arrived AND the engine agreed it arrived.
+//
+// Recorded RED against the pre-fix build before the revision landed:
+// docs/design/g14-red-record.md.
+
+{
+  const supModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/suppressor.html?guardrun=${Date.now()}`,
+  });
+  await sleep(2500);
+  const supInitial = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(supInitial)) {
+    console.error(
+      'G14 could not run: suppressor.html did not produce a full snapshot.\n' +
+        supInitial.slice(0, 400),
+    );
+    process.exit(3);
+  }
+  applyObservation(supModel, supInitial);
+
+  const hits = [...supModel.entries()].filter(
+    ([, e]) => e.label === 'Acknowledge' && e.role === 'button',
+  );
+  if (hits.length !== 1) {
+    console.error(
+      `G14 could not run: "Acknowledge" resolves to ${hits.length} buttons on suppressor.html`,
+    );
+    process.exit(3);
+  }
+
+  const acted = await call('browser_act', { action: 'click', ref: hits[0][0] });
+  await sleep(300);
+  // The page's own evidence, read fresh and independently of what the act
+  // said about itself — the same rule the rest of this file follows.
+  const after = await call('browser_snapshot', { mode: 'full' });
+  const okClick = /^ok click/.test(acted);
+  const landed = after.includes('acknowledged 1 time');
+  check(
+    'G14',
+    'a page that suppresses input listeners is reported as ok, not as a dead input path',
+    okClick && landed,
+    `reply: ${acted.split('\n')[0].slice(0, 200)}\n        ` +
+      `begins "ok click": ${okClick}; page shows "acknowledged 1 time": ${landed}` +
+      (!okClick && landed
+        ? '\n        FALSE ALARM: the click landed and the engine called the input path dead.'
+        : ''),
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 const failed = checks.filter((c) => !c.ok);

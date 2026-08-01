@@ -172,6 +172,72 @@ export function labelsAgree(pageLabel, modelLabel) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+/**
+ * Only an error that says a ref is gone can be about a ref. Module-scope
+ * because `attributeAct` and `doAct` must ask the same question of the same
+ * bytes — two copies of this regex is exactly the drift the extraction below
+ * exists to make impossible.
+ */
+export const REF_ERROR =
+  /is not a known element|could not be acted on|no longer|has gone|not found/i;
+
+/**
+ * The engine's own report that input never arrived — W1's terminal error.
+ *
+ * CROSS-REPO CONTRACT (docs/design/tier3.md §1.5, atomicity seam 1): this
+ * clause is emitted by `src/mcp/tools.ts` and consumed here and by
+ * `deadActsFrom` in bench/task.mjs. Neither side rewords it unilaterally; the
+ * substring is pinned by test/act.test.ts on the product side and by
+ * test/benchAttribution.test.ts on this side.
+ */
+export const INPUT_LOSS = /input was dispatched but never reached the page/;
+
+/**
+ * Which of the six attribution buckets an act falls into — the whole decision,
+ * as a pure function of what came back and what the shadow model held.
+ *
+ * Extracted from `doAct` (behaviour identical) because this routing is the one
+ * attribution change wave 2 shipped untested, and it is the exact class of
+ * thing this project keeps getting bitten by: a two-line ternary that decides
+ * which component gets blamed for every failure in the store
+ * (docs/design/gate2-review.md; tier3.md §4.1).
+ *
+ * `labelsAgreeFn` is a UNARY predicate over the page's label, so the pure
+ * function never needs the shadow label itself — `doAct` binds it, and a test
+ * can bind whatever it wants to. Default: nothing to contradict, which is
+ * `labelsAgree`'s own rule for an unknown label.
+ */
+export function attributeAct({
+  errored,
+  text,
+  shadowHad,
+  landedEvents,
+  allowed,
+  labelsAgreeFn = () => true,
+}) {
+  if (errored) {
+    // ORDER IS THE CONTRACT. Input loss is checked FIRST because it is the
+    // engine's, categorically: it names no ref, so the ref test below would
+    // route it to `invalid_action` — polluting the one category wave 2's fix
+    // just cleaned, with the single most incriminating signal the suite has.
+    if (INPUT_LOSS.test(text)) return 'engine_input_loss';
+    // A VALIDATION error is the agent's, and it is neither of the other two.
+    // `shadowHad` defaults to TRUE for a ref-less act, so without this test
+    // `error: unsupported key: s` and `error: text required for type` both
+    // land in `engine_ref_loss` — 3 of the 6 `engine_ref_loss` acts in wave
+    // 2's entire 251-episode store were malformed arguments
+    // (wave2-evaluation.md §5).
+    if (!REF_ERROR.test(text)) return 'invalid_action';
+    return shadowHad ? 'engine_ref_loss' : 'model_bookkeeping';
+  }
+  if (!landedEvents.length) return 'no_page_effect';
+  const landed = landedEvents[landedEvents.length - 1];
+  if (!labelsAgreeFn(landed.detail?.label)) return 'identity_mismatch';
+  const ok = allowed instanceof Set ? allowed : new Set(allowed ?? []);
+  if (!ok.has(landed.detail?.bench)) return 'wrong_choice';
+  return 'ok';
+}
+
 export async function startProxy({ apertureUrl, apertureToken, collector, port = PROXY_PORT }) {
   const token = randomBytes(24).toString('base64url');
   const upstream = makeUpstream(apertureUrl, apertureToken);
@@ -238,9 +304,6 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     applyObservation(ep.model, text);
   }
 
-  const REF_ERROR =
-    /is not a known element|could not be acted on|no longer|has gone|not found/i;
-
   async function doAct(args) {
     // task_done ends the session. Without this the model can call it and then
     // carry on acting, and every one of those actions would be scored against a
@@ -291,36 +354,19 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
     // should have dropped.
     if (ep.observations.length - 1 - ep.lastFullAt <= 2) tags.push('post_resync');
 
-    let attribution;
-    let landed = null;
-    if (errored) {
-      // A VALIDATION error is the agent's, and it is neither of the other two.
-      //
-      // Every `^error:` used to be routed through the ref test, and `shadowHad`
-      // defaults to TRUE for a ref-less act — so `error: unsupported key: s` and
-      // `error: text required for type`, which name no ref and lose no ref, both
-      // landed in `engine_ref_loss`. Measured cost of that in wave 2: 3 of the
-      // 6 `engine_ref_loss` acts in the whole 251-episode store were malformed
-      // arguments (wave2-evaluation.md §5), i.e. the single metric that would
-      // most incriminate the engine was half noise from the agent.
-      //
-      // REF_ERROR is what makes the distinction: only an error that says a ref
-      // is gone can be about a ref.
-      attribution = !REF_ERROR.test(text)
-        ? 'invalid_action'
-        : shadowHad
-          ? 'engine_ref_loss'
-          : 'model_bookkeeping';
-      ep.errors.push(text.slice(0, 200));
-    } else if (landedEvents.length === 0) {
-      attribution = 'no_page_effect';
-    } else {
-      landed = landedEvents[landedEvents.length - 1];
-      const pageLabel = landed.detail?.label;
-      if (!labelsAgree(pageLabel, shadowLabel)) attribution = 'identity_mismatch';
-      else if (!ep.allowed.has(landed.detail?.bench)) attribution = 'wrong_choice';
-      else attribution = 'ok';
-    }
+    // The decision itself lives in `attributeAct` above, and is unit-tested
+    // there. This call site keeps only what is stateful: the error tail, and
+    // which witness event the act is attributed to.
+    const attribution = attributeAct({
+      errored,
+      text,
+      shadowHad,
+      landedEvents,
+      allowed: ep.allowed,
+      labelsAgreeFn: (pageLabel) => labelsAgree(pageLabel, shadowLabel),
+    });
+    if (errored) ep.errors.push(text.slice(0, 200));
+    const landed = errored || !landedEvents.length ? null : landedEvents[landedEvents.length - 1];
 
     ep.acts.push({
       action: args.action,

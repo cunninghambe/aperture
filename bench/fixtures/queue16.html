@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Moderation queue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Moderation queue</h1>
+      <p data-status>16 pending</p>
+      <ul id="queue"></ul>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // T4 — L1 x L2: POSITIONAL WORK ACROSS A FORCED EPOCH RESET.
+      // (docs/design/tier3.md §3.2. queue.html's mechanics, scaled to 16 rows.)
+      //
+      // Everything about a row here is queue.html's, deliberately unchanged: the
+      // same two labels, the same divider rule, the same handler, the same
+      // counter wording. The ONLY variable is the length of the queue, and the
+      // length is the load: MAX_DIFFS_PER_EPOCH is 12, so a 16-act episode
+      // crosses the epoch budget mid-task and the engine forcibly restates the
+      // whole page. The model must carry "which ordinals have I already handled"
+      // across its own state reset, on a page where identical rows are told
+      // apart by nothing but position and its own memory.
+      //
+      // That is vault.html's L2 crossed with queue.html's L1 — and unlike
+      // vault's (where the fact carried across the reset is a static code), the
+      // post-reset work here is POSITIONAL, so the reset lands on exactly the
+      // bookkeeping the suite is measuring.
+      //
+      // REMOVALS ONLY, like every wave-3 fixture, and for the reason recorded in
+      // tier3.md §3.1: prepending an identical row emits ONE `add` and silently
+      // rebinds every surviving ordinal ref — an engine hole no diff-side rule
+      // can close, and not the variable under test. It is also the constraint
+      // that makes the solver's `nth` targeting valid at all (see the note on
+      // `resolveLabel` in bench/task.mjs).
+      //
+      // The rest of queue.html's reasoning applies verbatim and is not repeated
+      // here: no id on any row or button, `data-bench` as the witness handle
+      // only, no <a>/<h1-h4> inside a row, content-identical rows, so every
+      // button falls through to the S-tier key and `disambiguate` appends a
+      // document-order ordinal that is recomputed on every walk.
+      //
+      // The divider on every third CURRENT index caps any same-shape run at 2
+      // for 16 rows (dividers at indices 0, 3, 6, 9, 12, 15), under every
+      // removal order — comfortably under COLLAPSE_RUN (5), so no row the task
+      // needs is ever hidden behind "… N more listitems". Because the marker
+      // follows the position rather than the row, a removal produces no shape
+      // churn: what is left in the diff is the pending count and the retired
+      // refs.
+      var queue = [
+        { id: 'q1' }, { id: 'q2' }, { id: 'q3' }, { id: 'q4' },
+        { id: 'q5' }, { id: 'q6' }, { id: 'q7' }, { id: 'q8' },
+        { id: 'q9' }, { id: 'q10' }, { id: 'q11' }, { id: 'q12' },
+        { id: 'q13' }, { id: 'q14' }, { id: 'q15' }, { id: 'q16' },
+      ];
+      var approved = [];
+      var rejected = [];
+
+      var listEl = document.getElementById('queue');
+      // Addressed without an id on purpose — queue.html's note applies verbatim:
+      // a non-generated id would give this paragraph a stable Tier-1 key, and
+      // its text change would arrive as a propDelta update on a ref the model
+      // has never been shown, which diff.ts routes to `unread` instead of
+      // emitting. Keyed by its own content, the change arrives as a remove plus
+      // an add, which is how `12 pending` reaches the stream.
+      var statusEl = document.querySelector('p[data-status]');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function render() {
+        var rows = queue.map(function (item, i) {
+          var li = document.createElement('li');
+          if (i % 3 === 0) li.append(el('span', 'divider'));
+          li.append(el('span', 'Queued submission'));
+          li.append(el('button', 'Approve', { 'data-bench': 'approve:' + item.id }));
+          li.append(el('button', 'Reject', { 'data-bench': 'reject:' + item.id }));
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+        statusEl.textContent = queue.length + ' pending';
+      }
+
+      listEl.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        for (var i = 0; i < queue.length; i++) {
+          if (queue[i].id === parts[1]) {
+            (parts[0] === 'approve' ? approved : rejected).push(queue[i].id);
+            queue.splice(i, 1);
+            break;
+          }
+        }
+        render();
+      });
+
+      render();
+      window.bench.register(function () {
+        return {
+          pending: queue.map(function (q) { return q.id; }),
+          approved: approved.slice(),
+          rejected: rejected.slice(),
+        };
+      });
+    </script>
+  </body>
+</html>

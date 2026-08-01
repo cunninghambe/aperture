@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Twin queues</title>
+  </head>
+  <body>
+    <main>
+      <h1>Twin queues</h1>
+
+      <section aria-label="Interviews">
+        <h2>Interviews</h2>
+        <p data-status="interviews">6 interviews pending</p>
+        <ul id="interviews"></ul>
+      </section>
+
+      <section aria-label="Deliveries">
+        <h2>Deliveries</h2>
+        <p data-status="deliveries">5 deliveries pending</p>
+        <ul id="deliveries"></ul>
+      </section>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // T2 — L1 x 2: TWO INDEPENDENT ORDINAL SPACES, and scoped restatement.
+      // (docs/design/tier3.md §3.2. Read that section before editing anything
+      // here; several choices below look arbitrary and are not.)
+      //
+      // queue.html loads positional identity once. This loads it twice, side by
+      // side, and adds the thing a single family cannot ask for: after a removal
+      // in ONE family, post-P1 the engine restates THAT family (one `replace`
+      // carrying a `gone` list) and says nothing about the other. The diff arm
+      // must therefore merge a freshly restated A with a B it has only ever been
+      // told about once. The re-dump arm is handed both, every turn. That
+      // difference is the entire experiment, and no other fixture in the suite
+      // puts it under positional identity.
+      //
+      // REMOVALS ONLY, like every wave-3 fixture. tier3.md §3.1 records the
+      // probe: PREPENDING an identical row into a positional family emits ONE
+      // `add` and silently rebinds every surviving ordinal ref, which no
+      // diff-side rule can fix. A task built on insertion would measure that
+      // known engine hole rather than the variable under test, so this fixture
+      // must never grow an insert path.
+      //
+      // THE TWO FAMILY-SEPARATION LEVERS, both deliberate:
+      //   1. DISTINCT BUTTON LABELS ("Approve interview" vs "Approve delivery").
+      //      `identityKey`'s S-tier includes norm(name), so the label is IN the
+      //      key and the two families cannot collide.
+      //   2. NAMED SECTIONS (<section aria-label="…">), which put a distinct
+      //      anchor into each row's ancestry.
+      // Either alone should be enough. Both are here because `disambiguate`'s
+      // `ctx.seen` is WALK-GLOBAL: if the two families did share a key, they
+      // would share ONE ordinal sequence, and rejecting an interview would
+      // silently renumber every delivery — a coupling that would make this
+      // fixture measure something nobody designed. Which lever the walker
+      // actually honours is NOT asserted here; it is proved on live bytes by the
+      // task's streamAssert at --selftest (tier3.md §8 lists it as delegated).
+      // If separation fails, adjust the markup until the assert passes: the
+      // assert is the contract, the markup is only the means.
+      //
+      // Everything else follows queue.html's conventions exactly, and for its
+      // reasons: no `id` on any row or button (so Tier-1 identity cannot bind),
+      // `data-bench` as the witness handle only (never data-testid, which IS
+      // Tier-1 identity input), no <a>/<h1-h4> inside a row (so
+      // `siblingDiscriminator` returns undefined and S-tier ordinals stay the
+      // identity), rows content-identical within a family, `replaceChildren`
+      // re-render, no randomness.
+      //
+      // The status paragraphs are addressed by ATTRIBUTE, not by id: a
+      // non-generated id would give each one a stable Tier-1 key, its text
+      // change would arrive as a propDelta update on a ref the model has never
+      // been shown, and diff.ts would route it to `unread` instead of emitting
+      // it. Keyed by content, the change arrives as a remove plus an add — which
+      // is how the task's `4 interviews pending` reaches the stream at all.
+      //
+      // The "divider" marker on every third CURRENT index (per list) is not
+      // decoration and not a row property: six same-shape siblings would hit
+      // COLLAPSE_RUN (5) and render as "… N more listitems", hiding rows the
+      // task needs. Because it follows the POSITION rather than the row, the
+      // shape of the row at ordinal i never changes as a list shrinks, so a
+      // removal produces no shape churn — only the pure signal.
+      var interviews = [
+        { id: 'i1' }, { id: 'i2' }, { id: 'i3' },
+        { id: 'i4' }, { id: 'i5' }, { id: 'i6' },
+      ];
+      var deliveries = [
+        { id: 'd1' }, { id: 'd2' }, { id: 'd3' }, { id: 'd4' }, { id: 'd5' },
+      ];
+      var approvedInterviews = [];
+      var rejectedInterviews = [];
+      var approvedDeliveries = [];
+      var rejectedDeliveries = [];
+
+      var interviewsEl = document.getElementById('interviews');
+      var deliveriesEl = document.getElementById('deliveries');
+      var interviewsStatus = document.querySelector('p[data-status="interviews"]');
+      var deliveriesStatus = document.querySelector('p[data-status="deliveries"]');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function renderList(listEl, items, rowText, approveLabel, rejectLabel) {
+        var rows = items.map(function (item, i) {
+          var li = document.createElement('li');
+          if (i % 3 === 0) li.append(el('span', 'divider'));
+          li.append(el('span', rowText));
+          li.append(el('button', approveLabel, { 'data-bench': 'approve:' + item.id }));
+          li.append(el('button', rejectLabel, { 'data-bench': 'reject:' + item.id }));
+          return li;
+        });
+        listEl.replaceChildren.apply(listEl, rows);
+      }
+
+      function render() {
+        renderList(interviewsEl, interviews, 'Interview slot', 'Approve interview', 'Reject interview');
+        renderList(deliveriesEl, deliveries, 'Delivery run', 'Approve delivery', 'Reject delivery');
+        interviewsStatus.textContent = interviews.length + ' interviews pending';
+        deliveriesStatus.textContent = deliveries.length + ' deliveries pending';
+      }
+
+      // One delegated handler for both lists, and the family is decided by which
+      // array holds the id — the same splice-push-rerender semantics as
+      // queue.html, applied twice.
+      function onClick(ev) {
+        var b = ev.target.closest('button[data-bench]');
+        if (!b) return;
+        var parts = b.getAttribute('data-bench').split(':');
+        var isInterview = parts[1].charAt(0) === 'i';
+        var queue = isInterview ? interviews : deliveries;
+        for (var i = 0; i < queue.length; i++) {
+          if (queue[i].id === parts[1]) {
+            if (parts[0] === 'approve') {
+              (isInterview ? approvedInterviews : approvedDeliveries).push(queue[i].id);
+            } else {
+              (isInterview ? rejectedInterviews : rejectedDeliveries).push(queue[i].id);
+            }
+            queue.splice(i, 1);
+            break;
+          }
+        }
+        render();
+      }
+
+      interviewsEl.addEventListener('click', onClick);
+      deliveriesEl.addEventListener('click', onClick);
+
+      render();
+      window.bench.register(function () {
+        return {
+          pendingInterviews: interviews.map(function (q) { return q.id; }),
+          pendingDeliveries: deliveries.map(function (q) { return q.id; }),
+          approvedInterviews: approvedInterviews.slice(),
+          rejectedInterviews: rejectedInterviews.slice(),
+          approvedDeliveries: approvedDeliveries.slice(),
+          rejectedDeliveries: rejectedDeliveries.slice(),
+        };
+      });
+    </script>
+  </body>
+</html>

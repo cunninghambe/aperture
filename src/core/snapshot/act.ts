@@ -22,6 +22,7 @@ let wired = false;
 const pending = new Map<string, (payload: unknown) => void>();
 const armings = new Map<string, (payload: unknown) => void>();
 const witnesses = new Map<string, (payload: unknown) => void>();
+const polls = new Map<string, (payload: unknown) => void>();
 
 function wireOnce(): void {
   if (wired) return;
@@ -37,6 +38,10 @@ function wireOnce(): void {
   ipcMain.on('aperture:witness-result', (_e, requestId: string, payload: unknown) => {
     witnesses.get(requestId)?.(payload);
     witnesses.delete(requestId);
+  });
+  ipcMain.on('aperture:witness-poll-result', (_e, requestId: string, payload: unknown) => {
+    polls.get(requestId)?.(payload);
+    polls.delete(requestId);
   });
 }
 
@@ -74,12 +79,20 @@ export async function resolveRef(
 /**
  * Did the input we dispatched actually reach the page?
  *
- * `landed`  — an event of the expected type was observed in the page.
- * `lost`    — the witness was armed and NOTHING arrived. The input path is
- *             dead; `ok` would be a lie.
- * `unknown` — no witness could be armed (element gone, preload silent). The
- *             act proceeds and is reported normally: a mechanism that turns
- *             its own unavailability into an error would invent failures.
+ * `landed`  — a trusted event of a relevant type was counted in the page.
+ * `lost`    — a live recorder covering the top document, in the SAME document
+ *             the baseline was taken in, counted NOTHING relevant at 500ms and
+ *             again at 2500ms. The input path is dead; `ok` would be a lie.
+ * `unknown` — the witness could not speak: the poll went unanswered, the
+ *             element was gone, the target was in a subframe and the
+ *             (suppressible) one-shot stayed silent, a re-poll failed
+ *             mid-settle, or THE DOCUMENT CHANGED under the act. The act
+ *             proceeds and is reported normally: a mechanism that turns its
+ *             own unavailability into an error would invent failures.
+ *
+ * Two contract lines follow from that, and both are deliberate:
+ * a suppressing-but-alive page cannot produce `lost`, and **a navigating act
+ * cannot produce `lost`** (docs/design/tier3.md §1.4 and Amendment A.2).
  */
 export type DispatchVerdict = 'landed' | 'lost' | 'unknown';
 
@@ -92,25 +105,248 @@ export interface InputWitness {
 const WITNESS_CLEANUP_MS = 5000;
 /** The post-dispatch window. Wave-2's wedge produced silence for 40 minutes. */
 const WITNESS_WINDOW_MS = 500;
+/**
+ * The bounded retry after a silent first window: 2500ms total post-dispatch.
+ *
+ * A page whose main thread is blocked by a long task delivers the event late,
+ * and 500ms of silence on a busy-but-alive page must not produce a terminal
+ * error. A wedge is not a latency phenomenon — wave 2's was absolute silence
+ * for forty minutes — so waiting another two seconds costs no detection power
+ * and removes a whole false-alarm class.
+ */
+const WITNESS_RETRY_MS = 2000;
+/** A poll the preload never answers means the apparatus is gone, not broken. */
+const POLL_TIMEOUT_MS = 1000;
+/**
+ * The short-circuit ladder: extra polls at 20% and 50% of the settle window —
+ * 100ms and 250ms against the shipped 500ms — as fractions, so the whole
+ * schedule scales with whatever `settle(ms)` is given.
+ *
+ * WHY. Arrival on a healthy page is ~0-5ms, and waiting the full 500ms before
+ * asking cost ~500ms on EVERY act: roughly an hour across wave 3's ~7,000
+ * acts, which is money and also an hour more exposure to the very wedge this
+ * exists to catch. Polling earlier cannot change WHICH acts are `landed` — the
+ * counters only increment, so an advance visible at 100ms is visible at 500ms,
+ * and a trace frozen through 500ms reaches exactly the same authoritative poll
+ * it always did.
+ *
+ * The rungs are ADVANCE-ONLY, and that rule is load-bearing rather than
+ * tidiness: an unanswered or unhappy rung is IGNORED and falls through to the
+ * next. Only the 500ms poll and the 2500ms re-poll carry `unknown` authority.
+ * Without the rule, a flaky-but-recovering IPC channel would convert traces
+ * that score `landed` or `lost` into `unknown` — precisely on the
+ * apparatus-degradation traces G6b exists to see. Amendment A.3 of
+ * docs/design/tier3.md.
+ */
+const RUNG_FRACTIONS = [0.2, 0.5] as const;
+
+/** Which recorder counters an action is allowed to be witnessed by. */
+export const RELEVANT_COUNTERS = {
+  click: ['pointerdown', 'mousedown', 'mouseup', 'click'],
+  clear: ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'],
+  type: ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'],
+  hover: ['mousemove'],
+  scroll: ['wheel'],
+  key: ['keydown'],
+} as const satisfies Record<string, readonly string[]>;
+
+interface PollOk {
+  ok: true;
+  top: boolean;
+  /**
+   * Identity of the DOCUMENT that owns `counts`. Absent only if a preload
+   * older than Amendment A ever answers — in which case every reply lacks it
+   * equally, the comparison below degrades to "always matches", and behaviour
+   * is the pre-amendment behaviour rather than a spurious mismatch.
+   */
+  docToken?: string;
+  counts: Record<string, number>;
+}
+type PollResult = PollOk | { ok: false; reason: string } | null;
+
+/** One `aperture:witness-poll` round trip. `null` means it went unanswered. */
+async function pollWitness(
+  wc: WebContents,
+  key: string | null,
+  timeoutMs: number,
+): Promise<PollResult> {
+  wireOnce();
+  const requestId = randomUUID();
+  return new Promise<PollResult>((resolve) => {
+    const timer = setTimeout(() => {
+      polls.delete(requestId);
+      resolve(null);
+    }, timeoutMs);
+    polls.set(requestId, (p) => {
+      clearTimeout(timer);
+      resolve((p as PollResult) ?? null);
+    });
+    try {
+      wc.send('aperture:witness-poll', { requestId, ...(key === null ? {} : { key }) });
+    } catch {
+      // The tab was destroyed mid-act. That is the apparatus going away, not
+      // the input path failing, and it must resolve to `unknown` rather than
+      // throwing out of `settle()` into the tool's error path.
+      clearTimeout(timer);
+      polls.delete(requestId);
+      resolve(null);
+    }
+  });
+}
+
+/** Did any counter in the relevant set move between two polls? */
+function advanced(
+  before: Record<string, number>,
+  after: Record<string, number>,
+  kinds: readonly string[],
+): boolean {
+  return kinds.some((k) => (after[k] ?? 0) > (before[k] ?? 0));
+}
+
+/** The verdict a witness that could not be established must return. */
+const UNKNOWN_WITNESS: InputWitness = { settle: async () => 'unknown' };
+
+export interface WitnessTuning {
+  settleMs?: number;
+  retryMs?: number;
+  pollTimeoutMs?: number;
+  armTimeoutMs?: number;
+}
 
 /**
- * Install a one-shot page-side witness, then let the caller dispatch.
+ * Establish a witness for input that is about to be dispatched.
+ *
+ * WHY THIS EXISTS. Wave 2 ended with Aperture's input path wedged for forty
+ * minutes while `browser_act` answered `ok` to every call: CDP
+ * `Input.dispatchMouseEvent` resolved, the walker kept serving snapshots, the
+ * renderer kept loading pages — and not one click reached the DOM. Nothing
+ * anywhere in the stack could tell "the click landed and the page did nothing"
+ * from "the click never landed", so the agent was told the first when the
+ * truth was the second. CDP's completion is a statement about the browser
+ * process accepting the command, not about arrival in the DOM.
+ *
+ * WHY IT IS A POLL AND NOT A LISTENER. The first W1 armed a listener at act
+ * time; Gate 2 proved live that a page's own earlier-registered
+ * `stopImmediatePropagation` capture handler silences it, so healthy pages
+ * with drag/overlay/editor handlers were reported as a broken browser. The
+ * recorder in `src/preload/page.ts` is registered at document_start, ahead of
+ * every page script, and only counts `isTrusted` events — a page can neither
+ * suppress it nor feed it. This function reads those counters across the
+ * dispatch.
+ *
+ * Three modes, and which one is chosen is itself the safety property:
+ *
+ *   - **unknown mode** — the baseline poll went unanswered or came back
+ *     unhappy. `settle()` returns `'unknown'` unconditionally. A mechanism
+ *     that turned its own unavailability into an error would invent failures.
+ *   - **subframe mode** (`top: false`) — the target lives in another document,
+ *     which the recorder cannot speak for. Falls back to the one-shot
+ *     listener: fired → `landed`, silent → `unknown`, NEVER `lost`. A
+ *     suppressible witness is not allowed to declare the input path dead.
+ *   - **recorder mode** (`top: true`, including targetless scroll/key) — the
+ *     only mode that can return `lost`, and only after two silent windows in
+ *     one unbroken document.
+ */
+export async function witnessInput(
+  wc: WebContents,
+  key: string | null,
+  kinds: readonly string[],
+  tuning: WitnessTuning = {},
+): Promise<InputWitness> {
+  wireOnce();
+  const pollTimeoutMs = tuning.pollTimeoutMs ?? POLL_TIMEOUT_MS;
+  const settleMs = tuning.settleMs ?? WITNESS_WINDOW_MS;
+  const retryMs = tuning.retryMs ?? WITNESS_RETRY_MS;
+
+  const baseline = await pollWitness(wc, key, pollTimeoutMs);
+  if (!baseline || baseline.ok !== true) return UNKNOWN_WITNESS;
+
+  if (!baseline.top) {
+    // `top: false` is only reachable when a key was supplied — the preload
+    // answers `top: true` for a keyless poll, because a keyless poll is asking
+    // about the document the recorder covers. The guard is belt-and-braces:
+    // if that ever stops holding, the answer is `unknown`, never a verdict
+    // derived from a frame the recorder cannot see.
+    if (key === null) return UNKNOWN_WITNESS;
+    return armOneShotWitness(wc, key, kinds, tuning.armTimeoutMs ?? 1000);
+  }
+
+  const before = baseline.counts;
+  const baseToken = baseline.docToken;
+
+  /**
+   * One rung of the ladder, or one authoritative poll.
+   *
+   * `'continue'` means "nothing decided here" — for an early rung that is also
+   * what an unanswered or unhappy poll produces, which is the advance-only
+   * rule; an authoritative poll turns those into `'unknown'` instead.
+   */
+  const read = (r: PollResult, authoritative: boolean): DispatchVerdict | 'continue' => {
+    if (!r || r.ok !== true) return authoritative ? 'unknown' : 'continue';
+    // The document turned over under the act — a link click, an Enter that
+    // submitted. The counters on the other side of that boundary belong to a
+    // different recorder and comparing them says nothing, so this resolves
+    // immediately: a later poll can never re-match, and there is nothing left
+    // to wait for. `unknown` rather than `landed` because the token proves the
+    // document changed, NOT that this act's input arrived; the observe that
+    // follows reports the navigation either way. A wedge cannot escape here —
+    // a wedged tab delivers no input, so nothing navigates, so the token still
+    // matches and the counters are still frozen at 2500ms.
+    if (r.docToken !== baseToken) return 'unknown';
+    if (advanced(before, r.counts, kinds)) return 'landed';
+    return 'continue';
+  };
+
+  return {
+    settle: async (ms = settleMs): Promise<DispatchVerdict> => {
+      // Every poll after the baseline deliberately carries NO key. The key's
+      // only job was answering the frame question, which the baseline already
+      // answered; the counters are a property of the document, not of the
+      // element. Re-keying would report `unknown` for every act that
+      // legitimately removed its own target — a click on "Reject" that deletes
+      // its row — which is most of what an agent does, and it would buy
+      // nothing: under a real wedge the target never disappears, because
+      // nothing happened.
+      let elapsed = 0;
+      for (const fraction of RUNG_FRACTIONS) {
+        const at = Math.round(ms * fraction);
+        await delay(at - elapsed);
+        elapsed = at;
+        const verdict = read(await pollWitness(wc, null, pollTimeoutMs), false);
+        if (verdict !== 'continue') return verdict;
+      }
+
+      await delay(ms - elapsed);
+      const authoritative = read(await pollWitness(wc, null, pollTimeoutMs), true);
+      if (authoritative !== 'continue') return authoritative;
+
+      await delay(retryMs);
+      const retried = read(await pollWitness(wc, null, pollTimeoutMs), true);
+      return retried === 'continue' ? 'lost' : retried;
+    },
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * The pre-tier3 one-shot listener, kept for subframe targets only.
  *
  * The two-step (arm, ack, dispatch) is not ceremony: a synthesized click can
  * beat an `addEventListener` into place, and a witness that loses that race
- * reports `lost` for input that landed perfectly — a false alarm on the exact
- * path an agent must be able to trust.
+ * reports a false alarm on the exact path an agent must be able to trust.
  *
- * `settle` counts its window from the moment it is called, i.e. from AFTER the
- * dispatch, which is the only interval the 500ms is meaningfully about.
+ * Its silence is `'unknown'`, never `'lost'` — see `witnessInput`'s subframe
+ * mode and docs/design/tier3.md §1.3.2.
  */
-export async function armInputWitness(
+async function armOneShotWitness(
   wc: WebContents,
   key: string,
-  types: string[],
-  armTimeoutMs = 1000,
+  types: readonly string[],
+  armTimeoutMs: number,
 ): Promise<InputWitness> {
-  wireOnce();
   const requestId = randomUUID();
 
   const result = new Promise<unknown>((resolve) => {
@@ -129,14 +365,14 @@ export async function armInputWitness(
     wc.send('aperture:witness', {
       requestId,
       key,
-      types,
+      types: [...types],
       timeoutMs: WITNESS_CLEANUP_MS,
     });
   });
 
   if (!armed) {
     witnesses.delete(requestId);
-    return { settle: async () => 'unknown' };
+    return UNKNOWN_WITNESS;
   }
 
   return {
@@ -147,11 +383,11 @@ export async function armInputWitness(
         // cleanup timer, and letting that answer land is what frees the entry.
         // `resolve` after the first call is a no-op, so the late reply cannot
         // change a verdict already returned.
-        const timer = setTimeout(() => resolve('lost'), ms);
+        const timer = setTimeout(() => resolve('unknown'), ms);
         void result.then((p) => {
           clearTimeout(timer);
           const r = p as { witnessed?: boolean } | null;
-          resolve(r?.witnessed === true ? 'landed' : 'lost');
+          resolve(r?.witnessed === true ? 'landed' : 'unknown');
         });
       }),
   };

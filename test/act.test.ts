@@ -2,20 +2,51 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as z from 'zod';
 
 /**
- * `browser_act` at the tool boundary, with the engine stubbed.
+ * `browser_act` at the tool boundary, plus W1's witness against a fake preload.
  *
- * These are the two claims the tool makes that no other test covers: that
- * `observe` selects between a diff and a full snapshot by riding the SAME
- * `opts.full` the engine already has, and that a successful `select` produces
- * a well-formed result at all.
+ * Two layers, deliberately:
  *
- * The second one is not hypothetical politeness. The success path originally
- * read a variable declared inside the failure branch — and it type-checked,
- * because `origin` is a DOM global, so `tsc` bound it to `lib.dom` and said
- * nothing while the main process would have thrown ReferenceError on every
- * successful select. Green types, green units, broken product: exactly the
- * failure this project keeps hitting. Calling the handler is what catches it.
+ *  1. The TOOL layer, with the engine stubbed. These are the claims no other
+ *     test covers: that `observe` selects between a diff and a full snapshot by
+ *     riding the SAME `opts.full` the engine already has, that a successful
+ *     `select` produces a well-formed result at all, and that each dispatch
+ *     verdict routes to the right answer.
+ *
+ *     The select case is not hypothetical politeness. The success path
+ *     originally read a variable declared inside the failure branch — and it
+ *     type-checked, because `origin` is a DOM global, so `tsc` bound it to
+ *     `lib.dom` and said nothing while the main process would have thrown
+ *     ReferenceError on every successful select. Green types, green units,
+ *     broken product: exactly the failure this project keeps hitting.
+ *
+ *  2. The WITNESS layer (docs/design/tier3.md §1.6), against the real
+ *     `witnessInput` with a scripted preload on a fake IPC bus. Gate 2 proved
+ *     that the previous witness turned a healthy page into a browser-is-broken
+ *     alarm, so the verdict machine itself now has to be exercised, not just
+ *     the branch that consumes it.
  */
+
+// --- a fake ipcMain, so the real act.ts can be driven end to end -------------
+
+const { fakeIpcMain, ipcHandlers } = vi.hoisted(() => {
+  type Listener = (...args: unknown[]) => void;
+  const handlers = new Map<string, Listener[]>();
+  const ipc = {
+    on(channel: string, fn: Listener) {
+      handlers.set(channel, [...(handlers.get(channel) ?? []), fn]);
+      return ipc;
+    },
+    emit(channel: string, ...args: unknown[]) {
+      for (const fn of handlers.get(channel) ?? []) fn(...args);
+    },
+  };
+  return { fakeIpcMain: ipc, ipcHandlers: handlers };
+});
+
+// Every other named import from electron is already `undefined` under vitest
+// (the package resolves to a CJS module exporting the binary's path), so this
+// mock changes exactly one thing: `ipcMain` becomes drivable.
+vi.mock('electron', () => ({ ipcMain: fakeIpcMain }));
 
 // --- the engine, stubbed ----------------------------------------------------
 
@@ -56,14 +87,27 @@ vi.mock('@core/snapshot/engine.js', () => ({
  * The dispatch witness (W1), stubbed at the seam the product uses.
  *
  * `'landed'` is the healthy default. `'lost'` is the wave-2 wedge: CDP accepts
- * the command, the page never sees the event. `'unknown'` is "no witness could
- * be armed", which must behave exactly like today.
+ * the command, the page never sees the event. `'unknown'` is "the witness could
+ * not speak", which must behave exactly like no witness at all.
+ *
+ * `RELEVANT_COUNTERS` is duplicated rather than imported: the tool indexes it
+ * by action, so a mock that omitted an action would fail as a crash rather than
+ * as a wrong verdict, and the duplication is what makes the scroll/key entries
+ * a thing this file asserts about.
  */
 let dispatchVerdict: 'landed' | 'lost' | 'unknown' = 'landed';
 
 vi.mock('@core/snapshot/act.js', () => ({
   resolveRef: vi.fn(async () => resolveReply),
-  armInputWitness: vi.fn(async () => ({ settle: async () => dispatchVerdict })),
+  witnessInput: vi.fn(async () => ({ settle: async () => dispatchVerdict })),
+  RELEVANT_COUNTERS: {
+    click: ['pointerdown', 'mousedown', 'mouseup', 'click'],
+    clear: ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'],
+    type: ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'],
+    hover: ['mousemove'],
+    scroll: ['wheel'],
+    key: ['keydown'],
+  },
   click: vi.fn(),
   hover: vi.fn(),
   clearField: vi.fn(),
@@ -151,6 +195,25 @@ describe('browser_act observe parameter', () => {
   });
 });
 
+/**
+ * The exact sentence, written out rather than pattern-matched.
+ *
+ * The clause "input was dispatched but never reached the page" is a CROSS-REPO
+ * CONTRACT (docs/design/tier3.md §1.5 and §5 seam 1): bench/lib/proxy.mjs keys
+ * `engine_input_loss` attribution off it and task.mjs's G6b quarantine counts
+ * it. A reword here silently refiles engine failures as agent errors in every
+ * scored store, which is the sort of change that passes review and ruins a
+ * wave. Copying the whole sentence is the point: it has to be edited in two
+ * places on purpose.
+ */
+const INPUT_LOSS_CONTRACT = 'input was dispatched but never reached the page';
+const LOST_CLICK =
+  'error: input was dispatched but never reached the page. The click was sent ' +
+  'and no trusted input event was observed in the page within 2.5s (checked ' +
+  'twice). Aperture\'s input path to this tab is not working — retrying will ' +
+  'not take effect. The page was not changed by this call. Tell the human; ' +
+  'this needs the browser restarted.';
+
 describe('W1 — browser_act must not ack input that never reached the page', () => {
   /**
    * Wave 2 (docs/design/wave2-evaluation.md §6): Aperture's input path wedged
@@ -162,13 +225,13 @@ describe('W1 — browser_act must not ack input that never reached the page', ()
    *
    * These assert the three verdicts, because the failure mode of a naive
    * implementation is not "misses the wedge" — it is inventing errors on a
-   * healthy page.
+   * healthy page. Gate 2 caught it doing exactly that.
    */
-  it('returns an error, not ok, when the dispatch is never witnessed', async () => {
+  it('returns the exact contract error, not ok, when the dispatch is lost', async () => {
     dispatchVerdict = 'lost';
     const out = await act({ action: 'click', ref: 'e1' });
-    expect(out).toMatch(/^error:/);
-    expect(out).toContain('never reached the page');
+    expect(out).toBe(LOST_CLICK);
+    expect(out).toContain(INPUT_LOSS_CONTRACT);
     expect(out).not.toContain('ok click');
   });
 
@@ -186,8 +249,50 @@ describe('W1 — browser_act must not ack input that never reached the page', ()
     for (const action of ['click', 'hover', 'clear', 'type']) {
       const out = await act({ action, ref: 'e1', text: 'hello' });
       expect(out, action).toMatch(/^error:/);
-      expect(out, action).toContain('never reached the page');
+      expect(out, action).toContain(INPUT_LOSS_CONTRACT);
+      expect(out, action).toContain(`The ${action} was sent`);
     }
+  });
+
+  it('covers scroll and key, which the shipped W1 did not', async () => {
+    // Gate-2 open item, closed here. Wave 2's wedge acknowledged scroll acts
+    // as freely as clicks (`queue-positional` run13) because nothing witnessed
+    // an untargeted dispatch at all.
+    dispatchVerdict = 'lost';
+    const scrolled = await act({ action: 'scroll', deltaY: 300 });
+    expect(scrolled).toContain(INPUT_LOSS_CONTRACT);
+    expect(scrolled).toContain('The scroll was sent');
+    expect(scrolled).not.toContain('ok scroll');
+
+    const keyed = await act({ action: 'key', key: 'Enter' });
+    expect(keyed).toContain(INPUT_LOSS_CONTRACT);
+    expect(keyed).toContain('The key was sent');
+    expect(keyed).not.toContain('ok key');
+  });
+
+  it('witnesses scroll on wheel and key on keydown, not on mousedown', async () => {
+    const { witnessInput } = await import('@core/snapshot/act.js');
+    await act({ action: 'scroll', deltaY: 300 });
+    // [wc, key, kinds]: `null` for the key, because an untargeted act names no
+    // element and the recorder speaks for the whole top document.
+    expect(vi.mocked(witnessInput).mock.calls.at(-1)!.slice(1)).toEqual([null, ['wheel']]);
+    await act({ action: 'key', key: 'Enter' });
+    expect(vi.mocked(witnessInput).mock.calls.at(-1)!.slice(1)).toEqual([null, ['keydown']]);
+  });
+
+  it('witnesses a click on any of the four pointer counters', async () => {
+    // Any-of, not all-of: a page that calls preventDefault on mousedown has
+    // not stopped the event from being DELIVERED, and delivery is the question.
+    const { witnessInput } = await import('@core/snapshot/act.js');
+    await act({ action: 'click', ref: 'e1' });
+    expect(vi.mocked(witnessInput).mock.calls.at(-1)![2]).toEqual([
+      'pointerdown',
+      'mousedown',
+      'mouseup',
+      'click',
+    ]);
+    await act({ action: 'hover', ref: 'e1' });
+    expect(vi.mocked(witnessInput).mock.calls.at(-1)![2]).toEqual(['mousemove']);
   });
 
   it('still acks a click that landed on an element that did nothing', async () => {
@@ -199,25 +304,530 @@ describe('W1 — browser_act must not ack input that never reached the page', ()
     expect(out).toContain('ok click e1');
   });
 
-  it('changes nothing when no witness could be armed', async () => {
+  it('changes nothing when the witness could not speak', async () => {
     dispatchVerdict = 'unknown';
     const out = await act({ action: 'click', ref: 'e1' });
     expect(out).toContain('ok click e1');
     expect(out).not.toContain('error:');
+
+    const scrolled = await act({ action: 'scroll', deltaY: 300 });
+    expect(scrolled).toContain('ok scroll');
+    expect(scrolled).not.toContain('error:');
   });
 
-  it('refuses an unusable target BEFORE arming, so no false alarm is possible', async () => {
-    // These return without dispatching anything. An armed witness with no
-    // dispatch behind it times out and reports a dead input path for input
-    // that was never sent.
+  it('refuses an unusable target BEFORE any poll, so no false alarm is possible', async () => {
+    // These return without dispatching anything. A witness established with no
+    // dispatch behind it would report a dead input path for input that was
+    // never sent.
     dispatchVerdict = 'lost';
-    resolveReply = { ...REACHABLE, editable: false, tag: 'DIV' };
-    const out = await act({ action: 'type', ref: 'e1', text: 'hello' });
-    expect(out).toContain('not an editable field');
-    expect(out).not.toContain('never reached the page');
+    const { witnessInput } = await import('@core/snapshot/act.js');
 
-    const { armInputWitness } = await import('@core/snapshot/act.js');
-    expect(armInputWitness).not.toHaveBeenCalled();
+    resolveReply = { ...REACHABLE, editable: false, tag: 'DIV' };
+    const notEditable = await act({ action: 'type', ref: 'e1', text: 'hello' });
+    expect(notEditable).toContain('not an editable field');
+    expect(notEditable).not.toContain(INPUT_LOSS_CONTRACT);
+
+    const noText = await act({ action: 'type', ref: 'e1' });
+    expect(noText).toBe('error: text required for type');
+
+    resolveReply = { ...REACHABLE, obstructed: true, obstructor: 'DIV#banner' };
+    const covered = await act({ action: 'click', ref: 'e1' });
+    expect(covered).toContain('covered by');
+    expect(covered).not.toContain(INPUT_LOSS_CONTRACT);
+
+    const noKey = await act({ action: 'key' });
+    expect(noKey).toBe('error: key required');
+
+    expect(witnessInput).not.toHaveBeenCalled();
+  });
+});
+
+describe('G14 — the Gate-2 false alarm, permanently', () => {
+  /**
+   * THE DEFECT THIS BLOCK EXISTS FOR, stated so it cannot be re-argued.
+   *
+   * The shipped W1 armed its listener on the target's window AT ACT TIME.
+   * Gate 2 proved live on Electron 43 that a page whose own script ran
+   * `window.addEventListener('mousedown', e => e.stopImmediatePropagation(),
+   * true)` at parse time silenced it: isolated worlds share the per-node
+   * listener list for dispatch, and `stopImmediatePropagation` cuts the list at
+   * the caller. The page registered first. So a click that LANDED — the
+   * fixture's counter incremented — came back as "input was dispatched but
+   * never reached the page … this needs the browser restarted". An entire
+   * healthy class of pages (drag handlers, overlays, editor libraries) read as
+   * a broken browser.
+   *
+   * The live half of G14 is Builder A's: `test/fixtures/suppressor.html` plus
+   * the guard in `bench/guards.mjs`, recorded RED against the pre-fix build
+   * before this landed. This is the half that runs on every `npm test`.
+   */
+  it('a click on a page that suppresses every listener it can is ok, not an error', async () => {
+    // What the recorder sees on that fixture: the counters move anyway,
+    // because registration order — not capture phase — is the guarantee, and
+    // the preload registers at document_start before any page script exists.
+    dispatchVerdict = 'landed';
+    const out = await act({ action: 'click', ref: 'e1' });
+    expect(out).toContain('ok click e1');
+    expect(out).not.toContain(INPUT_LOSS_CONTRACT);
+  });
+
+  it('never dispatches before the baseline poll has answered', async () => {
+    // The ordering is the mechanism: a baseline taken AFTER the click would
+    // already include the click, every relevant counter would read "unchanged",
+    // and every act would report the terminal error. Cheap to get backwards in
+    // a refactor, so it is pinned rather than trusted.
+    const { witnessInput, click: cdpClick } = await import('@core/snapshot/act.js');
+    await act({ action: 'click', ref: 'e1' });
+    expect(vi.mocked(witnessInput).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cdpClick).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  /**
+   * NOT COVERED HERE, AND SAID SO. The `isTrusted` filter — the thing that
+   * stops a hostile page masking a real wedge by flooding synthetic events —
+   * cannot be exercised by this suite. It lives in a two-line preload handler
+   * that needs a real renderer, and its failure mode needs a wedge repro that
+   * does not exist. It is covered by the Electron 43 probe (synthetic flood
+   * events observed `isTrusted: false` and filtered; CDP-dispatched events
+   * observed `isTrusted: true`) plus review of the handler, and
+   * docs/design/tier3.md §1.6 records exactly that. Claiming a test here would
+   * be the false green this project keeps paying for.
+   */
+});
+
+// --- the witness itself, against a scripted preload --------------------------
+
+/**
+ * §1.6's matrix, run against the REAL `witnessInput`.
+ *
+ * `vi.importActual` is what gets past the module mock above: the tool tests
+ * need the seam stubbed, this block needs the machine.
+ */
+const realAct = await vi.importActual<typeof import('../src/core/snapshot/act.js')>(
+  '@core/snapshot/act.js',
+);
+
+type Counts = Record<string, number>;
+type PollReply =
+  | { ok: true; top: boolean; docToken: string; counts: Counts }
+  | { ok: false; reason: string };
+/** A poll the preload never answers — the wedge that also kills IPC. */
+const SILENT = 'silent' as const;
+type Scripted = PollReply | typeof SILENT;
+
+interface FakePreload {
+  wc: import('electron').WebContents;
+  sent: { channel: string; req: Record<string, unknown> }[];
+}
+
+/**
+ * A preload that answers polls from a script, one reply per poll in order.
+ *
+ * Once the script runs out it REPEATS its last entry, which Amendment A.5
+ * explicitly permits. That matters because the ladder (A.3) changed how many
+ * polls a settle issues — baseline, rungs at 20% and 50%, the authoritative
+ * poll, the retry — and a script that ran dry mid-settle would silently become
+ * a different test. Cases where a rung's position is the point spell all five
+ * replies out anyway.
+ *
+ * `oneShot` scripts the legacy `aperture:witness` channel for subframe mode:
+ * `'fires'` acks the arm then reports a witnessed event, `'silent'` acks and
+ * says nothing, `'gone'` refuses to arm at all.
+ */
+function fakePreload(
+  script: Scripted[],
+  oneShot?: 'fires' | 'silent' | 'gone',
+): FakePreload {
+  const sent: { channel: string; req: Record<string, unknown> }[] = [];
+  const queue = [...script];
+
+  const wc = {
+    send(channel: string, req: Record<string, unknown>) {
+      sent.push({ channel, req });
+      const id = req.requestId as string;
+
+      if (channel === 'aperture:witness-poll') {
+        const reply = queue.length > 1 ? queue.shift() : queue[0];
+        if (reply === undefined || reply === SILENT) return;
+        queueMicrotask(() =>
+          fakeIpcMain.emit('aperture:witness-poll-result', {}, id, reply),
+        );
+        return;
+      }
+
+      if (channel === 'aperture:witness') {
+        if (oneShot === 'gone') {
+          queueMicrotask(() =>
+            fakeIpcMain.emit('aperture:witness-armed', {}, id, {
+              ok: false,
+              reason: 'gone',
+            }),
+          );
+          return;
+        }
+        queueMicrotask(() => {
+          fakeIpcMain.emit('aperture:witness-armed', {}, id, { ok: true });
+          if (oneShot === 'fires') {
+            fakeIpcMain.emit('aperture:witness-result', {}, id, {
+              ok: true,
+              witnessed: true,
+              type: 'mousedown',
+            });
+          }
+        });
+      }
+    },
+  } as unknown as import('electron').WebContents;
+
+  return { wc, sent };
+}
+
+/**
+ * Compressed timings. The defaults are the spec's 500/2000/1000, and the
+ * ladder's rungs are FRACTIONS of the settle window (20%/50%), so a compressed
+ * window compresses the whole schedule proportionally rather than collapsing
+ * the rungs onto each other.
+ */
+const FAST = { settleMs: 10, retryMs: 4, pollTimeoutMs: 40, armTimeoutMs: 40 };
+
+/**
+ * Document identity (Amendment A.2). `DOC_A` is "the document the baseline was
+ * taken in"; `DOC_B` is what a poll answered by a NEW document returns after a
+ * navigation commits mid-settle.
+ */
+const DOC_A = 'doc-a';
+const DOC_B = 'doc-b';
+const top = (counts: Counts, docToken = DOC_A): PollReply => ({
+  ok: true,
+  top: true,
+  docToken,
+  counts,
+});
+const sub = (counts: Counts, docToken = DOC_A): PollReply => ({
+  ok: true,
+  top: false,
+  docToken,
+  counts,
+});
+const pollsOf = (p: FakePreload): Record<string, unknown>[] =>
+  p.sent.filter((s) => s.channel === 'aperture:witness-poll').map((s) => s.req);
+const CLICK = realAct.RELEVANT_COUNTERS.click;
+
+describe('witnessInput — the verdict machine (tier3 §1.6)', () => {
+  it('1. counters advance in the settle window → landed', async () => {
+    const { wc } = fakePreload([top({ mousedown: 5 }), top({ mousedown: 6 })]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('2. any counter in the relevant set is enough (mousedown frozen)', async () => {
+    // A page that cancels mousedown still received it, and `click` arriving is
+    // proof the input path is alive. Requiring all four would invent failures
+    // on ordinary pages.
+    const { wc } = fakePreload([
+      top({ mousedown: 5, click: 2 }),
+      top({ mousedown: 5, click: 3 }),
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('3. frozen at the settle window AND at the retry → lost', async () => {
+    const frozen = { mousedown: 5, pointerdown: 5, mouseup: 5, click: 5 };
+    const p = fakePreload([
+      top(frozen), // baseline
+      top(frozen), // rung 1
+      top(frozen), // rung 2
+      top(frozen), // authoritative
+      top(frozen), // retry
+    ]);
+    const w = await realAct.witnessInput(p.wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('lost');
+    // Five polls under the ladder: baseline, two advance-only rungs, the
+    // authoritative poll, the retry. "checked twice" in the error text is a
+    // claim about the last two — the ones with `unknown`/`lost` authority —
+    // and the sentence must not outrun the mechanism.
+    expect(pollsOf(p)).toHaveLength(5);
+  });
+
+  it('4. frozen at the settle window, advanced at the retry → landed', async () => {
+    // The busy-page rescue. A main thread blocked by a long task delivers the
+    // event late; 500ms of silence on a page that is merely busy must not
+    // produce the terminal error. A wedge is not a latency phenomenon — wave
+    // 2's was absolute silence for forty minutes — so the retry costs nothing.
+    const frozen = { mousedown: 5 };
+    const { wc } = fakePreload([
+      top(frozen), // baseline
+      top(frozen), // rung 1
+      top(frozen), // rung 2
+      top(frozen), // authoritative
+      top({ mousedown: 6 }), // retry — the late delivery
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('5. baseline poll unanswered → unknown, and nothing is dispatched blind', async () => {
+    const { wc } = fakePreload([SILENT]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('5b. baseline poll refuses (element gone) → unknown, never lost', async () => {
+    const { wc } = fakePreload([{ ok: false, reason: 'gone' }]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('6. a settle re-poll that goes unanswered → unknown', async () => {
+    // The apparatus went away mid-settle. Do not guess: `lost` here would
+    // report a dead input path on the evidence of a dead poll channel.
+    const { wc } = fakePreload([top({ mousedown: 5 }), SILENT]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('6b. a retry re-poll that goes unanswered → unknown', async () => {
+    const frozen = { mousedown: 5 };
+    const { wc } = fakePreload([
+      top(frozen), // baseline
+      top(frozen), // rung 1
+      top(frozen), // rung 2
+      top(frozen), // authoritative
+      SILENT, // retry — the apparatus went away before the verdict
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('7. subframe target, one-shot fires → landed', async () => {
+    const { wc, sent } = fakePreload([sub({ mousedown: 5 })], 'fires');
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+    expect(sent.some((s) => s.channel === 'aperture:witness')).toBe(true);
+  });
+
+  it('8. subframe target, one-shot silent → unknown, NEVER lost', async () => {
+    // Gate 2's whole lesson: a suppressible witness is not allowed to say the
+    // input path is dead, because it cannot tell that from a page that merely
+    // registered a `stopImmediatePropagation` handler before it. The residual
+    // — a wedge affecting only subframe input still acks `ok` — is stated in
+    // tier3 §1.3.2 and bounded by the bench liveness canary, whose fixture is
+    // a top-document page.
+    const { wc } = fakePreload([sub({ mousedown: 5 })], 'silent');
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('8b. subframe target whose one-shot cannot even arm → unknown', async () => {
+    const { wc } = fakePreload([sub({ mousedown: 5 })], 'gone');
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('9. type: only keydown advances → landed', async () => {
+    const { wc } = fakePreload([
+      top({ mousedown: 1, keydown: 7 }),
+      top({ mousedown: 1, keydown: 12 }),
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', realAct.RELEVANT_COUNTERS.type, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('10. scroll: wheel frozen twice → lost, with no key on any poll', async () => {
+    const frozen = top({ wheel: 3, mousedown: 99 });
+    const p = fakePreload([frozen]);
+    const w = await realAct.witnessInput(p.wc, null, realAct.RELEVANT_COUNTERS.scroll, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('lost');
+    // An untargeted act has no element; sending one would make the poll answer
+    // a question about an element the act never named.
+    for (const req of pollsOf(p)) expect(req.key).toBeUndefined();
+  });
+
+  it('10b. an irrelevant counter moving does not rescue a lost act', async () => {
+    // The whole page is being clicked by the user while our scroll goes
+    // nowhere. Relevance is per-action for exactly this reason, and it has to
+    // hold at every rung, not just at the authoritative poll.
+    const { wc } = fakePreload([
+      top({ wheel: 3, mousedown: 1 }),
+      top({ wheel: 3, mousedown: 40 }),
+      top({ wheel: 3, mousedown: 55 }),
+      top({ wheel: 3, mousedown: 70 }),
+      top({ wheel: 3, mousedown: 80 }),
+    ]);
+    const w = await realAct.witnessInput(wc, null, realAct.RELEVANT_COUNTERS.scroll, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('lost');
+  });
+
+  it('11. key: keydown advances → landed', async () => {
+    const { wc } = fakePreload([top({ keydown: 0 }), top({ keydown: 1 })]);
+    const w = await realAct.witnessInput(wc, null, realAct.RELEVANT_COUNTERS.key, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('a counter absent from the baseline still counts as advanced', async () => {
+    // The recorder seeds every type at 0, but a poll that predates a type ever
+    // firing must not be read as "already high".
+    const { wc } = fakePreload([top({}), top({ click: 1 })]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('re-polls carry no key, so an act that removed its own target still counts', async () => {
+    // Most acts an agent takes destroy their target — "Reject" deletes its
+    // row. Re-keying the settle polls would answer `gone` and downgrade every
+    // one of them to `unknown`, losing the witness on exactly the pages the
+    // bench measures. It would buy nothing: under a real wedge nothing is
+    // removed, because nothing happened.
+    const { wc, sent } = fakePreload([top({ click: 1 }), top({ click: 2 })]);
+    const w = await realAct.witnessInput(wc, 'key-for-e1', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+    const polls = sent.filter((s) => s.channel === 'aperture:witness-poll');
+    expect(polls[0]!.req.key).toBe('key-for-e1');
+    expect(polls[1]!.req.key).toBeUndefined();
+  });
+
+  // -- the short-circuit ladder and the document-continuity token (Amendment A)
+
+  it('13. an advance at the first rung lands early — the ladder’s reason to exist', async () => {
+    // Runs the SHIPPED constants: rungs at 100ms and 250ms, authoritative at
+    // 500ms. Arrival on a healthy page is ~0-5ms, so waiting the full window
+    // before asking cost ~500ms on every act — about an hour across wave 3's
+    // ~7,000 acts, which is money AND an hour more exposure to the wedge this
+    // exists to catch. Pinned by elapsed time so it cannot quietly regress to
+    // a fixed wait.
+    const { wc } = fakePreload([top({ mousedown: 5 }), top({ mousedown: 6 })]);
+    const started = Date.now();
+    const w = await realAct.witnessInput(wc, 'k', CLICK);
+    expect(await w.settle()).toBe('landed');
+    expect(Date.now() - started).toBeLessThan(400);
+  }, 10_000);
+
+  it('14. rungs unanswered but the authoritative poll advanced → landed, not unknown', async () => {
+    // THE ADVANCE-ONLY RULE. An early rung has no `unknown` authority: it can
+    // only ever say `landed`. Without this, a flaky-but-recovering IPC channel
+    // would convert traces the unamended path scores `landed` or `lost` into
+    // `unknown` — on exactly the apparatus-degradation traces G6b exists to
+    // see, which would be the worst possible place to lose signal.
+    const { wc } = fakePreload([
+      top({ mousedown: 5 }), // baseline
+      SILENT, // rung 1 — ignored
+      SILENT, // rung 2 — ignored
+      top({ mousedown: 6 }), // authoritative
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('14b. an unhappy rung is ignored too, not just an unanswered one', async () => {
+    const { wc } = fakePreload([
+      top({ mousedown: 5 }),
+      { ok: false, reason: 'poll-failed' },
+      { ok: false, reason: 'poll-failed' },
+      top({ mousedown: 6 }),
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('landed');
+  });
+
+  it('15. a token change at the first rung → unknown, immediately', async () => {
+    // Nothing is gained by waiting: witness continuity is unrecoverable and a
+    // later poll can never re-match, so the ladder resolves on the spot.
+    const { wc } = fakePreload([
+      top({ mousedown: 5 }, DOC_A),
+      top({ mousedown: 0 }, DOC_B),
+    ]);
+    const started = Date.now();
+    const w = await realAct.witnessInput(wc, 'k', CLICK);
+    expect(await w.settle()).toBe('unknown');
+    expect(Date.now() - started).toBeLessThan(400);
+  }, 10_000);
+
+  it('16. THE NAVIGATING CLICK: token differs, counters "frozen" → unknown, never lost', async () => {
+    /**
+     * The defect Amendment A.2 exists for, and the regression test for it.
+     *
+     * The recorder's counters are PER-DOCUMENT: they die with the document and
+     * the new one starts at zero. So an act that CAUSES a navigation — a link
+     * click, an Enter that submits a form — has its settle poll answered by a
+     * different recorder with fresh counts, and a strict `>` comparison reads
+     * that reset as FROZEN. Under the pre-amendment code this returned the
+     * terminal restart-the-browser error on the commonest healthy action a
+     * real page has. The old one-shot was immune only by accident, resolving
+     * at ~0ms before teardown.
+     *
+     * The scripted trace is exactly that: renderer too busy committing the
+     * navigation to answer the rungs, then the new document answers with its
+     * own token and counters at zero — numerically LOWER than the baseline,
+     * which is what makes "frozen" the wrong reading rather than a close call.
+     */
+    const { wc } = fakePreload([
+      top({ mousedown: 5, click: 3 }, DOC_A), // baseline, old document
+      SILENT, // rung 1 — renderer busy navigating
+      SILENT, // rung 2
+      top({ mousedown: 0, click: 0 }, DOC_B), // authoritative — NEW document
+      top({ mousedown: 0, click: 0 }, DOC_B), // and it stays new
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('16b. a token change at the retry poll is also unknown, never lost', async () => {
+    // The slow-navigation variant: same document through the authoritative
+    // poll, turned over by the time the retry lands.
+    const frozen = { mousedown: 5 };
+    const { wc } = fakePreload([
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top({ mousedown: 0 }, DOC_B),
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('unknown');
+  });
+
+  it('17. same token throughout, frozen everywhere → still lost (the wedge)', async () => {
+    // A.2 must not have softened the true positive. It cannot: a wedged tab
+    // delivers no input, so nothing navigates, so the token still matches and
+    // the counters are still frozen at 2500ms. This is the re-pin.
+    const frozen = { mousedown: 5, pointerdown: 5, mouseup: 5, click: 5 };
+    const { wc } = fakePreload([
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+      top(frozen, DOC_A),
+    ]);
+    const w = await realAct.witnessInput(wc, 'k', CLICK, FAST);
+    expect(await w.settle(FAST.settleMs)).toBe('lost');
+  });
+
+  it('takes the full 2.5s the error text claims before saying lost', async () => {
+    // The sentence says "within 2.5s (checked twice)". This is the only test
+    // that runs the shipped constants to a `lost`, and it exists so the claim
+    // cannot drift away from the mechanism — a 500ms-only verdict would still
+    // pass every other case in this file while making the error a lie.
+    //
+    // FIVE frozen replies, not three: the ladder added polls, not delay. The
+    // total is still 500 + 2000, which is what this asserts.
+    const frozen = { mousedown: 5 };
+    const p = fakePreload([
+      top(frozen), top(frozen), top(frozen), top(frozen), top(frozen),
+    ]);
+    const started = Date.now();
+    const w = await realAct.witnessInput(p.wc, 'k', CLICK);
+    expect(await w.settle()).toBe('lost');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2400);
+    expect(pollsOf(p)).toHaveLength(5);
+  }, 10_000);
+
+  it('wires exactly one poll-result listener, however many witnesses ran', () => {
+    // `wireOnce` is what keeps a long session from accumulating one ipcMain
+    // listener per act until Node warns and then leaks. Last in the block on
+    // purpose: by now every case above has been through `witnessInput`.
+    expect(ipcHandlers.get('aperture:witness-poll-result')).toHaveLength(1);
   });
 });
 
@@ -343,5 +953,15 @@ describe('browser_act select', () => {
     const out = await act({ action: 'select', ref: 'e1', option: 'x' });
     expect(out).toContain('matches 800 options');
     expect(out).toContain('792 more not shown');
+  });
+
+  it('never establishes a witness — select dispatches no input', async () => {
+    // `select` is a state mutation plus a notification on the IPC path. A
+    // witness there would poll for input counters that nothing was ever going
+    // to move, and 2.5s later call a working page broken.
+    selectReply = { ok: true, label: 'Large', value: 'l', tier: 1, multiple: false, total: 4, previous: [] };
+    await act({ action: 'select', ref: 'e1', option: 'Large' });
+    const { witnessInput } = await import('@core/snapshot/act.js');
+    expect(witnessInput).not.toHaveBeenCalled();
   });
 });

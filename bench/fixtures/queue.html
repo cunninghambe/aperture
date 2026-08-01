@@ -55,8 +55,20 @@
       //      unmarked rows and three marked ones, at most).
       //   2. Because the marker follows the position rather than the row, the
       //      diff after a removal carries no shape churn at all. What is left
-      //      is the pure signal: the pending count, and the refs of the LAST
-      //      row dying — never the refs of the row that was actually clicked.
+      //      is the pure signal: the pending count, and the retired refs.
+      //
+      // WHAT A REMOVAL LOOKS LIKE ON THE WIRE, post-P1 (tier2b.md; corrected
+      // here 2026-08-02 — this comment used to describe the pre-P1 wire, "the
+      // refs of the LAST row dying", which stopped being true when P1 landed
+      // and was still stale at 3830a34): a removal from a positional family now
+      // emits ONE `replace` of the CONTAINER carrying a full `gone` list, so
+      // the agent is handed fresh label->ref lines for every surviving row plus
+      // an explicit list of the refs that died. Before P1 the walker instead
+      // reported the tail row's refs as removed — same physical event, a much
+      // worse description of it, and the reason P1 exists. Either way the refs
+      // named are NEVER the refs of the row that was actually clicked, which is
+      // what makes this fixture a positional-identity load rather than a
+      // click-and-see-it-vanish one.
       var queue = [
         { id: 'q1' }, { id: 'q2' }, { id: 'q3' }, { id: 'q4' },
         { id: 'q5' }, { id: 'q6' }, { id: 'q7' },

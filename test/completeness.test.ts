@@ -33,6 +33,29 @@ import { State } from '../src/core/snapshot/types.js';
  * Adding a field to `SnapshotNode`? Record a ruling. If it is `excluded`, the
  * WHY is not optional: an exclusion nobody can defend in a sentence is a bug
  * wearing a ruling's clothes.
+ *
+ * THE ONE RENDERED-BUT-EXCLUDED FIELD: `headingLevel`. Everything else on the
+ * excluded list is either never rendered (autocomplete, inputType), identity
+ * plumbing (ref, key, frameId, synthetic), renderer-internal (shape), or
+ * geometry the tool description names out loud (rect, scroll). `headingLevel`
+ * is the exception — it IS rendered, and it is not diffed, so a pure
+ * heading-weight change (h2→h3, same text) is reported as nothing at all.
+ *
+ * Gate 2 flagged this as the quiet overclaim in `browser_act`'s completeness
+ * sentence, and docs/design/tier3.md §4.3 rules on it: fix the SENTENCE, not
+ * the engine. The engine ruling stands — the operative fact is the heading's
+ * text and that IS diffed, and no failure class has been observed against the
+ * weight — but the sentence now admits heading weight alongside scroll and
+ * pixel layout, and this file names the field rather than letting it hide in a
+ * list of plumbing. If a second rendered field is ever excluded, the sentence
+ * has to move again; that is the cost of the promise being literal.
+ *
+ * THE TETHER NEEDS TSC. The ruling table's totality is a TYPE constraint, and
+ * vitest strips types without checking them — so this file's central guarantee
+ * is inert under `vitest run` alone. `test/typecheck.test.ts` runs the compiler
+ * inside the suite for exactly that reason (tier3 §4.4). Without it, the header
+ * claim "adding a field fails the typecheck" is true of the repo and false of
+ * the command anyone actually runs.
  */
 
 type Ruling =
@@ -74,7 +97,7 @@ const NODE_RULINGS: Record<keyof SnapshotNode, Ruling> = {
   },
   headingLevel: {
     ruling: 'excluded',
-    why: 'presentation weight; the heading\'s text is the operative fact and IS diffed, and no failure class has been observed against the level',
+    why: 'presentation weight; the heading\'s text is the operative fact and IS diffed, and no failure class has been observed against the level. The one RENDERED field on this list — tier3 §4.3 keeps the exclusion and makes the tool sentence admit it (see header)',
   },
   autocomplete: {
     ruling: 'excluded',
@@ -187,15 +210,18 @@ describe('every SnapshotNode field carries a ruling', () => {
     }
   });
 
-  it('names the four exclusions the tool description promises', () => {
-    // The shipped sentence is "Scroll positions and pixel layout are not
-    // tracked; everything rendered … is." That is only honest while the
-    // excluded set stays inside what the sentence admits to.
+  it('names the exclusions the tool description promises', () => {
+    // The shipped sentence is "Scroll positions, pixel layout and heading
+    // weight are not tracked; everything rendered … is." That is only honest
+    // while the excluded set stays inside what the sentence admits to — which
+    // is why headingLevel had to be added to the sentence rather than left as
+    // the one rendered field quietly missing from it (tier3 §4.3).
     const excluded = Object.entries(NODE_RULINGS)
       .filter(([, r]) => r.ruling === 'excluded')
       .map(([f]) => f);
     expect(excluded).toContain('scroll');
     expect(excluded).toContain('rect');
+    expect(excluded).toContain('headingLevel');
     // …and nothing RENDERED may join them. These are the rendered fields; if a
     // future change excludes one, the tool description becomes a lie.
     for (const rendered of ['name', 'value', 'text', 'states', 'href', 'rows']) {

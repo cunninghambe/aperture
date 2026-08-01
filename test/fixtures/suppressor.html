@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Suppressor page</title>
+  </head>
+  <body>
+    <main>
+      <h1>Suppressor page</h1>
+
+      <!-- The Gate-2 case, made permanent (docs/design/tier3.md §1.6, G14).
+           This page is HEALTHY and HOSTILE at the same time, and that pairing
+           is the whole point: every click on it LANDS (the acknowledgement
+           line below grows), while the page silences every input listener
+           registered after it.
+
+           Mechanism, exactly. `stopImmediatePropagation` in a window-CAPTURE
+           handler stops the event dead: no listener registered LATER on
+           window runs, and the event never continues down the path to the
+           button. Listener order on a node is registration order. So:
+
+             - The shipped W1 arms its listener on window at ACT TIME, after
+               this page's parse-time suppressors. It is silenced, sees
+               nothing, and reports the terminal "input was dispatched but
+               never reached the page" error about a click that worked. That
+               false alarm is what G14 records RED against the pre-fix build.
+             - The revised W1 records from the PRELOAD at document_start,
+               before any script on this page can run, so it counts first and
+               cannot be silenced. G14 goes green on it.
+
+           Two consequences of the same rule shape this fixture:
+
+           1. The acknowledgement bookkeeping is a DELEGATED window-capture
+              handler registered BEFORE the suppressors, not a handler on the
+              button. With `click` in the suppressed set — and it must be in
+              it; a witness that only survives mousedown suppression is not
+              the guarantee we are claiming — no handler further down the
+              path, the button's own included, can ever run. Registering
+              first on window is the only construction where the page stays
+              functional under total suppression. It is also exactly the
+              mechanism the fixed W1 relies on, which is the honest thing for
+              this fixture to model.
+           2. The synthetic `mousedown` flood is dispatched at the button and
+              is therefore ALSO suppressed on this page (it is swallowed by
+              the same handlers) — for the pre-fix recorder. For the revised
+              recorder, which sits ahead of everything here, the flood does
+              arrive, and `isTrusted: false` is the only thing keeping it out
+              of the counters. That filter is what this flood exists to load. -->
+      <script>
+        (function () {
+          var acks = 0;
+
+          // FIRST — before the suppressors. Registration order is the only
+          // reason this survives them.
+          window.addEventListener(
+            'click',
+            function (ev) {
+              var t = ev.target;
+              while (t && t !== document) {
+                if (t.id === 's1') break;
+                t = t.parentNode;
+              }
+              if (!t || t.id !== 's1') return;
+              acks++;
+              var p = document.createElement('p');
+              p.textContent =
+                'acknowledged ' + acks + ' time' + (acks === 1 ? '' : 's');
+              document.getElementById('log').append(p);
+            },
+            true,
+          );
+
+          // The hostile half: every input type Gate 2 named, silenced at
+          // window capture for everything registered after this line.
+          var TYPES = ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'];
+          for (var i = 0; i < TYPES.length; i++) {
+            window.addEventListener(
+              TYPES[i],
+              function (ev) {
+                ev.stopImmediatePropagation();
+              },
+              true,
+            );
+          }
+
+          // The isTrusted mask, live: untrusted mousedown, ten a second, at
+          // the same element the guard clicks. A recorder that counts these
+          // could be fed a "landed" verdict by any page while the real input
+          // path is dead.
+          setInterval(function () {
+            var b = document.getElementById('s1');
+            if (!b) return;
+            b.dispatchEvent(
+              new MouseEvent('mousedown', { bubbles: true, cancelable: true }),
+            );
+          }, 100);
+        })();
+      </script>
+
+      <p id="intro">This page suppresses input listeners registered after it.</p>
+      <button id="s1">Acknowledge</button>
+      <div id="log"></div>
+    </main>
+  </body>
+</html>

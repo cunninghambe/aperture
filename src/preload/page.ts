@@ -26,6 +26,156 @@ interface WalkRequest {
  */
 let index = new Map<string, HTMLElement>();
 
+// -- the input recorder (W1) ------------------------------------------------
+
+/**
+ * A witness for dispatched input THAT THE PAGE CANNOT PREEMPT.
+ *
+ * WHAT WENT WRONG BEFORE. The first W1 armed a capture-phase listener on the
+ * target's window AT ACT TIME and its comment claimed that being first in the
+ * capture path made it unsuppressable. That is empirically false and Gate 2
+ * proved it live: a page whose own script runs
+ * `window.addEventListener('mousedown', e => e.stopImmediatePropagation(), true)`
+ * at parse time silences every listener registered LATER on that node —
+ * isolated worlds share the per-node listener list for dispatch, and
+ * `stopImmediatePropagation` cuts the list at the caller. The page registered
+ * first, W1 registered second, so a click that LANDED (the fixture's counter
+ * incremented) came back as the terminal "input never reached the page" error.
+ * A whole healthy class of pages — drag handlers, overlays, editor libraries —
+ * was being reported as a broken browser.
+ *
+ * WHAT MAKES THIS ONE DIFFERENT: registration ORDER, not capture phase. This
+ * runs at document_start, in the preload, before any page script exists. No
+ * handler the page registers later can suppress it, because
+ * `stopImmediatePropagation` only silences listeners after the caller in the
+ * list, and there is nothing before us. Probed on Electron 43 (2026-08-02)
+ * against a hostile fixture registering `stopImmediatePropagation` capture
+ * handlers on `window` for ALL of pointerdown/mousedown/mouseup/click/keydown:
+ * this recorder observed every CDP-dispatched event; a listener registered
+ * after page load (the shipped W1's shape) observed ZERO. See
+ * docs/design/tier3.md §1.2 and §8.
+ *
+ * WHY `isTrusted`: the same probe had the fixture flooding synthetic
+ * `mousedown` events every 100ms. Those arrive `isTrusted: false`; CDP-
+ * dispatched input arrives `isTrusted: true`. Without the filter a page could
+ * mask a genuinely dead input path by manufacturing arrivals. With it, the
+ * counters move only for input the browser itself delivered.
+ *
+ * The handlers are two lines and do nothing else on purpose: no
+ * stopPropagation, no preventDefault, no per-event IPC. `passive: true` so the
+ * recorder can never delay scrolling. `counts` lives in this isolated world;
+ * the page holds no reference to it, to the listeners, or to this world's
+ * `EventTarget.prototype`, so it can neither read the counters nor remove the
+ * recorder.
+ *
+ * It witnesses ARRIVAL, not effect. A click that reaches a dead button still
+ * counts — "the action caused no visible change" is a real finding about the
+ * page and turning it into an engine error is exactly what W1 must not do.
+ */
+const RECORDED_TYPES = [
+  'pointerdown',
+  'mousedown',
+  'mouseup',
+  'click',
+  'keydown',
+  'wheel',
+  'mousemove',
+] as const;
+
+const inputCounts: Record<string, number> = Object.create(null) as Record<string, number>;
+
+/**
+ * A per-document identity for the counters, and the defect it closes.
+ *
+ * THE COUNTERS DIE WITH THE DOCUMENT. This recorder, and everything it has
+ * counted, is torn down when a navigation commits; the new document gets a
+ * fresh preload and fresh counters starting at zero. A settle poll issued
+ * after that commit is therefore answered by a DIFFERENT recorder, and the
+ * main process — comparing with a strict `>` against a baseline taken in the
+ * old document — reads the reset as "frozen". The act that CAUSED the
+ * navigation is the commonest healthy action a real page has: a link click, an
+ * Enter that submits a form. Left alone it returns the terminal
+ * restart-the-browser error. The old one-shot was immune only by accident, in
+ * that it resolved at ~0ms, before teardown. See Amendment A.2 of
+ * docs/design/tier3.md.
+ *
+ * So every happy reply carries this token and the main process treats ANY
+ * token change as `unknown`, rather than comparing counts across a boundary
+ * where the comparison means nothing. It is not security-bearing — the page
+ * cannot reach it, and forging it could only ever buy an `unknown` — so
+ * uniqueness across two documents in one tab is the entire requirement.
+ * `crypto.randomUUID` is undefined outside secure contexts, which plain-http
+ * pages are, hence the fallback.
+ */
+const docToken = ((): string => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Falls through to the arithmetic fallback, which is sufficient alone.
+  }
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+})();
+
+for (const type of RECORDED_TYPES) {
+  inputCounts[type] = 0;
+  window.addEventListener(
+    type,
+    (e: Event) => {
+      if (e.isTrusted) inputCounts[e.type] = (inputCounts[e.type] ?? 0) + 1;
+    },
+    { capture: true, passive: true },
+  );
+}
+
+/**
+ * Report the recorder's counters, and whether the named element is one the
+ * recorder can speak for.
+ *
+ * `top` is the frame question. The recorder is registered on THIS document's
+ * window, so it counts input delivered to this document only. An element that
+ * lives in a subframe has its own window and its own preload instance, and
+ * nothing here can corroborate arrival over there — so the main process is
+ * told, and falls back to the one-shot listener with `lost` disabled.
+ *
+ * `docToken` rides on every happy reply so the main process can tell a frozen
+ * counter from a counter that belongs to a different document — see the token's
+ * own comment above.
+ *
+ * `reason` strings stay fixed vocabulary (`gone`, `poll-failed`) — never
+ * interpolated from a caught error. Nothing on this channel currently reaches
+ * the agent (an unhappy poll produces the `unknown` verdict, which is silent),
+ * but the discipline is the one docs/design/security.md asks for and costs
+ * nothing to keep.
+ */
+ipcRenderer.on(
+  'aperture:witness-poll',
+  (_event, req: { requestId: string; key?: string }) => {
+    const reply = (payload: unknown): void => {
+      ipcRenderer.send('aperture:witness-poll-result', req.requestId, payload);
+    };
+
+    try {
+      let top = true;
+      if (req.key !== undefined && req.key !== null) {
+        const el = index.get(req.key);
+        if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
+        // The walker descends into same-origin subframes, so `index` can hold
+        // an element whose owner document is not this one. Its events dispatch
+        // through ITS window, which this recorder is not on — so the counters
+        // below say nothing about it, and the main process is told to fall
+        // back rather than reading silence as loss.
+        top = el.ownerDocument === document;
+      }
+      // A copy, so a reply in flight cannot be mutated by a later event.
+      reply({ ok: true, top, docToken, counts: { ...inputCounts } });
+    } catch {
+      reply({ ok: false, reason: 'poll-failed' });
+    }
+  },
+);
+
 ipcRenderer.on('aperture:walk', (_event, req: WalkRequest) => {
   const reply = (payload: unknown): void => {
     ipcRenderer.send('aperture:walk-result', req.requestId, payload);
@@ -173,28 +323,29 @@ ipcRenderer.on(
 /**
  * Arm a one-shot witness for input that is about to be dispatched.
  *
- * WHY THIS EXISTS. Wave 2 ended with Aperture's input path wedged for forty
- * minutes while `browser_act` answered `ok` to every call: CDP
- * `Input.dispatchMouseEvent` resolved, the walker kept serving snapshots, the
- * renderer kept loading pages — and not one click reached the DOM. Nothing
- * anywhere in the stack could tell the difference between "the click landed
- * and the page did nothing" and "the click never landed", so the agent was
- * told the first when the truth was the second. `sendCommand` resolving is a
- * statement about CDP, not about the page; the only witness that means
- * anything is an event observed in the page itself.
+ * SUBFRAME TARGETS ONLY, and the restriction is the point.
  *
- * The listener is capture-phase on the resolved target's WINDOW, which is the
- * first node in the capture path — so no page handler can `stopPropagation`
- * its way out of being observed. A document-level listener would not be
- * enough: a page capture handler on `window` runs earlier and could suppress
- * every witness, turning a working page into a permanent false alarm. The page
- * also cannot remove this listener — it lives in the isolated world, and the
- * page holds no reference to it or to this world's `EventTarget.prototype`.
+ * This listener is registered AT ACT TIME, so a page script that already ran
+ * can be ahead of it in the target node's listener list and silence it with
+ * `stopImmediatePropagation`. The old comment here claimed the opposite — that
+ * capture-phase-on-window put it beyond suppression — and Gate 2 falsified
+ * that live on Electron 43: a page suppressing `mousedown` at window capture
+ * turned landed clicks into the terminal input-loss error. Capture phase is
+ * not the guarantee; REGISTRATION ORDER is, and only the document_start
+ * recorder above has it.
+ *
+ * So this path survives for the one case the recorder cannot cover: an element
+ * in a SUBFRAME, whose events never pass through the top window the recorder
+ * listens on. There, `fired` means `landed` and silence means `unknown` —
+ * never `lost`. A suppressible witness is not allowed to say the input path is
+ * dead, because it cannot tell that from a page that merely suppressed it.
+ * (`act.ts`, `witnessInput`, subframe mode. Residual, stated in
+ * docs/design/tier3.md §1.3.2: a wedge affecting only subframe input still
+ * acks `ok`.)
  *
  * It witnesses ARRIVAL, not effect. A click that reaches a dead button is
  * still `ok` — "the action caused no visible change" is a real finding and
- * this must not turn it into an error. The one thing it converts is silence on
- * the input path itself.
+ * this must not turn it into an error.
  *
  * `reason` strings here are fixed vocabulary (`gone`, `not-witnessed`), never
  * interpolated from a caught error — these land OUTSIDE the untrusted-content
