@@ -863,3 +863,84 @@ Exit 0 all guards hold · 1 a guard failed · 3 the probe could not run.
 - **Only `:disabled` is consulted, not `inert` or `pointer-events: none`.** A
   select inside an `inert` subtree is still writable by `action:"select"`; the
   hit-test catches the overlay case but not that one.
+
+---
+
+# Task-success, wave 1 — 100 episodes, Sonnet 5 (2026-08-01)
+
+`node bench/task.mjs --n 5` · N=5/task/arm across all 10 tasks · $11.03 · exit 2
+
+## RESULT: INCONCLUSIVE (ceiling), and a cost result nobody ordered
+
+```
+success  diff    : 50/50 = 100.0%   wrong-element 0.000/run
+success  re-dump : 50/50 = 100.0%   wrong-element 0.000/run
+delta            : +0.0pp  95% CI [-7.1pp, +7.1pp]  (Newcombe)
+```
+
+G10 fired: both arms ≥98%, so the suite **cannot** detect a diff-bookkeeping
+penalty even if one exists. Preregistered rule says INCONCLUSIVE licenses no
+README claim, and it doesn't. Smallest true drop this run could distinguish
+from the parity margin: **~15.5pp**. Anything subtler is invisible here.
+
+Zero wrong-element actions in 372 page actions across both arms is worth
+noting but is not a finding — it is what a ceiling looks like.
+
+## The unordered result: diffs cost MORE here
+
+| | diff | re-dump |
+|---|---|---|
+| page actions / ep | 3.72 | 3.72 |
+| observations / ep | 5.52 | 4.84 |
+| observation chars / ep | 2,975 | 4,520 |
+| **$ / ep** | **0.1131** | **0.1075** |
+
+Diffs cut observation bytes **34.2%** and still came out **5.2% more
+expensive**, because they induced **7.3% more turns** (8.58 vs 8.00). Identical
+page actions, so the agent did the same work — it just needed more round trips
+to decide on it.
+
+Two mechanisms, both visible in the observation-kind counts
+(`diff` arm: 186 diff / 72 full / **18 nochange**; `re-dump` arm: 242 full):
+
+1. **18 `nochange` observations.** A full API round trip that returns "nothing
+   changed" — the agent pays a turn to learn nothing. The re-dump arm has no
+   such category: its equivalent observation still re-anchors the whole page.
+2. **34 more voluntary observations** across 50 episodes. Intention-to-treat
+   counts these against the diff arm, correctly: rescues are production reality.
+
+### Why turn overhead wins on this suite
+
+Each turn re-sends the system prompt, the tool definitions, and the entire
+history. Saving ~390 tokens of observation while adding 0.58 turns that each
+re-send several thousand tokens is a losing trade. **The fixtures are small
+(1.4–8.0 KB) — that is the whole explanation, and it is a property of the
+suite, not of diffs.** Diffs pay when the observation dominates the per-turn
+context; on a 2 KB fixture it never does.
+
+This does not contradict the ~1.9× per-snapshot saving measured on real pages.
+It bounds it: **that saving is per-observation, and per-observation is not
+per-dollar.** The crossover is a real quantity this suite is on the wrong side
+of, and it has not been located.
+
+## What this licenses
+
+Nothing, in the README. Specifically **not**:
+
+- "no correctness penalty" — ceiling-limited to ±15.5pp
+- "diffs are cheaper" — on this suite they are 5.2% *dearer*
+
+## What it changes
+
+The ceiling was the anticipated risk and has an anticipated fix (harder tasks
+or a weaker model). The cost inversion was not anticipated and is the more
+actionable of the two:
+
+1. **Suppress `nochange` round trips.** 18 turns bought nothing. If an act
+   produces no observable delta, that belongs in the act's own result, not in a
+   separate observation the agent has to spend a turn on.
+2. **Locate the crossover.** Fixture page size is the independent variable that
+   was never varied. Until it is, "diffs save tokens" has no stated domain.
+3. **Then re-run for correctness** on tasks that are not at ceiling.
+
+Item 1 is a product bug this benchmark found. That is the benchmark working.
