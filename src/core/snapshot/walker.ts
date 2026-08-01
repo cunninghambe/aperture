@@ -566,9 +566,7 @@ function statesOf(el: HTMLElement, win: Window, rect: Rect): StateBits {
     (el as HTMLInputElement).checked === true ||
     aria('checked') === 'true'
   ) s |= State.Checked;
-  if ((el as HTMLInputElement).disabled === true || aria('disabled') === 'true') {
-    s |= State.Disabled;
-  }
+  if (isDisabled(el) || aria('disabled') === 'true') s |= State.Disabled;
   if (aria('expanded') === 'true') s |= State.Expanded;
   if (aria('selected') === 'true' || (el as HTMLOptionElement).selected === true) {
     s |= State.Selected;
@@ -585,6 +583,40 @@ function statesOf(el: HTMLElement, win: Window, rect: Rect): StateBits {
   if (!inView) s |= State.Offscreen;
 
   return s;
+}
+
+/**
+ * Tags whose `:disabled` state can be inherited from an ancestor.
+ *
+ * `el.disabled` reflects the element's OWN attribute and nothing else, so a
+ * control inside `<fieldset disabled>` reads `false` while being genuinely
+ * unusable — no click reaches it, no value it holds is submitted. The snapshot
+ * therefore showed no `disabled` flag on it at all (only the wrapper carried
+ * one), which means the agent could not see the reason its action would fail.
+ * `:disabled` is the platform's own answer to "is this actually disabled", and
+ * it is the only one that accounts for the ancestor.
+ *
+ * Gated on tag because `matches()` on every node of every walk is a cost the
+ * snapshot path does not need to pay: :disabled applies to these and nothing
+ * else.
+ */
+const DISABLEABLE = new Set([
+  'BUTTON', 'FIELDSET', 'INPUT', 'OPTGROUP', 'OPTION', 'SELECT', 'TEXTAREA',
+]);
+
+export function isDisabled(el: {
+  tagName?: string;
+  disabled?: unknown;
+  matches?: (s: string) => boolean;
+}): boolean {
+  if (el.disabled === true) return true;
+  if (!el.tagName || !DISABLEABLE.has(el.tagName)) return false;
+  try {
+    return el.matches?.(':disabled') === true;
+  } catch {
+    // A page cannot break the walk by breaking a selector engine call.
+    return false;
+  }
 }
 
 function rectOf(el: HTMLElement): Rect {

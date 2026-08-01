@@ -457,6 +457,7 @@ let wrongValue = 0;
 let wrongLabel = 0;
 let wrongRole = 0;
 let wrongState = 0;
+let wrongOptions = 0;
 const problems = [...initialProblems];
 
 for (const [ref, believed] of model) {
@@ -480,6 +481,18 @@ for (const [ref, believed] of model) {
   if (believed.role !== '?' && believed.role !== actual.role) {
     wrongRole++;
     problems.push(`${ref}: agent thinks it is a ${believed.role}, page says ${actual.role}`);
+  }
+  // `[N options]` is the agent's only discriminator between a native select
+  // and a custom combobox, and it also tells the agent whether it can answer
+  // from the inline enumeration or must call browser_read. A stale one is a
+  // wrong belief about the page like any other, and it used to be unmeasurable
+  // because the reader dropped the marker.
+  if ((believed.optionCount ?? null) !== (actual.optionCount ?? null)) {
+    wrongOptions++;
+    problems.push(
+      `${ref}: agent has [${believed.optionCount ?? 'no'} options], page has ` +
+        `[${actual.optionCount ?? 'no'} options]`,
+    );
   }
   for (const s of new Set([...believed.states, ...actual.states])) {
     if (believed.states.has(s) !== actual.states.has(s)) {
@@ -524,6 +537,7 @@ console.log(`WRONG VALUES                : ${wrongValue}`);
 console.log(`WRONG LABELS                : ${wrongLabel}`);
 console.log(`WRONG ROLES                 : ${wrongRole}`);
 console.log(`WRONG STATE FLAGS           : ${wrongState}`);
+console.log(`WRONG [N options] MARKERS   : ${wrongOptions}`);
 console.log(`refs on page agent never saw: ${missed.length} (elision/budget — reported, not scored)`);
 // Named, not just counted. "2 refs you never saw" is unactionable; knowing
 // they are two paragraphs of text is the difference between a shrug and a
@@ -544,7 +558,8 @@ if (problems.length) {
   if (problems.length > 20) console.log(`  … and ${problems.length - 20} more`);
 }
 
-let red = phantom + wrongValue + wrongLabel + wrongRole + wrongState > 0;
+let red =
+  phantom + wrongValue + wrongLabel + wrongRole + wrongState + wrongOptions > 0;
 if (scenario.expect.suppression && !sawSuppression) {
   console.log('\nRED: the ticking clock was never suppressed — the volatility path did not fire.');
   red = true;

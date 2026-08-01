@@ -151,7 +151,124 @@ describe('matchOption — options a human could not choose', () => {
     const m = matchOption(opts('Alpha', 'Beta'), '');
     expect(m.ok).toBe(false);
     if (m.ok) throw new Error('unreachable');
-    expect(m.reason).toBe('no-match');
+    expect(m.reason).toBe('blank-query');
+  });
+
+  it('refuses a blank query on the placeholder select it used to reset', () => {
+    // The test above passed for the wrong reason: `opts('Alpha','Beta')` makes
+    // value === text, so no option had an empty value and the empty query fell
+    // through to no-match. Add the <option value=""> every country picker on
+    // the web starts with and the exact-VALUE tier matches it — silently
+    // resetting a field the human is about to submit.
+    const placeholder = opts(
+      { text: '-- Choose a country --', value: '' },
+      { text: 'Australia', value: 'AU' },
+    );
+    for (const q of ['', '   ', '\n\t ']) {
+      const m = matchOption(placeholder, q);
+      expect(m.ok).toBe(false);
+      if (m.ok) throw new Error('unreachable');
+      expect(m.reason).toBe('blank-query');
+    }
+  });
+
+  it('still lets the placeholder be chosen when it is named', () => {
+    const placeholder = opts(
+      { text: '-- Choose a country --', value: '' },
+      { text: 'Australia', value: 'AU' },
+    );
+    expect(matchOption(placeholder, '-- Choose a country --')).toEqual({
+      ok: true,
+      index: 0,
+      tier: 1,
+    });
+  });
+});
+
+describe('matchOption — what comes back is bounded and neutralized', () => {
+  const long = (n: number, tag: string) =>
+    opts(
+      ...Array.from({ length: n }, (_, i) => ({
+        text: `${tag} option ${i} — ${'a very long option label '.repeat(12)}`,
+        value: `v${i}`,
+      })),
+    );
+
+  it('caps an ambiguous candidate list instead of dumping the whole select', () => {
+    // Measured before the cap: an ambiguous 1-character query against an
+    // 800-option select returned 36,031 chars (~9k tokens) — more than a
+    // browser_read of the same element, which IS capped.
+    const m = matchOption(long(800, 'x'), 'x');
+    expect(m.ok).toBe(false);
+    if (m.ok) throw new Error('unreachable');
+    if (m.reason !== 'ambiguous') throw new Error('unreachable');
+    expect(m.matched).toBe(800); // the count stays honest
+    expect(m.candidates.length).toBeLessThanOrEqual(8);
+    expect(m.candidates.join('\n').length).toBeLessThan(2000);
+  });
+
+  it('caps a no-match suggestion list the same way', () => {
+    const m = matchOption(long(6, 'y'), 'zzzz');
+    expect(m.ok).toBe(false);
+    if (m.ok) throw new Error('unreachable');
+    if (m.reason !== 'no-match') throw new Error('unreachable');
+    expect(m.suggestions.join('\n').length).toBeLessThan(1200);
+  });
+
+  it('does NOT cap the browser_read listing, which must stay nameable', () => {
+    // The cap is right for an error (the page must not choose our token cost)
+    // and wrong for the listing (the agent has to be able to copy a label back
+    // into action:"select", and nothing matches a string ending in an
+    // ellipsis). browser_read bounds its own total with maxChars.
+    const long = 'a very long option label '.repeat(20).trim();
+    const capped = describeOption({ text: long, value: 'v', index: 0 });
+    const full = describeOption({ text: long, value: 'v', index: 0 }, { full: true });
+    expect(capped).toContain('…');
+    expect(capped.length).toBeLessThan(120);
+    expect(full).not.toContain('…');
+    expect(full).toContain(long);
+    // Neutralization is NOT part of what `full` relaxes.
+    const bidi = describeOption({ text: '‮x‬', value: 'v', index: 0 }, { full: true });
+    expect(bidi).not.toContain('‮');
+  });
+
+  it('neutralizes page-authored labels instead of reproducing them raw', () => {
+    // A label containing a bare quote plus `[disabled]` used to render as a
+    // second, differently-named option that appeared unusable — a page writing
+    // Aperture's own error vocabulary. Bidi overrides survived too, while the
+    // snapshot line for the same option escaped them correctly.
+    const forged = describeOption({
+      text: 'Beta" [disabled] and "Gamma',
+      value: 't2',
+      index: 0,
+    });
+    expect(forged).toBe('"Beta\\" [disabled] and \\"Gamma" (value "t2")');
+
+    const bidi = describeOption({ text: '‮reversed‬', value: 't3', index: 0 });
+    expect(bidi).not.toContain('‮');
+    expect(bidi).not.toContain('‬');
+  });
+});
+
+describe('matchOption — unicode', () => {
+  it('matches across NFC and NFD spellings of the same label', () => {
+    // Fails closed today, which is the right direction — but the suggestion it
+    // then offers is byte-different and screen-identical to what the agent
+    // asked for, which is a loop the agent cannot get out of.
+    const nfc = 'Café au lait'.normalize('NFC');
+    const nfd = 'Café au lait'.normalize('NFD');
+    expect(nfc).not.toBe(nfd); // the premise
+
+    expect(matchOption(opts({ text: nfc, value: 'c' }), nfd)).toEqual({
+      ok: true,
+      index: 0,
+      tier: 1,
+    });
+    expect(matchOption(opts({ text: nfd, value: 'c' }), nfc)).toEqual({
+      ok: true,
+      index: 0,
+      tier: 1,
+    });
   });
 });
 

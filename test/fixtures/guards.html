@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Guard probe</title>
+    <style>
+      #banner {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        z-index: 99;
+        padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Guard probe</h1>
+
+      <!-- 1. A NON-ADDRESSABLE container holding refs.
+
+           `generic` is not in ADDRESSABLE, so this <div> never receives a ref
+           — and the descendant-`gone` bookkeeping used to be gated on the
+           removed root having one. Removing this panel therefore orphaned both
+           buttons: no remove line, no gone list, no markDead, so they stayed
+           `live` in the registry and alive in the agent's model forever. A
+           <li> row holding a button is the same shape, and both are far
+           commoner than the addressable-rooted case the original fix covered.
+
+           The control is deliberately a plain <div> and not a <ul role=list>,
+           because a <ul role=list> is exactly what the working path used. -->
+      <p><button id="drop">Drop the panel</button></p>
+      <div id="panel">
+        <button id="alpha">Alpha action</button>
+        <button id="beta">Beta action</button>
+      </div>
+
+      <!-- 2. THE DEPENDENT SELECT — country rebuilds state.
+
+           The commonest dependent-select pattern on the web. Three named
+           options become fifty-one different ones. `[N options]` is not a
+           property propDelta compares, and the synthetic option nodes carry no
+           refs, so their removal emitted nothing at all: the agent went on
+           believing in "Victoria" and went on believing the list was short
+           enough that it needed no browser_read. -->
+      <p>
+        <label for="country">Country</label>
+        <select id="country">
+          <option value="AU" selected>Australia</option>
+          <option value="US">United States</option>
+        </select>
+      </p>
+      <p>
+        <label for="state">State</label>
+        <select id="state">
+          <option value="vic" selected>Victoria</option>
+          <option value="nsw">New South Wales</option>
+          <option value="qld">Queensland</option>
+        </select>
+      </p>
+
+      <!-- 3. A select disabled by its own attribute. The snapshot DOES say
+           `disabled` here, so this is the half where Aperture was told and
+           acted anyway. -->
+      <p>
+        <label for="locked">Locked field</label>
+        <select id="locked" disabled>
+          <option value="a" selected>Alpha</option>
+          <option value="b">Beta</option>
+        </select>
+      </p>
+
+      <!-- 4. A select disabled by an ANCESTOR fieldset — the worse half.
+           `el.disabled` is false for this element, so `statesOf` reported no
+           disabled flag on its line at all and the agent could not even see
+           why the action should fail. -->
+      <fieldset disabled>
+        <legend>Closed section</legend>
+        <label for="grouped">Grouped field</label>
+        <select id="grouped">
+          <option value="x" selected>Ex</option>
+          <option value="y">Why</option>
+        </select>
+      </fieldset>
+
+      <!-- 5. The placeholder select every country/state/title picker starts
+           with. `<option value="">` means a blank query hits the exact-VALUE
+           tier and silently resets the field. -->
+      <p>
+        <label for="ship">Shipping</label>
+        <select id="ship">
+          <option value="">-- Choose a method --</option>
+          <option value="std" selected>Standard</option>
+          <option value="ovn">Overnight</option>
+        </select>
+      </p>
+
+      <!-- 6. Labels chosen to make an error message expensive and to forge
+           Aperture's own vocabulary. Filled in by script so this file holds no
+           literal bidi control characters. -->
+      <p>
+        <label for="hostile">Hostile labels</label>
+        <select id="hostile"></select>
+      </p>
+
+      <!-- 7. The modal. Full-viewport and aria-modal, with its dismiss button
+           INSIDE it, so the hit-test refuses everything behind it and the way
+           out is still reachable. -->
+      <p><button id="raise">Show cookie notice</button></p>
+      <div id="banner" role="dialog" aria-modal="true" aria-label="Cookie notice" hidden>
+        <p>We use cookies.</p>
+        <button id="dismiss">Dismiss</button>
+      </div>
+
+      <!-- The witness. Aperture's own report is not evidence that a refused
+           call wrote nothing — the page's event log is. -->
+      <p id="witness">events: none</p>
+    </main>
+
+    <script>
+      // -- witness ----------------------------------------------------------
+      const seen = [];
+      const witness = document.getElementById('witness');
+      const record = (what) => {
+        seen.push(what);
+        witness.textContent = 'events: ' + seen.join(' ');
+      };
+      for (const id of ['country', 'state', 'locked', 'grouped', 'ship', 'hostile']) {
+        document
+          .getElementById(id)
+          .addEventListener('change', (e) => record(id + '=' + e.target.value));
+      }
+
+      // -- 1. drop the non-addressable panel ---------------------------------
+      document.getElementById('drop').addEventListener('click', () => {
+        document.getElementById('panel').remove();
+      });
+
+      // -- 2. the cascade ----------------------------------------------------
+      const AU = [
+        ['vic', 'Victoria'],
+        ['nsw', 'New South Wales'],
+        ['qld', 'Queensland'],
+      ];
+      const US = Array.from({ length: 51 }, (_, i) => ['s' + i, 'State number ' + i]);
+      document.getElementById('country').addEventListener('change', (e) => {
+        const list = e.target.value === 'US' ? US : AU;
+        const state = document.getElementById('state');
+        state.innerHTML = '';
+        for (const [value, label] of list) {
+          const o = document.createElement('option');
+          o.value = value;
+          o.textContent = label;
+          state.appendChild(o);
+        }
+        state.selectedIndex = 0;
+      });
+
+      // -- 6. hostile option labels ------------------------------------------
+      // A bare double quote plus the literal marker `[disabled]` used to be
+      // reproduced verbatim in an error, reading as a second, differently
+      // named, unusable option. The bidi pair survived too, while the snapshot
+      // line for the SAME option escaped it correctly.
+      const RLO = String.fromCharCode(0x202e);
+      const PDF = String.fromCharCode(0x202c);
+      // Long enough that an uncapped error costs more than the entire page.
+      // Five suggestions x ~4kB is the 20,380-char no-match that was measured
+      // on a page whose whole rendered snapshot is under 800 chars.
+      const filler = 'a very long option label '.repeat(160);
+      const hostile = [
+        ['t1', 'Zeta ' + filler],
+        ['t2', 'Beta" [disabled] and "Gamma'],
+        ['t3', RLO + 'reversed' + PDF],
+        ['t4', 'Eta ' + filler],
+        ['t5', 'Theta ' + filler],
+        ['t6', 'Iota ' + filler],
+      ];
+      const hostileSel = document.getElementById('hostile');
+      for (const [value, label] of hostile) {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = label;
+        hostileSel.appendChild(o);
+      }
+
+      // -- 7. the modal ------------------------------------------------------
+      const banner = document.getElementById('banner');
+      document
+        .getElementById('raise')
+        .addEventListener('click', () => banner.removeAttribute('hidden'));
+      document
+        .getElementById('dismiss')
+        .addEventListener('click', () => banner.setAttribute('hidden', ''));
+    </script>
+  </body>
+</html>

@@ -77,7 +77,53 @@ export function diffSnapshots(
     return n.synthetic ? null : reg.ensureRef(n);
   }
 
+  /**
+   * Refs destroyed by turning `o` into `n`, marked dead and reported.
+   *
+   * The death is bookkeeping and happens for every destroyed ref. The REPORT
+   * lists only refs the model was actually shown, because naming refs it never
+   * held is pure token waste — on a first-step replace that was most of the
+   * list.
+   */
+  function buryUnder(o: SnapshotNode, survivors: Set<string>): string[] {
+    const gone: string[] = [];
+    for (const key of keysOf(o)) {
+      if (survivors.has(key)) continue;
+      const ref = reg.byKeyLookup(key)?.ref;
+      if (!ref) continue;
+      const known = wasEmitted(ref);
+      reg.markDead(ref);
+      if (known) gone.push(ref);
+    }
+    return gone;
+  }
+
   function walk(o: SnapshotNode, n: SnapshotNode): void {
+    // A native `<select>`'s options are a PROPERTY of the select, not children
+    // the agent can address — they are synthetic, they never carry refs, and
+    // the `[N options]` marker is not a field `propDelta` compares. So a
+    // country -> state cascade (the commonest dependent-select pattern there
+    // is) used to leave the model holding three option names that no longer
+    // exist and a marker saying it need not read the list, when the list is
+    // now fifty-one different entries. One restatement fixes both, and it is
+    // cheap: a long select renders as a single line.
+    //
+    // `!n.synthetic` is belt-and-braces — only a real `<select>` ever carries
+    // `optionCount`, so this cannot fire on a manufactured node. But this is a
+    // new `ensureRef` call site, and the invariant worth being checkable by
+    // inspection is that EVERY `ensureRef` in this file is synthetic-safe.
+    if (!n.synthetic && optionSetTurnedOver(o, n)) {
+      const survivors = new Set<string>();
+      collectKeys(n, survivors);
+      ops.push({
+        op: 'replace',
+        ref: reg.ensureRef(n),
+        subtree: n,
+        gone: buryUnder(o, survivors),
+      });
+      return;
+    }
+
     const delta = propDelta(o, n);
     if (delta) {
       // A ticker or clock changing on its own is not news. Structural changes
@@ -118,21 +164,12 @@ export function diffSnapshots(
       // is precisely how a wrong-element click happens.
       const survivors = new Set<string>();
       collectKeys(n, survivors);
-      const gone: string[] = [];
-      for (const key of keysOf(o)) {
-        if (survivors.has(key)) continue;
-        const ref = reg.byKeyLookup(key)?.ref;
-        if (!ref) continue;
-        // The death is bookkeeping and happens for every destroyed ref. The
-        // *report* is for the model, so it lists only refs the model was
-        // actually shown — naming refs it never held is pure token waste, and
-        // on a first-step replace that was most of the list.
-        const known = wasEmitted(ref);
-        reg.markDead(ref);
-        if (known) gone.push(ref);
-      }
-
-      ops.push({ op: 'replace', ref: reg.ensureRef(n), subtree: n, gone });
+      ops.push({
+        op: 'replace',
+        ref: reg.ensureRef(n),
+        subtree: n,
+        gone: buryUnder(o, survivors),
+      });
       return;
     }
 
@@ -217,29 +254,44 @@ export function diffSnapshots(
     for (const [key, removed] of remaining) {
       if (newByKey.has(key)) continue;
       const ref = removed.ref ?? reg.byKeyLookup(key)?.ref;
-      if (!ref) continue;
 
-      // A removal destroys a SUBTREE, and until this loop reported only its
+      // A removal destroys a SUBTREE, and this loop once reported only its
       // root. Every ref underneath stayed live in the registry and alive in
       // the model — phantom refs, the exact failure `replace`'s `gone` list
       // exists to prevent, reachable through the commonest interaction there
-      // is: closing a dropdown or dismissing a dialog. It went unnoticed
-      // because no descendant used to carry a ref in any scenario; `option`
-      // becoming addressable (for custom ARIA listboxes) makes it routine.
+      // is: closing a dropdown or dismissing a dialog.
+      //
+      // The descendant walk runs BEFORE the `if (!ref)` bail, and that
+      // ordering is the whole fix. Gating it on the removed root having a ref
+      // covered only the shape the first fixture happened to use (a
+      // `role="listbox"` <ul>, which is `list`, which is addressable). A plain
+      // `<div>` panel is `generic` and an `<li>` row is `listitem`; neither is
+      // in ADDRESSABLE, so neither ever holds a ref, and removing either
+      // orphaned everything inside it in complete silence.
       //
       // Same discipline as `replace`: the death is bookkeeping and applies to
       // every destroyed ref, but the REPORT lists only refs the model was
       // actually shown, because naming refs it never held is pure token cost.
+      // `newByKey` is the survivor set: a key that turned up elsewhere in the
+      // new tree did not die here, and the move op at its destination already
+      // said so.
       const gone: string[] = [];
       for (const k of keysOf(removed)) {
         if (k === key) continue;
-        // A key that survives elsewhere in the new tree did not die with it.
         if (newByKey.has(k)) continue;
         const r = reg.byKeyLookup(k)?.ref;
         if (!r) continue;
         const known = wasEmitted(r);
         reg.markDead(r);
         if (known) gone.push(r);
+      }
+
+      if (!ref) {
+        // Nothing to name at the top, so the deaths stand on their own rather
+        // than going unreported. Silence here is what produced live refs for
+        // elements that had been gone for the rest of the session.
+        if (gone.length) ops.push({ op: 'gone', refs: gone });
+        continue;
       }
 
       ops.push({
@@ -252,6 +304,36 @@ export function diffSnapshots(
       reg.markDead(ref);
     }
   }
+}
+
+/**
+ * Did a native `<select>`'s option LIST change (as opposed to its selection)?
+ *
+ * Two facts about a native select are invisible to `propDelta`: the
+ * `[N options]` marker, which is not one of the properties it compares, and
+ * the inline enumeration of a short list, which lives in synthetic children
+ * that carry no refs and therefore emit nothing when they are added or
+ * removed. Both are stale-able, and the marker is what `tier1.md` calls the
+ * agent's only discriminator between a native select and a custom combobox.
+ *
+ * Deliberately blind to the `selected` state. A selection change is one `~`
+ * line and is already reported through the parent's `="…"` value; restating a
+ * 51-option select for it would make the commonest select interaction the most
+ * expensive one, and it would fire on every scroll through the Offscreen bit.
+ */
+function optionSetTurnedOver(o: SnapshotNode, n: SnapshotNode): boolean {
+  if (o.optionCount === undefined && n.optionCount === undefined) return false;
+  if (o.optionCount !== n.optionCount) return true;
+  // Same count. The enumeration is empty above the inline threshold, so this
+  // loop compares nothing for long lists — which is correct: with an identical
+  // count and no enumeration there is nothing the model could be holding.
+  if (o.children.length !== n.children.length) return true;
+  for (let i = 0; i < n.children.length; i++) {
+    const a = o.children[i]!;
+    const b = n.children[i]!;
+    if (a.key !== b.key || (a.name ?? '') !== (b.name ?? '')) return true;
+  }
+  return false;
 }
 
 function countMatched(a: SnapshotNode[], b: SnapshotNode[]): number {

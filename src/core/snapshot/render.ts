@@ -7,6 +7,13 @@ import type {
   StateBits,
 } from './types.js';
 import { STATE_NAMES, State } from './types.js';
+import { quote } from './text.js';
+
+// Re-exported because most of the codebase imports quote() from here. The
+// implementation moved to text.js so selectOption.ts — which runs in the
+// isolated world and must not pull in the renderer — can share exactly one
+// copy of it. Two copies of a neutralizer is how one of them goes stale.
+export { quote };
 
 /**
  * Rendering the semantic tree into the text an agent actually reads.
@@ -344,6 +351,11 @@ function renderOp(
     }
     case 'move':
       return `> ${op.ref} moved ${op.after ? `after ${op.after}` : `into ${op.parent}`}`;
+    case 'gone':
+      // Same vocabulary as the `(gone: …)` suffix, minus the ref it would hang
+      // off: the container that died was a plain <div> or an <li>, neither of
+      // which is addressable, so there is no name for the top of what went.
+      return `- gone: ${op.refs.join(' ')}`;
     case 'replace': {
       const lines: string[] = [];
       renderNode(op.subtree, 1, lines, { reg, seq, expand: false, marks });
@@ -356,34 +368,4 @@ function renderOp(
       return `! ${op.ref} replaced${goneNote}:\n${lines.join('\n')}`;
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-
-const MAX_TEXT = 80;
-
-/**
- * Quote and neutralize page-authored text.
- *
- * Every string that came from the page sits inside double quotes, and our
- * structural tokens only ever appear unquoted at the start of a line. That
- * means a page cannot emit text that parses as snapshot structure — it cannot
- * forge a `FULL SNAPSHOT` header or a `- e5 removed` line.
- *
- * This is framing hygiene, not a claim of prompt-injection immunity. Page text
- * is still untrusted content and is marked as such at the MCP boundary.
- */
-export function quote(s: string): string {
-  let t = s.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-  // Strip control characters and the bidi overrides used to visually reorder
-  // text so that what a human reviewer sees differs from what is really there.
-  t = t.replace(
-    /[\u0000-\u001f\u0085\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
-    '',
-  );
-  if (t.length > MAX_TEXT) t = `${t.slice(0, MAX_TEXT - 1)}…`;
-  // Backslash must be escaped before the quote, or the encoding is not
-  // injective and page text can close the quoted string early, leaving the
-  // remainder to parse as snapshot structure.
-  return `"${t.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }

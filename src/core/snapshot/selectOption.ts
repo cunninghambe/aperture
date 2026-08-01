@@ -1,10 +1,12 @@
+import { quote, quoteFull } from './text.js';
+
 /**
  * Matching an agent's option request against a native `<select>`.
  *
- * Pure and dependency-free on purpose: it runs inside the page's isolated
- * world (where the option list actually lives) but every decision it makes is
- * a decision about *safety*, so it has to be testable on its own, without a
- * browser.
+ * Pure on purpose, and its one import is the leaf text sanitizer: it runs
+ * inside the page's isolated world (where the option list actually lives) but
+ * every decision it makes is a decision about *safety*, so it has to be
+ * testable on its own, without a browser.
  *
  * THE RULE: EXACT BEFORE LOOSE, AND AMBIGUITY IS AN ERROR
  *
@@ -40,14 +42,47 @@ export interface OptionInfo {
 
 export type SelectMatch =
   | { ok: true; index: number; tier: number }
-  | { ok: false; reason: 'ambiguous'; tier: number; candidates: string[] }
+  | {
+      ok: false;
+      reason: 'ambiguous';
+      tier: number;
+      /** Capped at MAX_LISTED. */
+      candidates: string[];
+      /** How many options actually matched, so the count stays honest. */
+      matched: number;
+    }
   | { ok: false; reason: 'no-match'; suggestions: string[] }
   | { ok: false; reason: 'disabled'; label: string }
-  | { ok: false; reason: 'empty' };
+  | { ok: false; reason: 'empty' }
+  | { ok: false; reason: 'blank-query' };
 
-/** Whitespace-normalized, case preserved. */
+/**
+ * Most options ever named back to the agent in one error.
+ *
+ * Measured before the cap: an ambiguous single-character query against an
+ * 800-option select returned 36,031 chars (~9k tokens), and a no-match on six
+ * long labels returned 20,380 — both larger than a `browser_read` of the same
+ * element, which *is* capped, and both on a page whose entire snapshot is 762
+ * chars. The page chose the size of our response. Five suggestions were already
+ * capped; the candidate list was not, and neither was any individual label.
+ */
+const MAX_LISTED = 8;
+
+/** Most options ever named in a no-match suggestion. */
+const MAX_SUGGESTED = 5;
+
+/**
+ * Whitespace-normalized and unicode-normalized, case preserved.
+ *
+ * NFC matters because a page may serve a decomposed label while the agent
+ * (reading it from our own snapshot, or from a human) sends the composed form.
+ * Byte comparison then misses every tier and the no-match suggestion names a
+ * label that is screen-identical to the query — a loop the agent cannot get
+ * out of. Canonical equivalence is exactly what NFC is for: it can only ever
+ * merge spellings of the SAME string, so it cannot promote a near-miss.
+ */
 function norm(s: string): string {
-  return s.replace(/\s+/g, ' ').trim();
+  return s.normalize('NFC').replace(/\s+/g, ' ').trim();
 }
 
 /** Whitespace-normalized and case-folded. */
@@ -83,6 +118,18 @@ export const TIER_NAMES = TIERS.map((t) => t.name);
 export function matchOption(options: OptionInfo[], query: string): SelectMatch {
   if (options.length === 0) return { ok: false, reason: 'empty' };
 
+  // A blank query names nothing, and the exact-VALUE tier will happily match
+  // it against the `<option value="">` that every country, state and title
+  // picker on the web starts with — silently resetting a field the human is
+  // about to submit, which is the precise failure this module exists to
+  // prevent. Only the prefix tier was guarded, and the unit test that looked
+  // like it covered this passed for the wrong reason: its fixture gave every
+  // option a value equal to its label, so no option had an empty value.
+  //
+  // `empty` means "the select has no options"; this is a different fact and
+  // gets its own reason, because the agent's remedy is different.
+  if (norm(query) === '') return { ok: false, reason: 'blank-query' };
+
   for (let t = 0; t < TIERS.length; t++) {
     const hits = options.filter((o) => TIERS[t]!.test(o, query));
     if (hits.length === 0) continue;
@@ -95,7 +142,11 @@ export function matchOption(options: OptionInfo[], query: string): SelectMatch {
         ok: false,
         reason: 'ambiguous',
         tier: t + 1,
-        candidates: hits.map(describe),
+        // Capped, but the COUNT is the true one: "matches 800 options, here
+        // are 8 of them" is actionable; "matches 8 options" is a lie that
+        // makes the agent think it has seen the whole problem.
+        candidates: hits.slice(0, MAX_LISTED).map((o) => describe(o)),
+        matched: hits.length,
       };
     }
 
@@ -121,14 +172,19 @@ export function matchOption(options: OptionInfo[], query: string): SelectMatch {
  * promote a near-miss into a match, because it never feeds the matcher.
  */
 function suggest(options: OptionInfo[], query: string): string[] {
+  // `.map((o) => describe(o))`, never `.map(describe)`: Array.map passes the
+  // INDEX as the second argument, and describe's second parameter is an
+  // options bag.
+  const named = (list: OptionInfo[]): string[] =>
+    list.slice(0, MAX_SUGGESTED).map((o) => describe(o));
   const q = fold(query);
-  if (q.length < 3) return options.slice(0, 5).map(describe);
+  if (q.length < 3) return named(options);
   const head = q.slice(0, 3);
   const near = options.filter((o) => {
     const t = fold(o.text);
     return t.startsWith(head) || q.startsWith(t.slice(0, 3));
   });
-  return (near.length ? near : options).slice(0, 5).map(describe);
+  return named(near.length ? near : options);
 }
 
 /**
@@ -139,11 +195,26 @@ function suggest(options: OptionInfo[], query: string): string[] {
  * without it, and the agent's next call has to be able to name the one it
  * meant.
  */
-export function describe(o: OptionInfo): string {
+export function describe(o: OptionInfo, opts: { full?: boolean } = {}): string {
+  const q = opts.full ? quoteFull : quote;
   const label = norm(o.text);
-  const parts = [`"${label}"`];
-  if (o.value && norm(o.value) !== label) parts.push(`(value "${o.value}")`);
-  if (o.group) parts.push(`in "${o.group}"`);
+  // `quote()`, not raw interpolation. Every other page-text path in Aperture
+  // gets this treatment and this one did not: a label containing a bare double
+  // quote plus the literal text `[disabled]` rendered as a second,
+  // differently-named, apparently-unusable option — the page authoring
+  // Aperture's own error vocabulary — and bidi overrides passed through
+  // untouched while the snapshot line for the SAME option escaped them.
+  //
+  // `quote` also caps each label, which is what makes an error list bounded in
+  // TOTAL rather than only in item count. `full` drops that cap, and exactly
+  // one caller may ask for it: the `browser_read` listing, which is the only
+  // way to see inside a long dropdown and is therefore the one place where
+  // truncating a label makes the option unnameable — nothing matches a string
+  // ending in an ellipsis. That caller bounds its own total with `maxChars`;
+  // an error message has no such bound, so errors keep the cap.
+  const parts = [q(label)];
+  if (o.value && norm(o.value) !== label) parts.push(`(value ${q(o.value)})`);
+  if (o.group) parts.push(`in ${q(o.group)}`);
   if (o.disabled) parts.push('[disabled]');
   return parts.join(' ');
 }

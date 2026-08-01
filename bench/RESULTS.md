@@ -685,3 +685,181 @@ npm run bench:task                                    # 10 tasks x N=20 x 2 arms
 The runner owns its whole world: it refuses to start if 8817 is already in use,
 then starts its own Aperture, a `no-store` fixture server on 8899, the witness
 collector on 8898 and the MCP proxy on 8896, and tears all of it down on exit.
+
+---
+
+# Update 2026-08-01: adversarial review of `select`, and the guard probe it produced
+
+Three reviewers went at the `select` action, the task-success harness, and
+everything previously green. They landed seven findings. **All seven were real
+and all seven are fixed.** Nothing was deferred and nothing was refuted — this
+is the first review pass here where the reviewers were right about everything
+they claimed.
+
+## The measurement that matters: a new live probe, run before and after
+
+These findings are about *refusals* and *retractions*, not about diff fidelity,
+so they do not belong in a fidelity scenario. `bench/guards.mjs` and
+`test/fixtures/guards.html` measure them directly, against the fixture's own
+change-event log rather than against Aperture's own report — an `error:` reply
+is not evidence that nothing was written.
+
+The probe was run against the **pre-fix build** (source stashed, rebuilt) and
+then against the fixed one. Same probe, same fixture, same machine:
+
+```
+                                                       pre-fix   fixed
+G1a  removed <div> retires the refs inside it            FAIL     PASS
+G1b  the mechanical reader drops them                    FAIL     PASS
+G2   a country->state cascade updates [N options]        FAIL     PASS
+G3   select refuses a <select disabled>                  FAIL     PASS
+G4a  select refuses a select in <fieldset disabled>      FAIL     PASS
+G4b  the snapshot line for it SAYS disabled              FAIL     PASS
+G5   a blank option query is refused                     FAIL     PASS
+G6a  a no-match error is bounded                         FAIL     PASS
+G6b  candidate labels are escaped                        FAIL     PASS
+G7a  select behind an aria-modal overlay is refused      FAIL     PASS
+G7b  and succeeds once the overlay is gone (control)     PASS     PASS
+
+pre-fix: 1/11 · fixed: 11/11
+```
+
+The witness lines are the part worth reading. Pre-fix, after seven calls
+Aperture had answered `ok` to, the page's own event log read:
+
+```
+witness: country=US locked=b grouped=y ship= ship=ovn ship=ovn
+```
+
+`locked=b` is a `change` event on a `<select disabled>`. `grouped=y` is one on a
+select inside `<fieldset disabled>`. `ship=` is a field reset to its placeholder
+by a whitespace-only query. The last `ship=ovn` was written through a
+full-viewport `aria-modal="true"` overlay. No human and no CDP input path can
+produce any of those four. Post-fix the same sequence leaves `country=US` and
+nothing else until the overlay is dismissed.
+
+## Finding by finding
+
+**1. A removed subtree orphaned every ref inside it unless its root happened to
+be addressable.** `diff.ts`'s removal loop bailed on `if (!ref) continue` BEFORE
+the descendant-`gone` walk. `generic` and `listitem` are not in `ADDRESSABLE`,
+so removing a `<div>` panel or an `<li>` row retired nothing: no report, no
+`markDead`, refs left `live` forever. The descendant walk now runs first, and a
+new `gone` op (rendered `- gone: e2 e3`) carries the deaths when there is no
+addressable root to hang them off. The original fix only ever covered
+`selects.html`'s shape, where the removed root is a `<ul role=list>` and
+therefore addressable.
+
+**2. `select` bypassed the obstruction hit-test.** The design's reasoning — "it
+needs no coordinates, so it needs no hit-test" — is right about coordinates and
+wrong about *reachability*: `resolveRef` is the only thing in the codebase that
+refuses an action because something covers the target. Every element-targeted
+action now passes that gate, `select` included. What survives of the original
+call is the part that mattered: `select` takes nothing from the resolve but the
+answer, dispatches no CDP input, and stays on the IPC path.
+
+**3. `select` wrote through disabled selects.** `matchOption` refuses a disabled
+OPTION on the rule "a human cannot choose it, so neither can we"; the rule was
+never applied one level up. Two halves, and the second is worse: `statesOf` read
+only `el.disabled`, which is `false` for a control disabled by an ancestor
+`<fieldset disabled>`, so the snapshot line carried **no** disabled flag and the
+agent could not even see why the action should fail. Both fixed — the walker now
+consults `:disabled`, which is the platform's own answer to "is this actually
+disabled" and the only one that accounts for the ancestor.
+
+**4. `[N options]` and the inline enumeration were never diffed.** `propDelta`
+does not compare `optionCount`, and a removed synthetic option emits nothing
+because it has no ref. A native select's option list is now treated as a
+property of the select: when the LIST turns over — not when the selection moves
+— the select is restated as one `replace`. Cheap, because a long select restates
+as a single line.
+
+**5. Select error paths emitted unbounded, unsanitized page text.** `describe()`
+applied neither `quote()` nor any cap, and the candidate list was uncapped.
+Measured here on a page whose whole snapshot is under 800 chars: a single
+no-match error cost **12,408 chars**, and the reviewers measured 20,380 and
+36,031 on theirs. The same call now costs 636. `quote()` also closed the
+forgery: a label of `Beta" [disabled] and "Gamma` used to render as a second,
+differently-named, apparently-unusable option, and bidi overrides passed through
+untouched while the snapshot line for the SAME option escaped them correctly.
+
+One thing the cap broke, and a second change fixed: `browser_read` on a select
+is the ONLY way to see inside a long dropdown, and a label truncated to 80
+characters with an ellipsis matches no tier — it makes the option permanently
+unselectable. That listing uses `quoteFull` (neutralized, not capped) and relies
+on its own `maxChars` bound. Errors keep the cap, because an error has no such
+bound and a page must not get to choose how many tokens its own text costs us.
+
+**6. A blank option query selected the placeholder.** Only the prefix tier was
+guarded, so an empty query hit the exact-VALUE tier against the
+`<option value="">` that heads most country, state and title pickers — silently
+resetting a field the human then submits. The unit test that looked like it
+covered this passed for the wrong reason: its fixture gave every option a value
+equal to its label, so no option had an empty value. `blank-query` is now its
+own refusal, distinct from `empty` ("this select has no options"), because the
+agent's remedy differs.
+
+**7. No unicode normalization before matching.** Fail-safe, but the no-match
+suggestion then names a label that is screen-identical to the query, which is a
+loop the agent cannot get out of. `norm()` now applies NFC. Canonical
+equivalence can only merge spellings of the same string, so it cannot promote a
+near-miss into a match.
+
+**`reapExcept` was dead code** — one grep hit, the definition — and read as a
+second net under the diff's bookkeeping. It was not one and must not become one:
+a full snapshot's lines are subject to run collapsing and the budget cut, so
+"absent from this snapshot" does not mean "absent from the page", and reaping on
+that basis would kill refs the agent can still legitimately act on. Deleted,
+with the reasoning recorded where it stood.
+
+## The benches were structurally blind to two of these, and are not now
+
+The shared reader required a role-plus-ref prefix to parse a line at all, so
+`[N options]` fell off the end of the state-word loop and was dropped on the
+floor. A stale marker could never turn a scenario red, however wrong the agent's
+belief about the list. The reader now parses `optionCount` and understands
+`- gone:`; `fidelity.mjs` compares markers against the truth snapshot and prints
+`WRONG [N options] MARKERS`. All five scenarios report 0.
+
+## Full verification after the fixes
+
+```
+npx tsc --noEmit -p tsconfig.json        clean
+npx vitest run                           283 passed (11 files)
+npx electron-vite build                  ok
+
+bench:fidelity form       GREEN  18/18 refs · 13 diffs + 1 resync · 0 wrong markers
+bench:fidelity rerender   GREEN  17/17 refs · 3 diffs
+bench:fidelity widgets    GREEN   6/6  refs · suppression seen
+bench:fidelity biglist    GREEN  71/71 refs · resync fired
+bench:fidelity selects    GREEN   7/7  refs · 8 diffs
+bench/guards.mjs          GREEN  11/11 guards (1/11 on the pre-fix build)
+npm run bench             ok     6.6x-10.2x, unchanged
+npm run bench:task --selftest   G1 PASS · G2 PASS · no API budget spent
+```
+
+## Running the guard probe
+
+```bash
+npx http-server test/fixtures -p 8899 -c-1 --silent &
+npx electron . > /tmp/ap.log 2>&1 &
+sleep 15
+TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
+npm run bench:guards -- "$TOK"      # optional 2nd arg: fixture base URL
+```
+
+Exit 0 all guards hold · 1 a guard failed · 3 the probe could not run.
+
+## What this pass does NOT close
+
+- **The obstruction gate is exercised only by this probe.** `fidelity.mjs` never
+  raises a modal, so a regression in the hit-test itself would still go
+  unnoticed by the standing five scenarios.
+- **`[N options]` staleness is now measurable but only exercised on the guard
+  fixture.** No fidelity scenario contains a dependent select; the `selects`
+  scenario's lists never change size.
+- **Optgroup labels are still passive.** `describe`'s group line is quoted now
+  but still never matched — qualified queries remain deferred.
+- **Only `:disabled` is consulted, not `inert` or `pointer-events: none`.** A
+  select inside an `inert` subtree is still writable by `action:"select"`; the
+  hit-test catches the overlay case but not that one.

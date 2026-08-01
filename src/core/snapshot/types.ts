@@ -157,6 +157,17 @@ export type DiffOp =
     }
   | { op: 'move'; ref: string; parent: string; after: string | null }
   /**
+   * Refs that died with a removed subtree whose ROOT carries no ref.
+   *
+   * `remove` can only report deaths it can hang off a named ref, and most
+   * containers on the web are not addressable: a `<div>` is `generic`, a table
+   * or list row is `listitem`, and neither is in ADDRESSABLE. Removing one used
+   * to orphan every ref beneath it — no `remove` line, no `gone` list, no
+   * `markDead` — so the model kept acting on elements that no longer existed.
+   * There is nothing to name at the top, so this op names only the dead.
+   */
+  | { op: 'gone'; refs: string[] }
+  /**
    * Regional fallback. When most of a container turned over, one replace is
    * both cheaper and far less likely to be misapplied by the model than
    * twenty adds interleaved with twenty removes.

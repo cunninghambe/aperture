@@ -1,10 +1,11 @@
 import { ipcRenderer } from 'electron';
-import { walk } from '@core/snapshot/walker.js';
+import { isDisabled, walk } from '@core/snapshot/walker.js';
 import {
   describe as describeOption,
   matchOption,
   type OptionInfo,
 } from '@core/snapshot/selectOption.js';
+import { quoteFull } from '@core/snapshot/text.js';
 
 /**
  * Preload injected into every web page. Hostile territory.
@@ -233,21 +234,27 @@ function optionsOf(el: HTMLSelectElement): OptionInfo[] {
  * deliberate deferral, not an oversight.
  */
 function describeSelect(el: HTMLSelectElement): string {
+  // Every string below came from the page, so every one of them is quoted and
+  // neutralized. `quoteFull` and not `quote`: this listing exists so the agent
+  // can name an option EXACTLY, and a label truncated to 80 characters with an
+  // ellipsis matches no tier — truncating here would make a long option
+  // permanently unselectable. browser_read caps the whole response with
+  // `maxChars`, which is the bound that actually matters here.
   const opts = optionsOf(el);
-  const selected = Array.from(el.selectedOptions).map((o) => o.text.trim());
+  const selected = Array.from(el.selectedOptions).map((o) => quoteFull(o.text));
   const head =
     `native select${el.multiple ? ' (multi-select)' : ''} · ${opts.length} options · ` +
-    (selected.length ? `selected: ${selected.map((s) => `"${s}"`).join(', ')}` : 'nothing selected');
+    (selected.length ? `selected: ${selected.join(', ')}` : 'nothing selected');
 
   const lines = [head, 'Choose one with browser_act action:"select".', ''];
   let group: string | undefined;
   for (const [i, o] of opts.entries()) {
     if (o.group !== group) {
       group = o.group;
-      if (group) lines.push(`  ${group}`);
+      if (group) lines.push(`  ${quoteFull(group)}`);
     }
     const mark = el.options[i]!.selected ? '>' : ' ';
-    lines.push(`${mark} ${describeOption({ ...o, group: undefined })}`);
+    lines.push(`${mark} ${describeOption({ ...o, group: undefined }, { full: true })}`);
   }
   return lines.join('\n');
 }
@@ -321,6 +328,18 @@ ipcRenderer.on(
       if (!(el instanceof HTMLSelectElement)) {
         return reply({ ok: false, reason: 'not-a-select', tag: el.tagName });
       }
+      // `matchOption` refuses a disabled OPTION on the rule "a human cannot
+      // choose it, so neither can we". The rule was never applied one level
+      // up, and it must be: this path writes through the DOM and dispatches
+      // `change` itself, so nothing else stops it. A click on a disabled
+      // control is discarded by the browser; a write here is not.
+      //
+      // `isDisabled` and not `el.disabled`, because `el.disabled` is false for
+      // a select disabled by an ancestor `<fieldset disabled>` — the half of
+      // this the snapshot could not even show the agent.
+      if (isDisabled(el)) {
+        return reply({ ok: false, reason: 'select-disabled', total: el.options.length });
+      }
 
       const opts = optionsOf(el);
       const m = matchOption(opts, req.option);
@@ -330,7 +349,9 @@ ipcRenderer.on(
           reason: m.reason,
           total: opts.length,
           multiple: el.multiple,
-          ...(m.reason === 'ambiguous' ? { tier: m.tier, candidates: m.candidates } : {}),
+          ...(m.reason === 'ambiguous'
+            ? { tier: m.tier, candidates: m.candidates, matched: m.matched }
+            : {}),
           ...(m.reason === 'no-match' ? { suggestions: m.suggestions } : {}),
           ...(m.reason === 'disabled' ? { label: m.label } : {}),
         });

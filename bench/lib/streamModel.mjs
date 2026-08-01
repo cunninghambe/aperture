@@ -39,13 +39,24 @@ export function parseElementLine(line) {
     rest = rest.slice(0, vm.index) + rest.slice(vm.index + vm[0].length);
   }
 
+  // `[N options]` is the ONLY thing distinguishing a native <select> (which
+  // needs action:"select") from a custom ARIA combobox (which needs clicks),
+  // and the reader used to drop it on the floor — so no scenario could ever
+  // turn red on a stale one, however wrong the model's belief about the list.
+  let optionCount;
+  const om = / \[(\d+) options\]/.exec(rest);
+  if (om) {
+    optionCount = Number(om[1]);
+    rest = rest.slice(0, om.index) + rest.slice(om.index + om[0].length);
+  }
+
   const states = new Set();
   const words = rest.trim().split(/\s+/).filter(Boolean);
   for (let i = words.length - 1; i >= 0; i--) {
     if (STATE_WORDS.has(words[i])) states.add(words[i]);
     else break;
   }
-  return { role, ref, label, value, states };
+  return { role, ref, label, value, states, optionCount };
 }
 
 /**
@@ -76,6 +87,16 @@ export function applyObservation(model, text) {
       model.delete(rm[1]);
       const inside = /\(gone: ([^)]*)\)/.exec(line);
       if (inside) for (const r of inside[1].trim().split(/\s+/)) model.delete(r);
+      continue;
+    }
+
+    // Refs that died inside a removed container which had no ref of its own:
+    // `- gone: e2 e3`. A <div> panel is `generic` and a row is `listitem`, so
+    // neither is addressable and neither can head a `- eN removed` line — but
+    // the refs beneath them are just as dead.
+    const bare = /^- gone: (.*)$/.exec(line);
+    if (bare) {
+      for (const r of bare[1].trim().split(/\s+/)) model.delete(r);
       continue;
     }
 

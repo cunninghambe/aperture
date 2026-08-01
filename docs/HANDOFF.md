@@ -2,7 +2,7 @@
 
 ## Current state — all benchmarks green, and this time the green is guarded
 
-200 tests pass. The browser runs, the MCP server works, `browser_act` closes
+283 tests pass. The browser runs, the MCP server works, `browser_act` closes
 the act-observe loop, and Claude Code can drive it end to end.
 
 ```
@@ -11,7 +11,16 @@ bench:fidelity rerender   GREEN   17/17 refs · 0 phantoms through full DOM tear
 bench:fidelity widgets    GREEN   6/6 refs · clicks, +checked/+expanded, shadow DOM, clock suppressed
 bench:fidelity biglist    GREEN   71/71 refs · 70 refs die and revive · size-cap resync fired
 bench:fidelity selects    GREEN   7/7 refs · 4 native selects + a custom ARIA combobox
+bench:guards              GREEN   11/11 refusals and retractions (1/11 on the pre-fix build)
 ```
+
+`bench:guards` is new (2026-08-01) and answers a different question from the
+fidelity scenarios: not "does the diff describe the page" but "does Aperture
+actually refuse what it says it refuses, and actually retract what it says it
+retracts". It judges against the fixture's own change-event log, because an
+`error:` reply is not evidence that nothing was written. Seven adversarial
+findings produced it; nine of its eleven checks failed on the build immediately
+before. See `bench/RESULTS.md`.
 
 This suite had already produced two false results that were believed for a
 while (phantom refs from a collapsed ground truth; a flawless green from an
@@ -51,6 +60,14 @@ node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | select
 ```
 
 All five in one go, one fresh Aperture each: `bash bench/fidelity-all.sh`.
+
+The guard probe runs the same way — its fixture is `test/fixtures/guards.html`,
+so the same 8899 server serves it, and it takes an optional second argument if
+you need a different fixture port:
+
+```bash
+npm run bench:guards -- "$TOK"
+```
 
 The task-success bench owns its whole world instead — it refuses to start if
 8817 is already in use, then starts its own Aperture, a `no-store` fixture
@@ -115,6 +132,55 @@ must round-trip, a clicked checkbox must read `checked`.
   ignored). Scoped reads resolve through the isolated-world index, same keys
   as acting; unknown/gone refs error loudly. Verified live.
 
+## Engine fixes from the 2026-08-01 adversarial review — all seven findings real
+
+Three reviewers attacked the `select` action, the task-success harness, and
+everything previously green. Every finding they raised reproduced live, and
+every one is fixed. `bench/RESULTS.md` has the before/after table and the
+finding-by-finding write-up; the short version:
+
+- **A removed subtree orphaned every ref inside it unless its root happened to
+  be addressable.** `diff.ts` bailed on `if (!ref) continue` *before* the
+  descendant-`gone` walk, and `generic`/`listitem` are not addressable — so
+  removing a `<div>` panel or an `<li>` row retired nothing at all. The walk now
+  runs first, and a new `gone` op (`- gone: e2 e3`) reports deaths that have no
+  addressable root to hang off. The earlier fix only covered the one shape the
+  `selects` fixture happens to use.
+- **`select` bypassed the obstruction hit-test.** Right that it needs no
+  coordinates, wrong that it therefore needs no *reachability* answer — that
+  resolve is the only modal gate in the codebase. Every element-targeted action
+  now passes it. `select` still dispatches no CDP input and stays on the IPC
+  path; it just takes the answer.
+- **`select` wrote through a `<select disabled>`, and through one disabled by an
+  ancestor `<fieldset disabled>`.** The fieldset half was worse: `statesOf` read
+  only `el.disabled`, so the snapshot line carried no `disabled` flag and the
+  agent could not see why the call should fail. The walker now consults
+  `:disabled`.
+- **`[N options]` and the inline option enumeration were never diffed.** A
+  country→state cascade left the agent holding three option names that no longer
+  existed plus a marker telling it the list was short enough not to read. A
+  native select whose option LIST turns over is now restated as one `replace`;
+  a selection change is still one `~` line.
+- **Select error paths emitted unbounded, unsanitized page text** — 12,408 chars
+  for one no-match on a page whose whole snapshot is under 800. Now capped and
+  `quote()`d, so a label of `Beta" [disabled] and "Gamma` can no longer forge a
+  second option in our own vocabulary. The `browser_read` listing deliberately
+  uses `quoteFull` (no length cap): truncating a label there makes the option
+  unselectable, and that path is bounded by `maxChars` instead.
+- **A blank option query selected the placeholder** — `""` matched the
+  `<option value="">` that heads most pickers, resetting a field the human then
+  submits. `blank-query` is now its own refusal.
+- **No unicode normalization before matching.** Fail-safe, but the suggestion it
+  produced was screen-identical to the query. `norm()` applies NFC.
+- **`reapExcept` deleted.** Never called from anywhere, and it read as a second
+  net under the diff's bookkeeping. It cannot become one: a full snapshot's
+  lines are subject to run collapsing and the budget cut, so "absent from this
+  snapshot" does not mean "absent from the page".
+- **The bench could not have caught two of these.** The shared stream reader
+  dropped `[N options]` on the floor, so a stale marker could never turn a
+  scenario red. It now parses `optionCount` and understands `- gone:`, and
+  `fidelity.mjs` prints `WRONG [N options] MARKERS` (0 on all five scenarios).
+
 ## Known gaps and hazards, honestly
 
 - **Structure and position are not part of "faithful".** The bench verifies
@@ -134,8 +200,19 @@ must round-trip, a clicked checkbox must read `checked`.
 - **Model-side budget truncation is unmeasured** — the bench aborts when the
   *truth* is cut, but an agent living on a 2000-token budget of a 9k-token
   page is the production case and no scenario measures it.
-- **iframes and the modal-obstruction path** are claimed in the design and
-  exercised by no benchmark or test.
+- **iframes** are claimed in the design and exercised by no benchmark or test.
+  The **modal-obstruction path** is now exercised, but only by `bench:guards`
+  (G7a/G7b) — no fidelity scenario raises a modal, so a hit-test regression
+  would still slip past the standing five.
+- **`[N options]` staleness is measurable now, but only on the guard fixture.**
+  No fidelity scenario contains a dependent select; `selects.html`'s lists never
+  change size.
+- **Only `:disabled` is consulted, not `inert` or `pointer-events: none`.** A
+  select inside an `inert` subtree is still writable by `action:"select"` — the
+  hit-test catches the overlay case, not that one. Deferred deliberately:
+  `inert` needs its own walker state (the agent should see it on every element,
+  not just selects), and inventing a half-answer for one action is how the
+  `disabled` gap happened in the first place.
 - **The `select` mechanism's headline justification does not reproduce from
   here.** React's value tracker lives on the page's own wrapper for the DOM
   node; the preload writes from an isolated world, which has a different
@@ -209,19 +286,35 @@ must round-trip, a clicked checkbox must read `checked`.
    `browser_act` also gained `observe: 'diff'|'full'` on the existing
    `opts.full` path. Two false-green vectors were found in the process — see
    `bench/RESULTS.md`.
+
+   **Reviewed adversarially 2026-08-01 and it did not survive intact**: seven
+   findings, all real, all fixed, all now measured by `bench:guards`. The
+   synthetic-ref guard and the five matching tiers held under attack; what did
+   not was everything around them — the obstruction gate, the disabled check,
+   the option-list retraction, and the size and escaping of the error text.
 4. **Vault fill path** — unblocked since the consent dialog exists.
 5. **Web Bot Auth**, before the 2026-09-15 Cloudflare deadline the README
    cites.
 
 ## Method that has actually worked here
 
-Eight times now, something marked "working" was broken the moment it was
+Nine times now, something marked "working" was broken the moment it was
 measured end to end: the crash pipeline, the HN snapshot, the UA client hints,
 the benchmark harness twice, the fidelity ground truth, the
-volatility-in-act-loops + shadow-DOM clicks, and the `select` pass's
-first green (a stale cached fixture and a mechanism test with no teeth). Every
-time, the unit tests and the assumption agreed with each other, and only the
-real output disagreed.
+volatility-in-act-loops + shadow-DOM clicks, the `select` pass's first green (a
+stale cached fixture and a mechanism test with no teeth), and now the `select`
+pass's *second* green — seven findings, every one of which reproduced live
+against a build whose 200 unit tests and five fidelity scenarios were all
+passing. Every time, the unit tests and the assumption agreed with each other,
+and only the real output disagreed.
+
+The 2026-08-01 pass added a corollary about benchmarks specifically. Two of the
+seven findings were **structurally invisible** to the suite: the shared stream
+reader required a role-plus-ref prefix to parse a line, so `[N options]` was
+dropped on the floor and no scenario could go red on a stale one however wrong
+the agent's belief. A benchmark that cannot see a field is not evidence about
+that field, and it looks exactly like a benchmark that checked it. When adding a
+claim to the product, check that the reader can see the bytes that carry it.
 
 The `select` pass added a variant worth naming: **`tsc` agreed too.** The
 success path read a variable declared inside the failure branch and compiled

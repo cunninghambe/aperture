@@ -862,4 +862,157 @@ describe('a removed subtree names the refs that died inside it', () => {
     if (removal?.op !== 'remove') throw new Error('unreachable');
     expect(removal.gone ?? []).not.toContain(redRef);
   });
+
+  it('retires refs inside a removed subtree whose ROOT is not addressable', () => {
+    // The removed root decided whether the descendant walk ran at all, so a
+    // plain <div> wrapper — `generic`, never addressable, never given a ref —
+    // orphaned every ref beneath it. `<li>` rows holding buttons are the same
+    // shape, and both are commoner than the addressable-rooted case the
+    // original fix happened to cover.
+    const reg = new RefRegistry();
+    const open = k('main', 'm', undefined, {
+      children: [
+        k('generic', 'panel', undefined, {
+          children: [k('button', 'a', 'Alpha action'), k('button', 'b', 'Beta action')],
+        }),
+      ],
+    });
+    assignRefs(open, reg);
+    const shown = new Set(refsIn(open));
+    const aRef = reg.byKeyLookup('a')!.ref;
+    const bRef = reg.byKeyLookup('b')!.ref;
+    expect(reg.byKeyLookup('panel')).toBeUndefined(); // the premise: no ref on the root
+
+    const closed = k('main', 'm', undefined, { children: [] });
+    const { ops } = diffSnapshots(open, closed, reg, { wasEmitted: (r) => shown.has(r) });
+
+    // Bookkeeping: the registry must not still call them live.
+    expect(reg.resolve(aRef)?.state).toBe('dead');
+    expect(reg.resolve(bRef)?.state).toBe('dead');
+
+    // Report: the model has no other way to learn they died.
+    const out = render(ops, reg);
+    expect(out).toMatch(new RegExp(`gone:[^\\n]*\\b${aRef}\\b`));
+    expect(out).toMatch(new RegExp(`gone:[^\\n]*\\b${bRef}\\b`));
+  });
+
+  it('says nothing when a ref-less subtree held no refs either', () => {
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [k('generic', 'panel', undefined, { children: [k('text', 't', 'hello')] })],
+    });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, { children: [] });
+    const { ops } = diffSnapshots(before, after, reg, { wasEmitted: () => true });
+    expect(ops).toHaveLength(0);
+  });
+});
+
+describe('a native select restates its options when they turn over', () => {
+  /** A walker-manufactured option node: enumerated inline, never given a ref. */
+  const synth = (key: string, name: string, selected = false): SnapshotNode => ({
+    role: 'option',
+    name,
+    key,
+    synthetic: true,
+    states: selected ? State.Selected : 0,
+    frameId: 0,
+    rect: [0, 0, 10, 10],
+    children: [],
+  });
+
+  const stateSelect = (
+    optionCount: number,
+    value: string,
+    children: SnapshotNode[],
+  ): SnapshotNode =>
+    k('combobox', 'sel-state', 'State', { optionCount, value, children });
+
+  it('retracts a stale [N options] marker and the inline enumeration', () => {
+    // The country -> state cascade, the commonest dependent-select pattern
+    // there is. Three named options become fifty-one different ones; without a
+    // restatement the agent still believes in "Victoria" and still believes it
+    // needs no browser_read because the list is only three long.
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [
+        stateSelect(3, 'Victoria', [
+          synth('sel-state|opt0|vic', 'Victoria', true),
+          synth('sel-state|opt1|nsw', 'New South Wales'),
+          synth('sel-state|opt2|qld', 'Queensland'),
+        ]),
+      ],
+    });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, {
+      children: [stateSelect(51, 'State number 0', [])],
+    });
+    assignRefs(after, reg);
+
+    const { ops } = diffSnapshots(before, after, reg, { wasEmitted: () => true });
+    const out = render(ops, reg);
+    expect(out).toContain('[51 options]');
+    expect(out).not.toContain('[3 options]');
+    expect(out).not.toContain('Victoria');
+  });
+
+  it('restates when the count is unchanged but the options are different', () => {
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [
+        stateSelect(2, 'Victoria', [
+          synth('sel-state|opt0|vic', 'Victoria', true),
+          synth('sel-state|opt1|nsw', 'New South Wales'),
+        ]),
+      ],
+    });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, {
+      children: [
+        stateSelect(2, 'Alabama', [
+          synth('sel-state|opt0|al', 'Alabama', true),
+          synth('sel-state|opt1|ak', 'Alaska'),
+        ]),
+      ],
+    });
+    assignRefs(after, reg);
+
+    const { ops } = diffSnapshots(before, after, reg, { wasEmitted: () => true });
+    // ONE restatement, not an add/remove script over nodes the agent cannot
+    // address. The add/remove form happens to deliver the new labels, but it
+    // never retracts the old ones — synthetic options carry no ref, so their
+    // removal emits nothing at all.
+    expect(ops.map((o) => o.op)).toEqual(['replace']);
+    const out = render(ops, reg);
+    expect(out).toContain('Alabama');
+    expect(out).not.toContain('New South Wales');
+  });
+
+  it('does NOT restate when only the selection moved', () => {
+    // A value change is one `~` line. Restating a 51-option select for it
+    // would make the commonest select interaction the most expensive one.
+    const reg = new RefRegistry();
+    const before = k('main', 'm', undefined, {
+      children: [
+        stateSelect(2, 'Victoria', [
+          synth('sel-state|opt0|vic', 'Victoria', true),
+          synth('sel-state|opt1|nsw', 'New South Wales'),
+        ]),
+      ],
+    });
+    assignRefs(before, reg);
+    const after = k('main', 'm', undefined, {
+      children: [
+        stateSelect(2, 'New South Wales', [
+          synth('sel-state|opt0|vic', 'Victoria'),
+          synth('sel-state|opt1|nsw', 'New South Wales', true),
+        ]),
+      ],
+    });
+    assignRefs(after, reg);
+
+    const { ops } = diffSnapshots(before, after, reg, { wasEmitted: () => true });
+    expect(ops.map((o) => o.op)).toEqual(['update']);
+    expect(render(ops, reg)).toContain('="New South Wales"');
+  });
 });

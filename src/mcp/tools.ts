@@ -623,14 +623,60 @@ export function registerBrowserTools(
       // cares about it — clear any volatility suppression it accumulated.
       agentTouched(id, key2);
 
-      // `select` never reaches resolveRef, and that is deliberate. It needs no
-      // coordinates (there is nothing to click), so it needs no hit-test:
-      // there is no click to land on an overlay instead. It is a state
-      // mutation plus a notification, the same class as the vault fill path,
-      // and it lives on that IPC channel rather than the CDP input one.
+      if (action === 'select' && option === undefined) {
+        return text('error: option required for select');
+      }
+
+      // EVERY element-targeted action passes the hit-test, `select` included.
+      //
+      // `select` used to route around this on the reasoning that it needs no
+      // coordinates, so it needs no hit-test. That reasoning is sound about
+      // COORDINATES and wrong about REACHABILITY: this resolve is the only
+      // thing anywhere in the codebase that refuses an action because
+      // something covers the target, and routing around it made `select` the
+      // one action that can mutate form state behind a consent dialog and
+      // answer `ok`. Measured: same element, same full-viewport
+      // `aria-modal="true"` overlay — `click` refused, `select` committed and
+      // the page's own change listener fired.
+      //
+      // What is still true is the part that mattered: `select` takes nothing
+      // from this call but the answer. It dispatches no CDP input, and remains
+      // a state mutation plus a notification on the IPC path.
+      const r = await resolveRef(wc, key2);
+      if (!r.ok) {
+        // Targeted recovery rather than "something went wrong": tell the agent
+        // what it can do next without re-reading the entire page.
+        const { text: obs } = await observe(id, wc, { full: wantFull });
+        // The error and the "here is what to look at" framing are Aperture's;
+        // only the observation is the page's.
+        return text(
+          `error: ${ref} could not be acted on (${r.reason}).\n` +
+            'The page as it stands now:\n' +
+            untrusted(safeOrigin(t.info(id)?.url ?? ''), obs),
+        );
+      }
+
+      if (r.obstructed) {
+        // `obstructor` is built from the obstructing element's own tagName and
+        // id, so it is page-authored, and it is interpolated into harness
+        // prose that deliberately sits OUTSIDE the envelope. `quote()` is what
+        // keeps it from reading as harness speech: it strips control and bidi
+        // characters, collapses newlines, caps the length, and escapes the
+        // delimiters, so the worst a page can achieve is a strange-looking
+        // quoted string in a sentence that is visibly Aperture's.
+        return text(
+          `error: ${ref} is covered by ` +
+            `${r.obstructor ? quote(r.obstructor) : 'another element'} — ` +
+            'likely a modal or cookie banner. Dismiss it first; acting here ' +
+            'would reach the overlay, not the element you named.',
+        );
+      }
+
       if (action === 'select') {
-        if (option === undefined) return text('error: option required for select');
-        const sel = await requestSelect(wc, key2, option);
+        // Checked above, before the hit-test. Bound once so the branch does not
+        // have to keep asserting it.
+        const wanted = option as string;
+        const sel = await requestSelect(wc, key2, wanted);
         // Declared out here, not inside the failure branch. `origin` is a DOM
         // global, so a reference to it in the success path type-checks against
         // the DOM lib and then throws ReferenceError in the main process at
@@ -658,19 +704,28 @@ export function registerBrowserTools(
                   'open, then click the option you want. Native selects are the ' +
                   'only elements rendered with "[N options]".',
               );
-            case 'ambiguous':
+            case 'ambiguous': {
               // Candidate labels are page-authored, so the list goes inside the
               // envelope; the instruction about what to do next is Aperture's
               // and stays outside it.
+              //
+              // The count is the TRUE number of matches; the list is capped.
+              // Reporting the capped length instead would tell an agent facing
+              // 800 matches that it has seen the whole problem.
+              const shown = sel.candidates ?? [];
+              const total = sel.matched ?? shown.length;
+              const more = total > shown.length ? `\n(${total - shown.length} more not shown)` : '';
               return text(
-                `error: ${quote(option)} matches ${sel.candidates?.length ?? 0} options ` +
+                `error: ${quote(wanted)} matches ${total} options ` +
                   `on ${ref} and Aperture will not guess between them. Name one exactly:\n` +
-                  untrusted(origin, (sel.candidates ?? []).join('\n')) +
+                  untrusted(origin, shown.join('\n')) +
+                  more +
                   '\nCall browser_read with this ref for the full list.',
               );
+            }
             case 'no-match':
               return text(
-                `error: no option on ${ref} is called ${quote(option)} ` +
+                `error: no option on ${ref} is called ${quote(wanted)} ` +
                   `(${sel.total ?? 0} options). Nearest by name:\n` +
                   untrusted(origin, (sel.suggestions ?? []).join('\n')) +
                   '\nCall browser_read with this ref for the full list. Option ' +
@@ -678,8 +733,28 @@ export function registerBrowserTools(
               );
             case 'disabled':
               return text(
-                `error: option ${quote(sel.label ?? option)} on ${ref} is disabled, ` +
+                `error: option ${quote(sel.label ?? wanted)} on ${ref} is disabled, ` +
                   'so a human could not choose it either.',
+              );
+            case 'select-disabled':
+              // The same rule the disabled-OPTION refusal states, one level up.
+              // A <fieldset disabled> is the half worth naming: the select's
+              // own `disabled` property is false there, so the agent may be
+              // looking at a snapshot line that carries no disabled flag.
+              return text(
+                `error: ${ref} is disabled — either directly or by an enclosing ` +
+                  '<fieldset disabled> — so a human could not change it either. ' +
+                  'Nothing was written.',
+              );
+            case 'blank-query':
+              // Not the same fact as `empty`, and the remedy is different. The
+              // exact-value tier will happily match "" against the
+              // <option value=""> that heads most pickers, which would reset a
+              // field the human is about to submit.
+              return text(
+                `error: an option name is required and ${quote(wanted)} is blank. ` +
+                  `Name the option you want; call browser_read with ${ref} to see them. ` +
+                  'A blank query would select the placeholder.',
               );
             case 'empty':
               return text(`error: ${ref} has no options to choose from.`);
@@ -708,36 +783,6 @@ export function registerBrowserTools(
         return text(
           `ok select ${ref} → ${quote(sel.label)}${multiNote}\n` +
             untrusted(origin, obs),
-        );
-      }
-
-      const r = await resolveRef(wc, key2);
-      if (!r.ok) {
-        // Targeted recovery rather than "something went wrong": tell the agent
-        // what it can do next without re-reading the entire page.
-        const { text: obs } = await observe(id, wc, { full: wantFull });
-        // The error and the "here is what to look at" framing are Aperture's;
-        // only the observation is the page's.
-        return text(
-          `error: ${ref} could not be acted on (${r.reason}).\n` +
-            'The page as it stands now:\n' +
-            untrusted(safeOrigin(t.info(id)?.url ?? ''), obs),
-        );
-      }
-
-      if (r.obstructed) {
-        // `obstructor` is built from the obstructing element's own tagName and
-        // id, so it is page-authored, and it is interpolated into harness
-        // prose that deliberately sits OUTSIDE the envelope. `quote()` is what
-        // keeps it from reading as harness speech: it strips control and bidi
-        // characters, collapses newlines, caps the length, and escapes the
-        // delimiters, so the worst a page can achieve is a strange-looking
-        // quoted string in a sentence that is visibly Aperture's.
-        return text(
-          `error: ${ref} is covered by ` +
-            `${r.obstructor ? quote(r.obstructor) : 'another element'} — ` +
-            'likely a modal or cookie banner. Dismiss it first; clicking here ' +
-            'would hit the overlay, not the element you named.',
         );
       }
 

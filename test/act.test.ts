@@ -21,6 +21,16 @@ import type * as z from 'zod';
 
 const observeCalls: { id: string; opts: Record<string, unknown> | undefined }[] = [];
 let selectReply: unknown = null;
+const REACHABLE = {
+  ok: true,
+  x: 10,
+  y: 10,
+  editable: true,
+  tag: 'BUTTON',
+  obstructed: false,
+  obstructor: null,
+};
+let resolveReply: unknown = REACHABLE;
 
 const DIFF = 'page #1.1 (diff from #1.0)\n~ e1 ="Large"';
 const FULL = 'FULL SNAPSHOT #1.2\ncombobox e1 "Size" ="Large" [4 options]';
@@ -43,14 +53,7 @@ vi.mock('@core/snapshot/engine.js', () => ({
 }));
 
 vi.mock('@core/snapshot/act.js', () => ({
-  resolveRef: vi.fn(async () => ({
-    ok: true,
-    x: 10,
-    y: 10,
-    editable: true,
-    tag: 'BUTTON',
-    obstructed: false,
-  })),
+  resolveRef: vi.fn(async () => resolveReply),
   click: vi.fn(),
   hover: vi.fn(),
   clearField: vi.fn(),
@@ -95,6 +98,10 @@ async function act(args: Record<string, unknown>): Promise<string> {
 beforeEach(() => {
   observeCalls.length = 0;
   selectReply = null;
+  resolveReply = REACHABLE;
+  // Call history only — implementations survive, which is what the two stubs
+  // above rely on.
+  vi.clearAllMocks();
 });
 
 describe('browser_act observe parameter', () => {
@@ -191,5 +198,69 @@ describe('browser_act select', () => {
   it('requires an option', async () => {
     const out = await act({ action: 'select', ref: 'e1' });
     expect(out).toBe('error: option required for select');
+  });
+
+  it('refuses a select behind a modal, exactly as click does', async () => {
+    // The hit-test is the ONLY thing in the codebase that refuses an action
+    // because something covers the target. `select` needs no coordinates, but
+    // it needs the same reachability answer — otherwise it is the one action
+    // that can mutate form state behind a consent dialog and report `ok`.
+    resolveReply = {
+      ok: true,
+      x: 10,
+      y: 10,
+      editable: false,
+      tag: 'SELECT',
+      obstructed: true,
+      obstructor: 'DIV#banner',
+    };
+    selectReply = { ok: true, label: 'Overnight', value: 'ovn', tier: 1, multiple: false, total: 3, previous: [] };
+
+    const out = await act({ action: 'select', ref: 'e1', option: 'Overnight' });
+    expect(out).toMatch(/^error:/);
+    expect(out).toContain('covered by');
+    expect(out).not.toContain('ok select');
+
+    // And nothing was written: the page must not be mutated by a refused call.
+    const { requestSelect } = await import('@core/snapshot/engine.js');
+    expect(requestSelect).not.toHaveBeenCalled();
+  });
+
+  it('refuses a disabled select rather than writing through it', async () => {
+    // `matchOption` refuses a disabled OPTION on the rule "a human cannot
+    // choose it, so neither can we". One level up was unguarded: a
+    // <select disabled>, and a select inside a <fieldset disabled>, both took
+    // the write and dispatched a real change event.
+    selectReply = { ok: false, reason: 'select-disabled', total: 2 };
+    const out = await act({ action: 'select', ref: 'e1', option: 'Beta' });
+    expect(out).toMatch(/^error:/);
+    // Named, not swallowed by the default branch — the fieldset half is the
+    // one the agent cannot see in the snapshot, so the error has to say it.
+    expect(out).toContain('<fieldset disabled>');
+    expect(out).toContain('Nothing was written');
+    expect(out).not.toContain('ok select');
+  });
+
+  it('refuses a blank option query', async () => {
+    selectReply = { ok: false, reason: 'blank-query', total: 51 };
+    const out = await act({ action: 'select', ref: 'e1', option: '   ' });
+    expect(out).toMatch(/^error:/);
+    expect(out).toContain('blank');
+    expect(out).toContain('placeholder');
+    expect(out).not.toContain('ok select');
+  });
+
+  it('reports the true match count when the candidate list was capped', async () => {
+    selectReply = {
+      ok: false,
+      reason: 'ambiguous',
+      tier: 5,
+      candidates: Array.from({ length: 8 }, (_, i) => `"x option ${i}"`),
+      matched: 800,
+      total: 800,
+    };
+    const out = await act({ action: 'select', ref: 'e1', option: 'x' });
+    expect(out).toContain('matches 800 options');
+    expect(out).toContain('792 more not shown');
   });
 });

@@ -62,6 +62,29 @@ describe('applyObservation', () => {
     expect(m.size).toBe(0);
   });
 
+  it('a bare gone line kills refs whose container was never addressable', () => {
+    // A removed <div> has no ref of its own, so there is no `- eN removed`
+    // line to hang the list on. The deaths still have to arrive.
+    const m = new Map();
+    applyObservation(m, ['button e2 "A"', 'button e3 "B"', 'button e4 "C"'].join('\n'));
+    applyObservation(m, 'page #1.2 (diff from #1.1)\n- gone: e2 e3');
+    expect([...m.keys()]).toEqual(['e4']);
+  });
+
+  it('tracks a native select\'s option count, and a restatement replaces it', () => {
+    // `[N options]` is the agent's only discriminator between a native select
+    // and a custom combobox, and its staleness was unmeasurable: the reader
+    // dropped the marker on the floor, so no scenario could go red on it.
+    const m = new Map();
+    applyObservation(m, 'combobox e3 "State" ="Victoria" [3 options]');
+    expect(m.get('e3').optionCount).toBe(3);
+    applyObservation(
+      m,
+      ['! e3 replaced:', '  combobox e3 "State" ="State number 0" [51 options]'].join('\n'),
+    );
+    expect(m.get('e3').optionCount).toBe(51);
+  });
+
   it('a replace kills the gone list, and the subtree lines that follow revive survivors', () => {
     const m = new Map();
     applyObservation(m, ['list e1 "L"', 'button e2 "A"', 'button e3 "B"'].join('\n'));

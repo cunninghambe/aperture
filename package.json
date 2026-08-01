@@ -17,6 +17,7 @@
     "dist": "electron-vite build && electron-builder",
     "bench": "node bench/tokens.mjs",
     "bench:fidelity": "node bench/fidelity.mjs",
+    "bench:guards": "node bench/guards.mjs",
     "bench:task": "node bench/task.mjs",
     "bench:live": "node bench/live.mjs"
   },

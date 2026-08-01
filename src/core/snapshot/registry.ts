@@ -93,17 +93,14 @@ export class RefRegistry {
     return this.byRef.get(ref)?.needsReannounce ?? false;
   }
 
-  /** Mark every ref not seen in this snapshot as dead. */
-  reapExcept(liveKeys: Set<string>): string[] {
-    const died: string[] = [];
-    for (const entry of this.byKey.values()) {
-      if (entry.state === 'live' && !liveKeys.has(entry.key)) {
-        this.markDead(entry.ref);
-        died.push(entry.ref);
-      }
-    }
-    return died;
-  }
+  // `reapExcept(liveKeys)` used to live here, never called from anywhere in
+  // the repo, and it read as a second net under the diff's bookkeeping. It was
+  // not one, and it must not become one: a full snapshot's rendered lines are
+  // subject to run collapsing and the budget cut, so "not in this snapshot"
+  // does not mean "not on the page". Reaping on that basis would kill refs the
+  // agent can still legitimately act on. The diff is the only place that knows
+  // a node actually went away — which is why the descendant walk in
+  // `diff.ts`'s removal loop has to be right rather than backstopped.
 }
 
 /**

@@ -476,7 +476,9 @@ export type SelectResult =
       total?: number;
       multiple?: boolean;
       tier?: number;
+      /** Capped list; `matched` carries the true count it was cut from. */
       candidates?: string[];
+      matched?: number;
       suggestions?: string[];
       label?: string;
     };
