@@ -1029,3 +1029,77 @@ subset is not a finding, and this one was published twice before anyone split it
 The general lesson is the one this suite keeps re-teaching: **the write-up was
 reasoned from the aggregate, and the aggregate was consistent with a story that
 the per-episode records refute.** Consistent is not the same as true.
+
+---
+
+# Task-success, wave 2 — 251 episodes, Sonnet 5 (2026-08-01)
+
+`--new-cohort --n 5` then `--n 20` · 7 tasks (3 retained, 4 new) · $37.34 ·
+stopped at 251/280 when the apparatus wedged. Full adjudication:
+`docs/design/wave2-evaluation.md`. Scoring is out-of-band by necessity: two
+wedged episodes trip G3, so `report()` exits 3 INFRA on this store by design —
+the suite refuses to score itself, and that refusal is correct.
+
+## Headline (holds under every analysis of the store)
+
+> **On this 7-task bookkeeping-hard suite with claude-sonnet-5, no
+> diff-bookkeeping penalty larger than 10pp was found.**
+
+## Primary result (exclusion-conditional, fragile, stated as such)
+
+The final six episodes (#245–250, 3 per arm) recorded zero landed page
+actions — Aperture's input path wedged while acks still returned `ok`. Their
+exclusion was adjudicated legitimate on three grounds (absent measurements
+with two independent witnesses; the terminal-contiguous-block counterfactual;
+inclusion itself requires waiving preregistered G3). Over the 245 clean:
+
+```
+success  diff    : 120/123 = 97.6%
+success  re-dump : 119/122 = 97.5%
+success  delta   : +0.0pp   95% CI [-4.8pp, +4.8pp]   (Newcombe)
+wrong-el delta   : +0.03/run  95% CI [-0.04, +0.12]   (bootstrap, seeded)
+```
+
+Primary rule: CI lower −4.75pp ≥ −5pp AND wrong-el upper +0.12 ≤ +0.2 →
+**PARITY**, clearing the margin by 0.25pp. With the six included, only the
+secondary holds. The exclusion decision decides the verdict class; the
+headline above is therefore the secondary sentence, not this one.
+
+> "On this 7-task fixture suite, with claude-sonnet-5, agents observing via
+> diffs completed tasks +0.0pp as often as agents observing via full re-dumps
+> (95% CI [−4.8pp, +4.8pp]), with +0.03 wrong-element actions per run
+> (95% CI [−0.04, 0.12]), at 0.67x the observation cost."
+> It says nothing about other models, real websites, longer tasks, larger
+> pages, the budget-truncation regime, browser_read workflows, or iframes.
+
+Margin provenance: the −10pp secondary was added 2026-08-01, after wave 1
+returned INCONCLUSIVE and before any wave-2 episode ran; the −5pp primary is
+unchanged from tier1.md §3. MDE at this n: ~12pp — a true penalty smaller
+than that is invisible to this sample. The 29-episode shortfall costs ~0.6pp
+of CI width and no verdict class; the stop was apparatus-forced, not
+data-driven.
+
+## Disclosures
+
+- **Cost:** the wave-1 inversion narrowed but did not close: $0.1476 vs
+  $0.1395/ep (+5.8% for diffs) at 0.67x observation bytes. The tier1b
+  teaching measurably moved behavior — voluntary obs 0.80 → 0.58/ep,
+  nochange 0.36 → 0.28/ep, diff share 73.7% → 82.3% — directionally right,
+  incomplete. The crossover remains the size sweep's question.
+- **One task carried all signal.** All 12 wrong-element acts and all 6 clean
+  failures are `queue-positional` (15/18 vs 14/17, CI [−24.3, +26.7]pp); the
+  other six tasks went 210/210. $26.73 of $35.17 bought ceiling episodes.
+  Wave 3 inverts the mix (see wave2-evaluation §4).
+- **G9 blind spot:** every episode's usage includes the SDK's auxiliary
+  Haiku model alongside Sonnet (251/251, arm-symmetric). No bias, but G9
+  only checks the requested model appears — it cannot catch a partial
+  wrong-model serve.
+- **The wedge** (input path dead, acks alive, walker timeouts; occlusion
+  hypothesis falsified by live probe; root cause undecidable — child log was
+  discarded). Shipping fix W1 and instrumentation are specced; the wedged
+  episodes' `engine_ref_loss` counts are partly misattributed invalid-argument
+  errors, also specced.
+
+What wave 2 can never settle: sub-12pp penalties, unconditional −5pp parity,
+this occurrence's wedge root cause, and the pre-P1 queue wrong-element ratio —
+that question dies with the cohort by design.
