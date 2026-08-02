@@ -831,6 +831,68 @@ describe('witnessInput — the verdict machine (tier3 §1.6)', () => {
   });
 });
 
+describe('the witness tally — W1 measuring its own health (tier4 §6.3)', () => {
+  /**
+   * WHY THIS EXISTS. `lost` became live attribution in tier3, but `unknown`
+   * never did: an unknown verdict falls through to a normal observe, so a run
+   * in which the witness silently degraded to unknown-mode — dead poll channel,
+   * navigating pages, subframe targets — is indistinguishable from a healthy
+   * one from outside the process. In that state W1's lost-detection is BLIND
+   * and a recurrence of the wave-2 wedge would be acked `ok` unseen. The
+   * head-to-head is the most external-facing comparison in the programme and
+   * should not run with the witness's own health unmeasured.
+   *
+   * Deltas, not absolutes: the counters are process-global and cumulative by
+   * design (a reader groups rows by instance and differences them), and every
+   * case above this line has already run through them.
+   */
+  it('counts exactly one resolution per settle, at every resolution path', async () => {
+    const before = realAct.witnessTally();
+
+    // 1. recorder mode, counters advance → landed.
+    const landed = fakePreload([top({ mousedown: 5 }), top({ mousedown: 6 })]);
+    const wLanded = await realAct.witnessInput(landed.wc, 'k', CLICK, FAST);
+    expect(await wLanded.settle(FAST.settleMs)).toBe('landed');
+
+    // 2. recorder mode, frozen through the retry → lost.
+    const frozen = { mousedown: 5 };
+    const lost = fakePreload([top(frozen)]);
+    const wLost = await realAct.witnessInput(lost.wc, 'k', CLICK, FAST);
+    expect(await wLost.settle(FAST.settleMs)).toBe('lost');
+
+    // 3. the baseline poll never answers → UNKNOWN_WITNESS, the constant.
+    //    This is the path the counters exist for: no witness was ever
+    //    established, and nothing downstream of the verdict would say so.
+    const unknown = fakePreload([SILENT]);
+    const wUnknown = await realAct.witnessInput(unknown.wc, 'k', CLICK, FAST);
+    expect(await wUnknown.settle(FAST.settleMs)).toBe('unknown');
+
+    // 4. subframe mode, the one-shot fires → landed, on the OTHER settle
+    //    implementation. Two settle bodies plus the constant is three places a
+    //    hand-maintained counter would eventually miss one of.
+    const sub1 = fakePreload([sub({ mousedown: 5 })], 'fires');
+    const wSub = await realAct.witnessInput(sub1.wc, 'k', CLICK, FAST);
+    expect(await wSub.settle(FAST.settleMs)).toBe('landed');
+
+    const after = realAct.witnessTally();
+    expect({
+      landed: after.landed - before.landed,
+      unknown: after.unknown - before.unknown,
+      lost: after.lost - before.lost,
+    }).toEqual({ landed: 2, unknown: 1, lost: 1 });
+  });
+
+  it('hands out a copy, so no caller can edit the counters', () => {
+    // The endpoint that serves these (`/metrics`, src/mcp/server.ts) hands the
+    // object straight to JSON.stringify; returning the live one would make the
+    // apparatus's own health mutable by anything holding a reference.
+    const snap = realAct.witnessTally();
+    const landed = snap.landed;
+    snap.landed += 1000;
+    expect(realAct.witnessTally().landed).toBe(landed);
+  });
+});
+
 describe('browser_act select', () => {
   it('acknowledges the chosen option and appends the observation', async () => {
     selectReply = {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyObservation,
+  classifyObservation,
+  isBareError,
   isDiff,
   isFullSnapshot,
   isNoChange,
@@ -442,6 +444,64 @@ describe('observation shape predicates', () => {
   it('spots a budget-truncated observation', () => {
     expect(isTruncated('…\n… 12 more lines beyond budget — use browser_find or browser_read to reach them')).toBe(true);
     expect(isTruncated('button e1 "Fine"')).toBe(false);
+  });
+});
+
+/**
+ * The G3 error kind (docs/design/wave3-evaluation.md §1.4, implemented by
+ * tier4.md §2).
+ *
+ * F5 was recorded INFRA on wave 3: an agent pressed an unsupported key, the
+ * engine answered with a one-line `error:` that carries no page bytes at all,
+ * and the re-dump arm's purity guard counted it as an impurity — an apparatus
+ * stop for a reply both arms can receive identically. The fix is a fifth kind,
+ * and the reason it is SAFE is a tools.ts invariant (ATOMICITY SEAM 3): a
+ * dispatch-free validation reply is one line; every page-embedding reply is
+ * multi-line behind an `untrusted(...)` envelope. These tests are what pins
+ * that invariant from the bench side.
+ *
+ * The whitelist property — anything unrecognised still trips G3 — is preserved
+ * exactly where it matters, and the multi-line case below is the proof.
+ */
+describe('classifyObservation — the taxonomy, including the error kind', () => {
+  it('classifies a single-line validation error as `error`', () => {
+    expect(isBareError('error: unsupported key: F5')).toBe(true);
+    expect(classifyObservation('error: unsupported key: F5')).toBe('error');
+  });
+
+  it('classifies a page-EMBEDDING error as `full`, whatever its first line says', () => {
+    // Precedence is the whole design: page-shaped bytes win. An arm-purity
+    // route that let a reply carrying a FULL SNAPSHOT through because it
+    // started with "error:" would be the F5 fix creating a worse F5.
+    const text =
+      'error: e3 could not be acted on (gone).\n' +
+      'The page as it stands now:\n' +
+      'FULL SNAPSHOT #4 — replaces all prior state for this page\n' +
+      'button e9 "Retry"';
+    expect(isBareError(text)).toBe(false);
+    expect(classifyObservation(text)).toBe('full');
+  });
+
+  it('leaves the walk-timeout reply as `other` — the G6b quarantine still owns it', () => {
+    expect(classifyObservation('could not read the page (walk timed out)')).toBe('other');
+  });
+
+  it('leaves a MULTI-LINE bare error as `other`, so it still trips G3', () => {
+    // The whitelist property, preserved exactly where it matters: if tools.ts
+    // ever grows a multi-line validation reply, this classification is a
+    // breaking change and the guard says so instead of waving it through.
+    expect(classifyObservation('error: something\nsecond line')).toBe('other');
+  });
+
+  it('keeps the page-shape kinds unchanged', () => {
+    expect(classifyObservation('FULL SNAPSHOT #2 — replaces all prior state for this page')).toBe('full');
+    expect(classifyObservation('page #2.1 (diff from #2.0)')).toBe('diff');
+    expect(classifyObservation('page #2.1 (unchanged — you already hold the current page)')).toBe('nochange');
+  });
+
+  it('does not treat a bare `error` without the colon-space as the error kind', () => {
+    expect(isBareError('errors: 3 found')).toBe(false);
+    expect(classifyObservation('errors: 3 found')).toBe('other');
   });
 });
 

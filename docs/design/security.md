@@ -130,7 +130,8 @@ Two named residuals, stated rather than papered over:
 `src/mcp/server.ts` serves one non-MCP route beside the MCP handler:
 
 ```
-GET /metrics  ->  { pid, uptimeS, metrics: [ { type, pid, cpu, memory }, … ] }
+GET /metrics  ->  { pid, uptimeS, metrics: [ { type, pid, cpu, memory }, … ],
+                    witness: { landed, unknown, lost } }
 ```
 
 It sits on the same loopback-bound HTTP server, behind the same per-launch
@@ -138,11 +139,17 @@ bearer token, after the same Host and Origin validation — the DNS-rebinding
 defence above covers it unchanged, and a page that resolves its own domain to
 127.0.0.1 still cannot reach it without the token.
 
-**No page data crosses it.** The body is `process.pid`, process uptime, and
-Electron's own `app.getAppMetrics()` array verbatim: per-process type, pid, cpu
-and memory for Aperture's own process tree. There is no tab, no URL, no title,
-no DOM, and nothing user-authored. The disclosure to a caller that already holds
-the bearer token is process metadata about a browser it is already driving.
+**No page data crosses it.** The body is `process.pid`, process uptime,
+Electron's own `app.getAppMetrics()` array verbatim (per-process type, pid, cpu
+and memory for Aperture's own process tree), and `witness` — three cumulative
+counts of how the W1 input witness resolved since process launch
+(`witnessTally()`, docs/design/tier4.md §6.3). The counters are **event tallies
+and nothing else**: they are incremented by verdict name at each `settle()`
+resolution, so no element key, ref, URL, or page-derived value can enter them
+even in principle. There is no tab, no URL, no title, no DOM, and nothing
+user-authored anywhere in the reply. The disclosure to a caller that already
+holds the bearer token is process metadata about a browser it is already
+driving.
 
 **Why it ships in the product rather than living in the bench.** Wave 2's input
 path wedged for forty minutes and the root cause is permanently undecidable

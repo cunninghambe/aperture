@@ -462,20 +462,64 @@ async function startFixtureServer() {
 // ---------------------------------------------------------------------------
 
 /**
- * Pull the two fields §2.2 names out of a `GET /metrics` reply, and NOTHING
- * else.
+ * Pull the fields §2.2 and tier4 §3 name out of a `GET /metrics` reply, and
+ * NOTHING else.
  *
- * ATOMICITY SEAM 2: Builder B serves `{pid, uptimeS, metrics: [...]}` with the
- * Electron `getAppMetrics()` array verbatim; this reads only `metrics[].type`
- * and the array's length. Extra fields — now or later, top level or per
- * process — are tolerated by construction, because nothing here enumerates the
- * shape.
+ * ATOMICITY SEAM 2: Builder B serves `{pid, uptimeS, metrics: [...], witness:
+ * {landed, unknown, lost}}` with the Electron `getAppMetrics()` array
+ * verbatim; this reads only named fields — `metrics[].type`, `metrics[].pid`,
+ * `metrics[].creationTime`, the array's length, and `witness`. Extra fields —
+ * now or later, top level or per process — are tolerated by construction,
+ * because nothing here enumerates the shape. Every new read is null-tolerant,
+ * so wave-2 and wave-3 stores written before these fields existed stay
+ * readable.
  */
 export function metricsStamp(json) {
   const procs = Array.isArray(json?.metrics) ? json.metrics : null;
-  if (!procs) return { gpuPid: 'poll-failed', procs: 0 };
+  if (!procs) {
+    return {
+      gpuPid: 'poll-failed',
+      procs: 0,
+      browserPid: null,
+      browserCreated: null,
+      witness: null,
+    };
+  }
   const gpu = procs.find((p) => p?.type === 'GPU');
-  return { gpuPid: gpu?.pid ?? null, procs: procs.length };
+  // The BROWSER process is the INSTANCE's identity (tier4 §3). Without it a
+  // changed GPU pid is unreadable: an app restart between phases and a GPU
+  // crash inside one instance look identical in the store, and only one of
+  // them is the wave-2 wedge's signature.
+  const browser = procs.find((p) => p?.type === 'Browser');
+  return {
+    gpuPid: gpu?.pid ?? null,
+    procs: procs.length,
+    browserPid: browser?.pid ?? null,
+    browserCreated: browser?.creationTime ?? null,
+    witness: json?.witness ?? null,          // §6.3; null on older builds
+  };
+}
+
+/**
+ * Why did the GPU pid change between two consecutive episodes?
+ *  - 'restart':  browser identity ALSO changed (pid or creationTime) —
+ *                a new Aperture instance; expected between phases.
+ *  - 'crash':    browser identity present on both rows and IDENTICAL —
+ *                the GPU process relaunched inside one instance; the
+ *                wedge hypothesis's signature.
+ *  - 'unmeasured': either side is 'poll-failed'.
+ *  - 'unknown-instance': browser identity missing on either row
+ *                (pre-tier4 store).
+ */
+export function classifyGpuTransition(a, b) {
+  if (a?.gpuPid === 'poll-failed' || b?.gpuPid === 'poll-failed') return 'unmeasured';
+  const aHas = a?.browserPid != null || a?.browserCreated != null;
+  const bHas = b?.browserPid != null || b?.browserCreated != null;
+  if (!aHas || !bHas) return 'unknown-instance';
+  if (a.browserPid !== b.browserPid || a.browserCreated !== b.browserCreated) {
+    return 'restart';
+  }
+  return 'crash';
 }
 
 /**
@@ -726,7 +770,7 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
   }
   const wrongElement = actions.filter((a) => !task.allowed.includes(a.detail?.bench)).length;
 
-  const kinds = { full: 0, diff: 0, nochange: 0, other: 0 };
+  const kinds = { full: 0, diff: 0, nochange: 0, other: 0, error: 0 };
   for (const o of ep.observations) kinds[o.kind]++;
   // G6b's evidence, stamped onto the episode rather than left to be recomputed:
   // how many acknowledged element actions the witness never saw, and whether the
@@ -905,6 +949,14 @@ async function guardG1({ proxy, collector, tasks }) {
   return { problems, notes };
 }
 
+/** Observations that violate re-dump arm purity. Kind `error` is
+ *  excluded: a single-line `error:` reply carries no page
+ *  representation and both arms can receive it identically
+ *  (wave3-evaluation §1.4). `other` is INCLUDED: unclassified is
+ *  where a diff would hide. */
+export const redumpImpurities = (kinds) =>
+  (kinds.diff ?? 0) + (kinds.nochange ?? 0) + (kinds.other ?? 0);
+
 async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
   const problems = [];
   const notes = [];
@@ -994,10 +1046,12 @@ async function guardG2({ proxy, collector, tasks, arms, verbose = false }) {
       // is checkable for FREE with the scripted solver, and an experiment whose
       // two arms are secretly the same arm is the single worst thing this suite
       // could print — it would come out as a confident PASS.
-      if (arm === 'redump' && (r.kinds.diff > 0 || r.kinds.nochange > 0)) {
+      if (arm === 'redump' && redumpImpurities(r.kinds) > 0) {
         problems.push(
-          `G3 — ${task.id}: the re-dump arm received ${r.kinds.diff + r.kinds.nochange} ` +
-            'diff-shaped observation(s). The arms are not what they claim to be.',
+          `G3 — ${task.id}: the re-dump arm received ${redumpImpurities(r.kinds)} ` +
+            'observation(s) that were not FULL SNAPSHOTs. The arms are not what they claim to be. ' +
+            'A single-line `error:` reply carries no page representation and both arms can ' +
+            'receive it identically; it is recorded as kind `error` and does not bear on arm purity.',
         );
       }
       if (r.truncatedObs > 0) {
@@ -1692,9 +1746,9 @@ async function main() {
       // always-on. NEVER a gate: the canary is the gate, and a sampler that
       // could stop an episode would be a new way for the apparatus to fail.
       const sample = await sampleMetrics(aperture.token);
-      const stampFields = sample.ok
-        ? metricsStamp(sample.json)
-        : { gpuPid: 'poll-failed', procs: 0 };
+      // One definition of the stamp's shape, poll-failed included:
+      // `metricsStamp(null)` IS the poll-failed row (tier4 §3.1).
+      const stampFields = metricsStamp(sample.ok ? sample.json : null);
       try {
         appendFileSync(
           apparatusPath,
@@ -1731,7 +1785,7 @@ async function main() {
       console.log(
         `[${String(i).padStart(3)}/${todo.length}] run${String(t.runIndex).padStart(3)} ${t.task.id.padEnd(20)} ${t.arm.padEnd(7)} ` +
           `${r.quarantined ? 'WEDGED' : r.success ? 'PASS' : 'fail'}  wrong=${r.wrongElement} steps=${r.steps} ` +
-          `obs=${r.kinds.full}F/${r.kinds.diff}D/${r.kinds.nochange}N/${r.kinds.other}? · ${r.obsChars}ch · $${r.costUsd.toFixed(4)} · ${(r.durationMs / 1000).toFixed(0)}s` +
+          `obs=${r.kinds.full}F/${r.kinds.diff}D/${r.kinds.nochange}N/${r.kinds.other}?/${r.kinds.error}E · ${r.obsChars}ch · $${r.costUsd.toFixed(4)} · ${(r.durationMs / 1000).toFixed(0)}s` +
           (r.driverError ? `  ERROR: ${r.driverError.slice(0, 80)}` : ''),
       );
 
@@ -1859,6 +1913,10 @@ export function report(allRows, opts, tasks) {
   // to the quarantine, because that is where a reader is already asking "what
   // was the browser doing".
   printApparatusNote(allRows);
+  // Immediately after the apparatus note, for the same reason: the witness's
+  // own health belongs beside the apparatus questions, not among the results
+  // (tier4 §6.3).
+  printWitnessSummary(allRows);
 
   console.log('\nPer task (success diff / re-dump):');
   for (const t of tasks) {
@@ -1880,7 +1938,9 @@ export function report(allRows, opts, tasks) {
   // counts they are missing from.
   const odd = rows.flatMap((r) => (r.unclassified ?? []).map((u) => ({ ...u, task: r.task, arm: r.arm })));
   if (odd.length) {
-    console.log(`\nUnclassified observations (${odd.length}) — neither full, diff, nor no-change:`);
+    console.log(
+      `\nUnclassified observations (${odd.length}) — neither full, diff, no-change, nor a bare error:`,
+    );
     for (const u of odd.slice(0, 5)) {
       console.log(`  ${u.task} [${u.arm}] via ${u.tool}: ${JSON.stringify(u.head)}`);
     }
@@ -1897,13 +1957,13 @@ export function report(allRows, opts, tasks) {
   // whitelist, not a blacklist of diff shapes: an observation the shape
   // predicates fail to classify is exactly where a diff would hide, and a guard
   // that only looks for the shapes it already knows about would not see it.
-  const g3 = rows.filter(
-    (r) => r.arm === 'redump' && (r.kinds.diff > 0 || r.kinds.nochange > 0 || r.kinds.other > 0),
-  );
+  const g3 = rows.filter((r) => r.arm === 'redump' && redumpImpurities(r.kinds) > 0);
   if (g3.length) {
     infra.push(
       `G3: ${g3.length} re-dump episodes received an observation that was not a FULL SNAPSHOT. ` +
         'The arms are not what they claim to be. ' +
+        'A single-line `error:` reply carries no page representation and both arms can receive ' +
+        'it identically; it is recorded as kind `error` and does not bear on arm purity. ' +
         'If these episodes also satisfy G6b, the fault is the apparatus, not the arm forcing ' +
         '— see the quarantine table.',
     );
@@ -1949,7 +2009,13 @@ export function report(allRows, opts, tasks) {
 
   // ---- STRATUM-ONLY guards and cost (G4, G7) ------------------------------
   const dObs = diff.rows.reduce((a, r) => a + r.kinds.diff + r.kinds.nochange, 0);
-  const dAll = diff.rows.reduce((a, r) => a + r.kinds.full + r.kinds.diff + r.kinds.nochange + r.kinds.other, 0);
+  // The denominator is the PAGE-REPRESENTATION observations only. `error` and
+  // `other` carry no page — an `error:` by construction (§2.1's classifier), an
+  // `other` by the fact that nothing recognised it — so counting them would let
+  // a run of refusals depress the diff share of a perfectly healthy diff arm.
+  // Numerically irrelevant on any clean store; wrong on principle before
+  // (wave3-evaluation §1.4.4).
+  const dAll = diff.rows.reduce((a, r) => a + r.kinds.full + r.kinds.diff + r.kinds.nochange, 0);
   const diffShare = dAll ? dObs / dAll : 0;
   if (diff.n && diffShare < 0.6) {
     infra.push(
@@ -1980,10 +2046,6 @@ export function report(allRows, opts, tasks) {
   for (const k of new Set([...Object.keys(attrD), ...Object.keys(attrU)])) {
     console.log(`  ${k.padEnd(20)} diff ${String(attrD[k] ?? 0).padStart(4)}   re-dump ${String(attrU[k] ?? 0).padStart(4)}`);
   }
-  console.log(
-    `  ${'(of those, within 2 steps of a FULL SNAPSHOT)'.padEnd(20)} diff ` +
-      `${diff.rows.reduce((a, r) => a + r.postResyncFailures, 0)}   re-dump ${redump.rows.reduce((a, r) => a + r.postResyncFailures, 0)}`,
-  );
   if (canaryRows.length) {
     const attrC = tally(canaryRows, 'attributions');
     const notOk = Object.entries(attrC).filter(([k]) => k !== 'ok');
@@ -1993,6 +2055,34 @@ export function report(allRows, opts, tasks) {
       }`,
     );
   }
+
+  // ---- resync-window fragility (tier4 §4; wave3-evaluation §0.2) -----------
+  //
+  // The old line printed one post_resync count per arm side by side, and that
+  // side-by-side was read as a comparison — 65 vs 236 — of two numbers that do
+  // not measure the same thing. The proxy tag is arm-blind and stays that way;
+  // the vacuity is in the READING, so the repair is in the report.
+  //
+  // Restricted to the diff arm, with rates rather than bare counts: a count
+  // without its denominator is exactly how the misreading happened.
+  const inWin = { nonOk: 0, n: 0 };
+  const outWin = { nonOk: 0, n: 0 };
+  for (const r of diff.rows) {
+    for (const a of r.acts ?? []) {
+      const bucket = (a.tags ?? []).includes('post_resync') ? inWin : outWin;
+      bucket.n++;
+      if (a.attribution !== 'ok') bucket.nonOk++;
+    }
+  }
+  const rate = (b) => (b.n ? `${b.nonOk}/${b.n} acts non-ok (${fmtPct(b.nonOk / b.n)})` : '—');
+  console.log('\nResync-window fragility (diff arm ONLY — see note):');
+  console.log(`  within 2 observations of a FULL SNAPSHOT: ${rate(inWin)}`);
+  console.log(`  all other acts:                           ${rate(outWin)}`);
+  console.log('  NOTE: the re-dump arm is excluded BY CONSTRUCTION — under the arm');
+  console.log('  forcing every observation is a full snapshot, so every act tags');
+  console.log('  post_resync and the count degenerates to "all non-ok acts"');
+  console.log('  (wave3-evaluation §0.2). No cross-arm reading of this block is');
+  console.log('  licensed.');
 
   // ---- the canary table, and the canary gate (§3.3.3, §3.4) ---------------
   if (canaryRows.length) {
@@ -2185,23 +2275,41 @@ export function report(allRows, opts, tasks) {
 }
 
 /**
- * GPU-process pid transitions across consecutive episodes (§2.2). Advisory:
- * it changes no verdict and no exit code. It exists because after the wave-2
- * wedge nobody could say whether the GPU process had died, and that is the
- * single most likely explanation on record.
+ * GPU-process pid transitions across consecutive episodes (§2.2), CLASSIFIED
+ * (tier4 §3.3). Advisory: it changes no verdict and no exit code. It exists
+ * because after the wave-2 wedge nobody could say whether the GPU process had
+ * died, and that is the single most likely explanation on record.
+ *
+ * The classification is what makes the note readable. A changed GPU pid across
+ * an APP RESTART is a new process tree, not a crash — wave 3 ran in phases and
+ * every phase boundary produced one. Only a GPU pid that changed while the
+ * BROWSER process stayed the same is the wedge hypothesis's signature, and
+ * before the instance stamp the store could not tell the two apart.
  */
 function printApparatusNote(allRows) {
   const seen = allRows.filter((r) => r.apparatus && 'gpuPid' in r.apparatus);
   if (!seen.length) return;
   const transitions = [];
+  const kinds = new Set();
   for (let i = 1; i < seen.length; i++) {
     const a = seen[i - 1];
     const b = seen[i];
     if (a.apparatus.gpuPid !== b.apparatus.gpuPid) {
+      const kind = classifyGpuTransition(a.apparatus, b.apparatus);
+      kinds.add(kind);
+      const suffix =
+        kind === 'restart'
+          ? `  [app restart — expected]  (browser pid ${String(a.apparatus.browserPid)} -> ${String(b.apparatus.browserPid)})`
+          : kind === 'crash'
+            ? '  [SAME-INSTANCE GPU RELAUNCH — crash candidate]'
+            : kind === 'unmeasured'
+              ? '  [apparatus poll failed across this boundary — unmeasured]'
+              : '  [instance identity not recorded (pre-tier4 rows) — cross-check the aperture.<stamp>.log]';
       transitions.push(
         `    ${String(a.apparatus.gpuPid)} -> ${String(b.apparatus.gpuPid)}  between ` +
           `${a.task} [${a.arm}] run${a.runIndex} and ${b.task} [${b.arm}] run${b.runIndex}` +
-          (b.recordedAt ? `  (${b.recordedAt})` : ''),
+          (b.recordedAt ? `  (${b.recordedAt})` : '') +
+          suffix,
       );
     }
   }
@@ -2209,11 +2317,68 @@ function printApparatusNote(allRows) {
   console.log(
     `\nAPPARATUS NOTE — the GPU process pid changed ${transitions.length} time(s) across the store.`,
   );
-  console.log('  A changed GPU pid is a GPU process that crashed and relaunched — the leading');
-  console.log('  hypothesis for the wave-2 wedge. ADVISORY ONLY: no verdict effect. Cross-check');
-  console.log('  against the aperture.<stamp>.log for the same window.');
+  // The crash hypothesis is printed only when the store cannot rule it out. A
+  // store whose every transition coincides with a new instance was telling the
+  // reader to go looking for a crash that the same rows already explain.
+  if (kinds.has('crash') || kinds.has('unknown-instance')) {
+    console.log('  A changed GPU pid is a GPU process that crashed and relaunched — the leading');
+    console.log('  hypothesis for the wave-2 wedge. ADVISORY ONLY: no verdict effect. Cross-check');
+    console.log('  against the aperture.<stamp>.log for the same window.');
+  } else {
+    console.log('  All GPU pid transitions coincide with a new Aperture instance: app restarts');
+    console.log('  between phases, not crashes. ADVISORY ONLY: no verdict effect.');
+  }
   for (const t of transitions.slice(0, 12)) console.log(t);
   if (transitions.length > 12) console.log(`    … and ${transitions.length - 12} more`);
+}
+
+/**
+ * The input witness's own health, cumulative per Aperture instance (tier4 §6.3).
+ *
+ * `WITNESS_TALLY` counts one increment per `settle()` resolution and resets
+ * with the process, so the LAST row of each instance carries that instance's
+ * totals — summing every row would count the same settles once per episode.
+ * Rows are grouped by `browserCreated`, the instance identity §3 added.
+ *
+ * Why it is printed at all: Gate 2's `deadActs` repair made `lost` a live
+ * attribution, but `unknown` still falls through to `observe`, so a run whose
+ * witness had silently degraded to unknown-mode looks exactly like a healthy
+ * one — and in that state W1's lost-detection is blind. Advisory only.
+ */
+function printWitnessSummary(allRows) {
+  const withWitness = allRows.filter((r) => r.apparatus?.witness);
+  if (!withWitness.length) return;
+
+  // Group by instance, keep the LAST row of each (counters are cumulative).
+  const lastPerInstance = new Map();
+  for (const r of withWitness) {
+    lastPerInstance.set(r.apparatus.browserCreated ?? r.apparatus.browserPid ?? 'unknown', r);
+  }
+  let landed = 0;
+  let unknown = 0;
+  let lost = 0;
+  for (const r of lastPerInstance.values()) {
+    landed += r.apparatus.witness.landed ?? 0;
+    unknown += r.apparatus.witness.unknown ?? 0;
+    lost += r.apparatus.witness.lost ?? 0;
+  }
+  const total = landed + unknown + lost;
+  console.log(
+    `\nInput witness (cumulative across ${lastPerInstance.size} instance(s)): ` +
+      `landed ${landed} · unknown ${unknown} · lost ${lost}`,
+  );
+  if (total && unknown / total > 0.1) {
+    console.log(
+      '  ADVISORY: the input witness answered `unknown` for >10% of settles — W1\'s',
+    );
+    console.log(
+      '  lost-detection was blind for that share (dead poll channel or navigating',
+    );
+    console.log(
+      '  pages). Cross-check the child log before trusting the absence of input-loss',
+    );
+    console.log('  errors.');
+  }
 }
 
 /**

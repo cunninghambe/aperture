@@ -320,10 +320,16 @@ function visit(
  * the distinction anyway.
  *
  * The renumbering half IS handled, on the diff side rather than here:
- * `diff.ts`'s `positionalFamilyLostAMember` recomputes positionality from the
- * key shape via `isPositionalKey` below, and escalates a removal from a
- * positional family to one `replace` of the container — so the model receives
- * fresh label→ref lines for every survivor whose ordinal just shifted. There
+ * `diff.ts`'s `positionalFamilyLostAMember` and `positionalFamilyGainedAMember`
+ * recompute positionality from the key shape via `isPositionalKey` below, and
+ * escalate a MEMBERSHIP CHANGE — a removal or an insertion — in a positional
+ * family to one `replace` of the container, so the model receives fresh
+ * label→ref lines for every survivor whose ordinal just shifted
+ * (docs/design/tier4.md §1). What is still not handled, and is said out loud
+ * rather than papered over: one removal and one insertion of indistinguishable
+ * rows between the same pair of walks leaves the key set, the family size and
+ * every per-key property unchanged, so no layer has a signal for it (tier4
+ * §1.4 residual 1). There
  * is deliberately no `positional` field on `SnapshotNode`: the key shape is
  * already the contract, a copy of it on the node could only drift out of step
  * with `disambiguate`, and a rendered "this ref is fragile" marker would tell

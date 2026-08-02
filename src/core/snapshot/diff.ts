@@ -124,6 +124,14 @@ export function diffSnapshots(
     // `optionCount`, so this cannot fire on a manufactured node. But this is a
     // new `ensureRef` call site, and the invariant worth being checkable by
     // inspection is that EVERY `ensureRef` in this file is synthetic-safe.
+    //
+    // The list of escalation sites, kept current rather than weakened: this
+    // option-turnover replace; the match-ratio replace below; P1 (a positional
+    // family that LOST a member); P2 (one that GAINED a member —
+    // docs/design/tier4.md §1.3). The last three hold by one argument: each
+    // runs only on a node whose children are under sibling analysis, and a
+    // walker-manufactured `option` is a childless leaf, so none of them can
+    // ever be handed one.
     if (!n.synthetic && optionSetTurnedOver(o, n)) {
       const survivors = new Set<string>();
       collectKeys(n, survivors);
@@ -185,7 +193,8 @@ export function diffSnapshots(
       return;
     }
 
-    // Third escalation: a POSITIONAL FAMILY lost a member.
+    // Third escalation: a POSITIONAL FAMILY changed MEMBERSHIP — removal or
+    // insertion (docs/design/tier4.md §1).
     //
     // `disambiguate` gives the first occurrence of a key the bare key and
     // suffixes the rest `|#1`, `|#2`… — so for elements distinguishable only
@@ -195,14 +204,25 @@ export function diffSnapshots(
     // read. Wave 2 measured the cost live — 6 wrong-element clicks in
     // `queue-positional`, every one a stale ordinal after a removal.
     //
+    // Insertion does the same damage from the other end, and used to do it in
+    // silence. A prepend re-binds every held ref one row down while the only
+    // op emitted is an `add` naming the BOTTOM of the list, because the new
+    // member always takes the highest ordinal wherever it physically landed.
+    // Wave 3 vindicated the removal half live (110-vs-64 stale-ref acts, under
+    // re-keying explicit restatement beats silence); the insertion half is the
+    // same fact about ordinals, so it gets the same op.
+    //
     // A per-child edit script cannot express this, because nothing in it is
     // false: the ops are individually correct and the model's ordinals are
     // collectively wrong. Restating the container is the one op that hands the
     // model fresh label→ref lines in the same observation, in vocabulary it
     // and the bench reader already speak. Cost is the container, paid only on
-    // the removal-from-a-family event — which is precisely the event that
+    // the membership-change event — which is precisely the event that
     // invalidated the ordinals.
-    if (positionalFamilyLostAMember(oldKids, newKids)) {
+    if (
+      positionalFamilyLostAMember(oldKids, newKids) ||
+      positionalFamilyGainedAMember(oldKids, newKids)
+    ) {
       const survivors = new Set<string>();
       collectKeys(n, survivors);
       ops.push({
@@ -250,6 +270,61 @@ export function diffSnapshots(
         else if (!newByKey.has(key)) removed = true;
       }
       if (removed && survived) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Did an insertion renumber the ordinals of surviving siblings?
+   *
+   * The mirror of `positionalFamilyLostAMember`, and the close of tier3 §3.1's
+   * open hole: prepending an identical row into a positional family used to
+   * emit ONE `add` op (claiming insertion at the END — the ordinal suffix is
+   * always the highest) while every held ref silently rebound one row down.
+   * The key SET cannot distinguish prepend from append, so this fires on ANY
+   * genuine growth of a positional family: the append false-positive costs one
+   * bounded restatement of a family that is by construction small-N identical
+   * rows, and the prepend false-negative cost an agent acting on the wrong row
+   * with no diff line saying so (docs/design/tier4.md §1).
+   *
+   * A positional family here is judged on the NEW side (≥2 new children
+   * sharing a `positionalBase`, at least one ordinal-suffixed — which growth
+   * guarantees). It gained a member when some member key is absent from the
+   * whole OLD tree (a key that existed elsewhere moved, it was not born) while
+   * at least one member key was already among this parent's old children — a
+   * survivor whose binding the insertion may have shifted.
+   *
+   * What this does NOT see, stated rather than implied away: a removal and an
+   * insertion of two indistinguishable rows between the same pair of walks.
+   * The key set, the family size and every per-key property come out
+   * unchanged, so nothing at this layer — or any other this engine owns — has
+   * a signal for it (tier4 §1.4 residual 1). Nor a member that MOVED IN from
+   * elsewhere in the old tree: its key already existed, so `added` stays false
+   * (residual 2).
+   */
+  function positionalFamilyGainedAMember(
+    oldKids: SnapshotNode[],
+    newKids: SnapshotNode[],
+  ): boolean {
+    const oldKidKeys = new Set(oldKids.map((c) => c.key));
+    const families = new Map<string, string[]>();
+    for (const c of newKids) {
+      const base = positionalBase(c.key);
+      const fam = families.get(base);
+      if (fam) fam.push(c.key);
+      else families.set(base, [c.key]);
+    }
+
+    for (const [, keys] of families) {
+      if (keys.length < 2) continue;
+      if (!keys.some(isPositionalKey)) continue;
+      let added = false;
+      let survived = false;
+      for (const key of keys) {
+        if (oldKidKeys.has(key)) survived = true;
+        else if (!oldByKey.has(key)) added = true;
+      }
+      if (added && survived) return true;
     }
     return false;
   }

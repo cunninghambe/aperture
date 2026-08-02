@@ -312,6 +312,25 @@ export const isNoChange = (text) => /^page #\d+\.\d+ \(unchanged/m.test(text);
 /** The budget dropped lines. A truncated observation is not a fair one. */
 export const isTruncated = (text) => text.includes('more lines beyond budget');
 
+/** A dispatch-free engine validation reply: page-byte-free by
+ *  construction (every page-embedding reply is multi-line with an
+ *  untrusted(...) envelope; single-line is the tools.ts validation
+ *  vocabulary — wave3-evaluation §1.2/§1.4). */
+export const isBareError = (text) =>
+  text.startsWith('error: ') && !text.includes('\n');
+
+/** THE observation taxonomy, in precedence order. Page-shaped bytes win:
+ *  a reply that contains a FULL SNAPSHOT or diff header classifies as
+ *  that, whatever its first line says — neither arm-purity route ever
+ *  excuses a reply carrying page-shaped bytes. */
+export function classifyObservation(text) {
+  if (isFullSnapshot(text)) return 'full';
+  if (isDiff(text)) return 'diff';
+  if (isNoChange(text)) return 'nochange';
+  if (isBareError(text)) return 'error';
+  return 'other';
+}
+
 /** Refs the model holds whose label equals `label` (optionally role-filtered). */
 export function refsByLabel(model, label, roles) {
   return [...model.entries()]

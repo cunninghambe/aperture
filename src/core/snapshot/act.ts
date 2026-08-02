@@ -101,6 +101,55 @@ export interface InputWitness {
   settle(ms?: number): Promise<DispatchVerdict>;
 }
 
+/**
+ * How the witness itself has been doing, cumulatively since process launch.
+ *
+ * WHY IT EXISTS (docs/design/tier4.md §6.3). `lost` became live attribution in
+ * tier3, but `unknown` never did: every unknown verdict falls through to a
+ * normal `observe`, so a run in which the witness silently degraded to
+ * unknown-mode — dead poll channel, navigating fixtures, subframe targets —
+ * looks exactly like a healthy one from outside. In that state W1's
+ * lost-detection is BLIND, and a recurrence of the wave-2 wedge would be
+ * acknowledged `ok` unseen. These counters are how a consumer can tell the two
+ * apart; they change no verdict and gate nothing.
+ *
+ * Process-global and cumulative on purpose: the bench drives one tab per
+ * instance, so a per-tab breakdown would be three numbers describing the same
+ * tab, and a reader comparing two rows of the same instance can difference
+ * them. They reset when the process does, which is what makes "group by
+ * instance" the correct way to read them.
+ *
+ * Event tallies only. No key, no ref, no URL, no page-derived value of any
+ * kind ever enters this object — that is what lets `/metrics` serve it under
+ * the same "no page data crosses this endpoint" claim as the rest of the reply
+ * (docs/design/security.md).
+ */
+const WITNESS_TALLY: Record<DispatchVerdict, number> = {
+  landed: 0,
+  unknown: 0,
+  lost: 0,
+};
+
+/**
+ * Record one `settle()` resolution and pass the verdict through.
+ *
+ * Every resolution path routes through here exactly once — recorder mode, the
+ * subframe one-shot, and the no-witness constant — so `landed + unknown + lost`
+ * is the number of settles this process has completed. Wrapping the verdict
+ * rather than incrementing at each `return` is deliberate: the recorder-mode
+ * settle has five exit points and a counter maintained at each of them would
+ * drift the first time one is added.
+ */
+function tally(v: DispatchVerdict): DispatchVerdict {
+  WITNESS_TALLY[v]++;
+  return v;
+}
+
+/** A snapshot of the tally — a copy, so no caller can hold the live object. */
+export function witnessTally(): Record<DispatchVerdict, number> {
+  return { ...WITNESS_TALLY };
+}
+
 /** Beyond this the listener is a leak, not a witness. Preload-side cleanup. */
 const WITNESS_CLEANUP_MS = 5000;
 /** The post-dispatch window. Wave-2's wedge produced silence for 40 minutes. */
@@ -204,7 +253,7 @@ function advanced(
 }
 
 /** The verdict a witness that could not be established must return. */
-const UNKNOWN_WITNESS: InputWitness = { settle: async () => 'unknown' };
+const UNKNOWN_WITNESS: InputWitness = { settle: async () => tally('unknown') };
 
 export interface WitnessTuning {
   settleMs?: number;
@@ -297,33 +346,40 @@ export async function witnessInput(
     return 'continue';
   };
 
+  /**
+   * The verdict machine. Five exit points, which is exactly why `settle` below
+   * wraps it in ONE `tally` call instead of counting at each `return`.
+   */
+  const resolveVerdict = async (ms: number): Promise<DispatchVerdict> => {
+    // Every poll after the baseline deliberately carries NO key. The key's
+    // only job was answering the frame question, which the baseline already
+    // answered; the counters are a property of the document, not of the
+    // element. Re-keying would report `unknown` for every act that
+    // legitimately removed its own target — a click on "Reject" that deletes
+    // its row — which is most of what an agent does, and it would buy
+    // nothing: under a real wedge the target never disappears, because
+    // nothing happened.
+    let elapsed = 0;
+    for (const fraction of RUNG_FRACTIONS) {
+      const at = Math.round(ms * fraction);
+      await delay(at - elapsed);
+      elapsed = at;
+      const verdict = read(await pollWitness(wc, null, pollTimeoutMs), false);
+      if (verdict !== 'continue') return verdict;
+    }
+
+    await delay(ms - elapsed);
+    const authoritative = read(await pollWitness(wc, null, pollTimeoutMs), true);
+    if (authoritative !== 'continue') return authoritative;
+
+    await delay(retryMs);
+    const retried = read(await pollWitness(wc, null, pollTimeoutMs), true);
+    return retried === 'continue' ? 'lost' : retried;
+  };
+
   return {
-    settle: async (ms = settleMs): Promise<DispatchVerdict> => {
-      // Every poll after the baseline deliberately carries NO key. The key's
-      // only job was answering the frame question, which the baseline already
-      // answered; the counters are a property of the document, not of the
-      // element. Re-keying would report `unknown` for every act that
-      // legitimately removed its own target — a click on "Reject" that deletes
-      // its row — which is most of what an agent does, and it would buy
-      // nothing: under a real wedge the target never disappears, because
-      // nothing happened.
-      let elapsed = 0;
-      for (const fraction of RUNG_FRACTIONS) {
-        const at = Math.round(ms * fraction);
-        await delay(at - elapsed);
-        elapsed = at;
-        const verdict = read(await pollWitness(wc, null, pollTimeoutMs), false);
-        if (verdict !== 'continue') return verdict;
-      }
-
-      await delay(ms - elapsed);
-      const authoritative = read(await pollWitness(wc, null, pollTimeoutMs), true);
-      if (authoritative !== 'continue') return authoritative;
-
-      await delay(retryMs);
-      const retried = read(await pollWitness(wc, null, pollTimeoutMs), true);
-      return retried === 'continue' ? 'lost' : retried;
-    },
+    settle: async (ms = settleMs): Promise<DispatchVerdict> =>
+      tally(await resolveVerdict(ms)),
   };
 }
 
@@ -389,7 +445,10 @@ async function armOneShotWitness(
           const r = p as { witnessed?: boolean } | null;
           resolve(r?.witnessed === true ? 'landed' : 'unknown');
         });
-      }),
+        // `.then` on the promise, not a call at each `resolve`: the promise
+        // settles once however many times `resolve` is called, so the tally
+        // cannot double-count a late preload reply.
+      }).then(tally),
   };
 }
 

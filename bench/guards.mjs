@@ -473,6 +473,142 @@ const beta = refFor('Beta action', 'button');
   );
 }
 
+// --- G15: a row prepended into a positional family is restated, not whispered
+//
+// The INSERTION half of the positional-identity hole (docs/design/tier4.md §1,
+// closing tier3.md §3.1's open residual). P1 escalates a family that LOST a
+// member to one `replace` of the container; a family that GAINS one used to
+// emit a single `add` — and worse, an `add` claiming `after <the LAST row's
+// ref>`, because the ordinal suffix a prepend creates is always the highest.
+// So the wire said "one row appeared at the bottom" while the page had put one
+// at the top, and every ref the agent held silently rebound one row down.
+//
+// The two halves are BOTH load-bearing and neither implies the other:
+//   - G15a alone would pass on a build that restates the family with anything
+//     at all in it. It says only that the escalation FIRED.
+//   - G15b is the page's own evidence that the restatement is TRUE: it clicks
+//     the ref the restatement puts at the top of the list and asks the page
+//     which row that was. `took: u1` is prepend.html's independent record —
+//     the row ids live in a JS array and never in the DOM, so nothing the
+//     engine emitted could have leaked the answer.
+//
+// Recorded RED against the pre-fix build before Builder B landed the fix:
+// docs/design/g15-red-record.md — including the hazard the green guard cannot
+// show, a held ref landing on the prepended row in complete silence.
+
+{
+  const prependModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/prepend.html?guardrun=${Date.now()}`,
+  });
+  await sleep(2500);
+  const prependInitial = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(prependInitial)) {
+    console.error(
+      'G15 could not run: prepend.html did not produce a full snapshot.\n' +
+        prependInitial.slice(0, 400),
+    );
+    process.exit(3);
+  }
+  applyObservation(prependModel, prependInitial);
+
+  const takes = [...prependModel.entries()].filter(
+    ([, e]) => e.label === 'Take' && e.role === 'button',
+  );
+  if (takes.length !== 5) {
+    console.error(
+      `G15 could not run: "Take" resolves to ${takes.length} buttons on prepend.html, expected 5.`,
+    );
+    process.exit(3);
+  }
+  const adds = [...prependModel.entries()].filter(
+    ([, e]) => e.label === 'Add urgent ticket' && e.role === 'button',
+  );
+  if (adds.length !== 1) {
+    console.error(
+      `G15 could not run: "Add urgent ticket" resolves to ${adds.length} buttons on prepend.html.`,
+    );
+    process.exit(3);
+  }
+
+  // Document order on the WIRE, not Map order. The ref an agent holds for
+  // "row 1" is the first one it READ, and the Map's iteration order is
+  // registry allocation order, which is not the same claim.
+  const TAKE_LINE = /^\s*button (e\d+) "Take"/;
+  const firstTakeIn = (text) => {
+    for (const line of text.split('\n')) {
+      const m = TAKE_LINE.exec(line);
+      if (m) return m[1];
+    }
+    return null;
+  };
+  const heldRef = firstTakeIn(prependInitial);
+
+  const reply = await call('browser_act', { action: 'click', ref: adds[0][0] });
+  await sleep(300);
+
+  const lines = reply.split('\n');
+  const at = lines.findIndex((l) => /^! e\d+ replaced/.test(l));
+  // A replace renders its subtree indented beneath the header line
+  // (render.ts:431-440), so the block ends at the next unindented line.
+  const block = [];
+  if (at >= 0) {
+    for (let i = at + 1; i < lines.length; i++) {
+      if (!/^\s+\S/.test(lines[i])) break;
+      block.push(lines[i]);
+    }
+  }
+  const restated = block.filter((l) => TAKE_LINE.test(l)).length;
+  const opLines = lines
+    .filter((l) => /^[~+\->!(]|^\s+\S|^page #|^FULL SNAPSHOT/.test(l))
+    .join('\n        ')
+    .slice(0, 900);
+
+  check(
+    'G15a',
+    'a row prepended into a positional family restates the family, instead of whispering one add',
+    at >= 0 && restated >= 6,
+    `held ref for row 1's Take before the insert: ${heldRef}; ` +
+      `replace block: ${at >= 0 ? 'present' : 'ABSENT'}; ` +
+      `Take rows restated: ${restated} (need >= 6)\n        ${opLines}`,
+  );
+
+  if (at < 0) {
+    check(
+      'G15b',
+      'the top row of the restatement really is the row that was just inserted',
+      false,
+      'not reached: G15a found no replace block, so there is no restatement to read.',
+    );
+  } else {
+    const topRef = firstTakeIn(block.join('\n'));
+    if (!topRef) {
+      check(
+        'G15b',
+        'the top row of the restatement really is the row that was just inserted',
+        false,
+        'the replace block carried no `button eN "Take"` line to read a ref out of.',
+      );
+    } else {
+      await call('browser_act', { action: 'click', ref: topRef });
+      await sleep(300);
+      // The page's own record, read fresh and independently of anything the
+      // act said about itself — the rule the rest of this file follows.
+      const afterTake = await call('browser_snapshot', { mode: 'full' });
+      const tookUrgent = afterTake.includes('took: u1');
+      check(
+        'G15b',
+        'the top row of the restatement really is the row that was just inserted',
+        tookUrgent,
+        `clicked ${topRef} (the first Take in the replace block); ` +
+          `page logged "took: u1": ${tookUrgent}\n        ` +
+          (afterTake.split('\n').find((l) => l.includes('took: ')) ?? '(no log line on the page)').trim(),
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 const failed = checks.filter((c) => !c.ok);

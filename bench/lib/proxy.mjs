@@ -42,9 +42,7 @@ import {
 import * as z from 'zod';
 import {
   applyObservation,
-  isDiff,
-  isFullSnapshot,
-  isNoChange,
+  classifyObservation,
   isTruncated,
 } from './streamModel.mjs';
 import { settle } from './collector.mjs';
@@ -282,13 +280,10 @@ export async function startProxy({ apertureUrl, apertureToken, collector, port =
   }
 
   function recordObservation(tool, text, forwarded) {
-    const kind = isFullSnapshot(text)
-      ? 'full'
-      : isDiff(text)
-        ? 'diff'
-        : isNoChange(text)
-          ? 'nochange'
-          : 'other';
+    // ONE definition of the taxonomy, shared with the tests and with anything
+    // else that reads this stream (the h2h's aperture arms included) —
+    // bench/lib/streamModel.mjs `classifyObservation`, tier4 §2.2.
+    const kind = classifyObservation(text);
     // The text is kept, not just the shape. `mustObserve` is checked against
     // the diff-only stream, and a failure report that cannot show the bytes the
     // agent actually read is not a failure report.

@@ -1460,6 +1460,16 @@ function fitCostModel(rows) {
  * zero (diffs now cheaper). Degenerate cases are RESULTS, not failures — a
  * harness that could only report a crossover would be a machine for confirming
  * the hypothesis.
+ *
+ * SEVEN outcomes, not four (docs/design/sweep-evaluation.md §2A): the two
+ * all-one-sign verdicts, the closed band, the two ONE-SIDED verdicts
+ * (`no-crossover-upper-only` / `no-crossover-lower-only` — some tiers settled,
+ * the rest are nulls, and the settled ones form a contiguous run), `none`, and
+ * `open`. The one-sided pair was the hole: the ladder produced
+ * `[straddle, straddle, below, below, below]`, no branch claimed it, and the
+ * licensed sentence therefore said the sweep located nothing while three tiers
+ * had in fact settled. `open` is now reserved for the shapes that genuinely
+ * license no band statement — all-straddle, and non-monotone sign patterns.
  */
 function crossoverBand(perTier) {
   const usable = perTier.filter((t) => !t.confounded && t.ci);
@@ -1486,11 +1496,59 @@ function crossoverBand(perTier) {
   if (lastAbove && firstBelow) {
     return { kind: 'band', text: `CROSSOVER BAND: between ${lastAbove} and ${firstBelow}.`, lo: lastAbove, hi: firstBelow };
   }
+
+  // The ONE-SIDED outcomes (docs/design/sweep-evaluation.md §2A). These are the
+  // shapes the ladder actually produced and the ones the verdict used to fall
+  // through into `open`, which then said "the sweep does not locate a
+  // crossover" about a run in which one side of the sign question WAS settled.
+  // A partial answer stated as no answer is not conservatism, it is a wrong
+  // sentence.
+  const idx = (t) => usable.indexOf(t);
+  const isContiguousSuffix = (g) =>
+    g.length > 0 && idx(g[0]) + g.length === usable.length &&
+    g.every((t, i) => idx(t) === idx(g[0]) + i);
+  const isContiguousPrefix = (g) =>
+    g.length > 0 && idx(g[0]) === 0 && g.every((t, i) => idx(t) === i);
+  const nulls = (from, to) => usable.slice(from, to).map((t) => t.tier).join(', ');
+
+  if (!above.length && isContiguousSuffix(below)) {
+    return {
+      kind: 'no-crossover-upper-only',
+      text:
+        'NO CROSSOVER IN THE MEASURED RANGE — diffs are never significantly dearer at any tier; ' +
+        `significantly cheaper from ${below[0].tier} up; ${nulls(0, idx(below[0]))} ` +
+        'are nulls at this N (CIs include zero).',
+      from: below[0].tier,
+    };
+  }
+  if (!below.length && isContiguousPrefix(above)) {
+    return {
+      kind: 'no-crossover-lower-only',
+      text:
+        'NO CROSSOVER IN THE MEASURED RANGE — diffs are never significantly cheaper at any tier; ' +
+        `significantly dearer up to ${above[above.length - 1].tier}; ` +
+        `${nulls(above.length, usable.length)} are nulls at this N (CIs include zero). ` +
+        'This is the one-sided form of the product-threatening outcome and goes in RESULTS.md ' +
+        'as such.',
+      through: above[above.length - 1].tier,
+    };
+  }
+
+  // `open` now means what it says: either nothing settled anywhere, or the
+  // signs are scattered in a pattern no band statement can summarise.
+  if (!above.length && !below.length) {
+    return {
+      kind: 'open',
+      text:
+        'NO CLOSED BAND — every tier\'s CI straddles zero. The sweep does not locate a crossover ' +
+        'at this N; more episodes would narrow it.',
+    };
+  }
   return {
     kind: 'open',
     text:
-      'NO CLOSED BAND — every tier\'s CI straddles zero, or the sign never settles. The sweep ' +
-      'does not locate a crossover at this N; more episodes would narrow it.',
+      'NO CLOSED BAND — the sign pattern is non-monotone across the ladder; no band statement is ' +
+      'licensed.',
   };
 }
 
@@ -1569,15 +1627,35 @@ function dryRun() {
   console.log(`  fitCostModel on a degenerate sample: ${singular.ok ? 'ACCEPTED (bad)' : 'refused — ' + singular.reason}`);
   if (singular.ok) problems.push('the cost model accepted a singular design matrix');
 
-  // The band logic must produce all four outcomes, including the two that say
-  // "no crossover". A harness that can only report a crossover is a machine for
+  // The band logic must produce EVERY outcome, including the ones that say "no
+  // crossover". A harness that can only report a crossover is a machine for
   // confirming its own hypothesis.
+  //
+  // The one-sided pair is here because the defect shipped for exactly the
+  // reason this list is the guard: the only shape reality produced —
+  // [straddle, straddle, below, below, below] — was the only shape `--dry` did
+  // not enumerate (sweep-evaluation.md §2C).
   const mk = (tier, lo, hi, confounded = false) => ({ tier, ci: { lo, hi, delta: (lo + hi) / 2 }, confounded });
   const cases = [
     ['all CIs below zero', [mk('s1', -0.2, -0.1), mk('s2', -0.3, -0.1)], 'no-crossover-diffs-win'],
     ['all CIs above zero', [mk('s1', 0.1, 0.2), mk('s2', 0.1, 0.3)], 'no-crossover-diffs-lose'],
     ['sign flips at s3', [mk('s1', 0.05, 0.2), mk('s2', 0.01, 0.3), mk('s3', -0.3, -0.01)], 'band'],
     ['everything straddles', [mk('s1', -0.1, 0.1), mk('s2', -0.2, 0.2)], 'open'],
+    [
+      'nulls then below (Tier B)',
+      [mk('s1', -0.1, 0.1), mk('s2', -0.2, 0.2), mk('s3', -0.3, -0.01), mk('s4', -0.4, -0.02), mk('s5', -0.5, -0.03)],
+      'no-crossover-upper-only',
+    ],
+    [
+      'above then nulls (mirror)',
+      [mk('s1', 0.01, 0.3), mk('s2', 0.02, 0.4), mk('s3', -0.3, 0.3), mk('s4', -0.4, 0.4), mk('s5', -0.5, 0.5)],
+      'no-crossover-lower-only',
+    ],
+    [
+      'non-monotone signs',
+      [mk('s1', -0.3, -0.01), mk('s2', -0.2, 0.2), mk('s3', -0.4, -0.02), mk('s4', -0.1, 0.1)],
+      'open',
+    ],
   ];
   for (const [name, tiers, want] of cases) {
     const got = crossoverBand(tiers);
@@ -1965,9 +2043,34 @@ function reportTierB({ rows, tiers, tierA, opts, identity }) {
     console.log(`    ${t.tier}  diff ${t.volDiff.toFixed(2)} · re-dump ${t.volRedump.toFixed(2)}   (turns ${t.turnsDiff.toFixed(1)} vs ${t.turnsRedump.toFixed(1)})`);
   }
 
+  // ---- what this licenses (sweep-evaluation.md §2B) -----------------------
+  //
+  // The claim is assembled from the PER-TIER intervals, because those are the
+  // result; the band verdict is a summary of them and rides as a subordinate
+  // clause. Interpolating `band.text` alone was the defect: one sentence
+  // carrying the whole claim inherits every hole in the band's case analysis,
+  // and it inherited one. tier2 §4.2's "band statement verbatim from
+  // crossoverBand" stays satisfied — verbatim as a clause, not as the claim.
+  const usableTiers = perTier.filter((t) => !t.confounded && t.ci);
+  const signOf = (t) => (t.ci.lo > 0 ? 'dearer' : t.ci.hi < 0 ? 'cheaper' : 'null');
+  const cheaper = usableTiers.filter((t) => signOf(t) === 'cheaper');
+  const dearer = usableTiers.filter((t) => signOf(t) === 'dearer');
+  const nullTiers = usableTiers.filter((t) => signOf(t) === 'null');
+  const names = (g) => (g.length ? g.map((t) => t.tier).join(', ') : 'none');
+
   console.log('\n  What this licenses, and nothing more:');
   console.log(`    "On cart-adjust with ${opts.model}, over full-snapshot sizes ${perTier[0]?.chars}-${perTier[perTier.length - 1]?.chars} chars,`);
-  console.log(`     ${band.text.replace(/\n/g, ' ')}"`);
+  console.log('     per tier, Δ$ per episode (diff − re-dump) with a 90% CI and N:');
+  for (const t of usableTiers) {
+    console.log(
+      `       ${t.tier.padEnd(4)} ${t.chars}ch  ${t.ci.delta >= 0 ? '+' : ''}$${t.ci.delta.toFixed(4)}  ` +
+        `[${t.ci.lo >= 0 ? '+' : ''}${t.ci.lo.toFixed(4)}, ${t.ci.hi >= 0 ? '+' : ''}${t.ci.hi.toFixed(4)}]  ` +
+        `n=${t.nDiff}/${t.nRedump}  ${signOf(t) === 'null' ? 'null (CI includes zero)' : `diffs ${signOf(t)}`}`,
+    );
+  }
+  console.log(`     significantly cheaper at: ${names(cheaper)}; significantly dearer at: ${names(dearer)};`);
+  console.log(`     null at this N at: ${names(nullTiers)};`);
+  console.log(`     in summary — ${band.text.replace(/\n/g, ' ')}"`);
   console.log('    It says nothing about other tasks, other models, real websites, the truncation');
   console.log('    regime, or page sizes beyond the measured ladder.');
   console.log(`\n  ${rows.length} episode(s) written to ${rel(RESULTS)} (codeVersion ${identity.codeVersion})`);

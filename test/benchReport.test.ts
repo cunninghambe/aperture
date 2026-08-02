@@ -3,9 +3,11 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
   EXIT,
+  classifyGpuTransition,
   deadActsFrom,
   isWedged,
   metricsStamp,
+  redumpImpurities,
   report,
   sampleMetrics,
   targetsFor,
@@ -258,30 +260,61 @@ describe('deadActsFrom — both eras of the same physical event', () => {
 });
 
 describe('metricsStamp / sampleMetrics — apparatus seam', () => {
-  it('reads only what §2.2 names, and tolerates extra fields', () => {
+  it('reads only what §2.2 and tier4 §3 name, and tolerates extra fields', () => {
     const reply = {
       pid: 4242,
       uptimeS: 91,
       somethingBuilderBAddedLater: true,
+      witness: { landed: 30, unknown: 1, lost: 0 },
       metrics: [
-        { type: 'Browser', pid: 4242, cpu: { percentCPUUsage: 0.1 }, memory: {} },
+        { type: 'Browser', pid: 4242, creationTime: 1754000000000, cpu: { percentCPUUsage: 0.1 }, memory: {} },
         { type: 'GPU', pid: 5150, cpu: {}, memory: {}, integrityLevel: 'untrusted' },
         { type: 'Tab', pid: 6001 },
       ],
     };
-    expect(metricsStamp(reply)).toEqual({ gpuPid: 5150, procs: 3 });
+    expect(metricsStamp(reply)).toEqual({
+      gpuPid: 5150,
+      procs: 3,
+      browserPid: 4242,
+      browserCreated: 1754000000000,
+      witness: { landed: 30, unknown: 1, lost: 0 },
+    });
   });
 
   it('reports a null gpu pid rather than inventing one when no GPU process exists', () => {
     expect(metricsStamp({ pid: 1, uptimeS: 1, metrics: [{ type: 'Browser', pid: 1 }] })).toEqual({
       gpuPid: null,
       procs: 1,
+      browserPid: 1,
+      browserCreated: null,
+      witness: null,
+    });
+  });
+
+  it('null-tolerates a PRE-tier4 build: no Browser entry, no witness field', () => {
+    // Builder B's /metrics gains `witness`, and the platform is expected to
+    // type the main process 'Browser' — neither is assumed. Wave-2/wave-3
+    // archives read back through this function must not throw, and must not
+    // invent an instance identity they never had.
+    expect(metricsStamp({ pid: 1, uptimeS: 1, metrics: [{ type: 'GPU', pid: 9 }] })).toEqual({
+      gpuPid: 9,
+      procs: 1,
+      browserPid: null,
+      browserCreated: null,
+      witness: null,
     });
   });
 
   it('records a poll failure instead of throwing', () => {
-    expect(metricsStamp(null)).toEqual({ gpuPid: 'poll-failed', procs: 0 });
-    expect(metricsStamp({ metrics: 'not an array' })).toEqual({ gpuPid: 'poll-failed', procs: 0 });
+    const failed = {
+      gpuPid: 'poll-failed',
+      procs: 0,
+      browserPid: null,
+      browserCreated: null,
+      witness: null,
+    };
+    expect(metricsStamp(null)).toEqual(failed);
+    expect(metricsStamp({ metrics: 'not an array' })).toEqual(failed);
   });
 
   it('fetches the endpoint with the bearer token', async () => {
@@ -299,12 +332,307 @@ describe('metricsStamp / sampleMetrics — apparatus seam', () => {
 
     expect(seen[0]).toBe('GET /metrics Bearer tok-123');
     expect(s.ok).toBe(true);
-    expect(metricsStamp(s.json)).toEqual({ gpuPid: 99, procs: 1 });
+    expect(metricsStamp(s.json)).toMatchObject({ gpuPid: 99, procs: 1 });
   });
 
   it('never throws when the endpoint is not there (the pre-B build, and any wedge)', async () => {
     const s = await sampleMetrics('tok', 'http://127.0.0.1:1/metrics');
     expect(s.ok).toBe(false);
-    expect(metricsStamp(s.json)).toEqual({ gpuPid: 'poll-failed', procs: 0 });
+    expect(metricsStamp(s.json)).toMatchObject({ gpuPid: 'poll-failed', procs: 0 });
+  });
+});
+
+/**
+ * The instance stamp (tier4 §3, from wave3-evaluation §0.1).
+ *
+ * Wave 3's apparatus note printed "a GPU process that crashed and relaunched"
+ * over transitions that were phase boundaries — the run was executed in phases,
+ * each with its own Aperture. The store had no way to tell an app restart from
+ * a GPU crash inside one instance, so the note sent its reader hunting for a
+ * crash the same rows already explained. The Browser process's pid and
+ * creationTime are the instance's identity, and they were already crossing the
+ * wire in `getAppMetrics()`.
+ */
+describe('classifyGpuTransition — why the GPU pid changed', () => {
+  const inst = (browserPid: number, created: number, gpuPid: unknown) => ({
+    gpuPid, procs: 3, browserPid, browserCreated: created, witness: null,
+  });
+
+  it('calls a changed GPU pid with a changed instance a restart', () => {
+    expect(classifyGpuTransition(inst(100, 1, 200), inst(300, 2, 400))).toBe('restart');
+  });
+
+  it('calls a changed GPU pid INSIDE one instance a crash candidate', () => {
+    // Same browser pid AND same creationTime: one app, two GPU processes. The
+    // only shape that is evidence for the wave-2 wedge hypothesis.
+    expect(classifyGpuTransition(inst(100, 1, 200), inst(100, 1, 400))).toBe('crash');
+  });
+
+  it('refuses to classify across a failed poll', () => {
+    expect(classifyGpuTransition(inst(100, 1, 'poll-failed'), inst(100, 1, 400))).toBe('unmeasured');
+    expect(classifyGpuTransition(inst(100, 1, 200), inst(100, 1, 'poll-failed'))).toBe('unmeasured');
+  });
+
+  it('refuses to classify a pre-tier4 row, rather than guessing restart', () => {
+    const old = { gpuPid: 200, procs: 3 };
+    expect(classifyGpuTransition(old as any, inst(100, 1, 400))).toBe('unknown-instance');
+    expect(classifyGpuTransition(inst(100, 1, 200), old as any)).toBe('unknown-instance');
+  });
+
+  it('treats a recycled pid with a different creationTime as a new instance', () => {
+    // The OS reuses pids. creationTime is what makes the identity honest.
+    expect(classifyGpuTransition(inst(100, 1, 200), inst(100, 2, 400))).toBe('restart');
+  });
+});
+
+const withApparatus = (o: Record<string, unknown>) => ({
+  deadActs: 0, walkTimeouts: 0, procs: 3, witness: null, ...o,
+});
+
+describe('report — the apparatus note reads the instance stamp', () => {
+  it('names a phase boundary as an app restart and does NOT print the crash paragraph', () => {
+    const A = withApparatus({ gpuPid: 200, browserPid: 100, browserCreated: 1 });
+    const B = withApparatus({ gpuPid: 400, browserPid: 300, browserCreated: 2 });
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ runIndex: i, apparatus: A })),
+      ...Array.from({ length: 8 }, (_, i) => redump({ runIndex: i, apparatus: B })),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    const text = out.text();
+    expect(text).toContain('APPARATUS NOTE — the GPU process pid changed 1 time(s)');
+    expect(text).toContain('[app restart — expected]');
+    expect(text).toContain('(browser pid 100 -> 300)');
+    expect(text).toContain('All GPU pid transitions coincide with a new Aperture instance');
+    // The load-bearing negative: the crash hypothesis is NOT asserted over a
+    // store that already explains every transition it contains.
+    expect(text).not.toContain('crashed and relaunched');
+  });
+
+  it('still prints the crash paragraph when the GPU relaunched inside one instance', () => {
+    const A = withApparatus({ gpuPid: 200, browserPid: 100, browserCreated: 1 });
+    const A2 = withApparatus({ gpuPid: 999, browserPid: 100, browserCreated: 1 });
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ runIndex: i, apparatus: A })),
+      ...Array.from({ length: 8 }, (_, i) => redump({ runIndex: i, apparatus: A2 })),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    expect(out.text()).toContain('[SAME-INSTANCE GPU RELAUNCH — crash candidate]');
+    expect(out.text()).toContain('crashed and relaunched');
+  });
+});
+
+/**
+ * The W1 unknown-rate telemetry (tier4 §6.3).
+ *
+ * `lost` became a live attribution in tier3; `unknown` did not, and a witness
+ * degraded to unknown-mode is indistinguishable in the store from a healthy one
+ * — while W1's lost-detection is blind for exactly that share. The head-to-head
+ * is the most external-facing comparison in the programme and should not run
+ * with the witness's own health unmeasured.
+ */
+describe('report — the input witness summary', () => {
+  const instRow = (created: number, w: Record<string, number>, o: Record<string, unknown> = {}) =>
+    row({
+      apparatus: withApparatus({
+        gpuPid: 200, browserPid: created * 100, browserCreated: created, witness: w,
+      }),
+      ...o,
+    });
+  const asRedump = (o: Record<string, unknown>) => ({
+    arm: 'redump',
+    obsChars: 20000,
+    kinds: { full: 8, diff: 0, nochange: 0, other: 0, error: 0 },
+    ...o,
+  });
+
+  it('sums the FINAL row of each instance, because the counters are cumulative', () => {
+    const rows = [
+      // Instance 1: the counters climb across its episodes. Summing every row
+      // would count the same settles once per episode.
+      instRow(1, { landed: 10, unknown: 0, lost: 0 }, { runIndex: 0 }),
+      instRow(1, { landed: 25, unknown: 0, lost: 0 }, { runIndex: 1 }),
+      ...Array.from({ length: 6 }, (_, i) =>
+        instRow(1, { landed: 40, unknown: 0, lost: 0 }, { runIndex: 2 + i }),
+      ),
+      // Instance 2, a separate process, with its own cumulative totals.
+      ...Array.from({ length: 8 }, (_, i) =>
+        instRow(2, { landed: 20, unknown: 0, lost: 0 }, asRedump({ runIndex: i })),
+      ),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    expect(out.text()).toContain(
+      'Input witness (cumulative across 2 instance(s)): landed 60 · unknown 0 · lost 0',
+    );
+    expect(out.text()).not.toContain('ADVISORY: the input witness');
+  });
+
+  it('raises the advisory above a 10% unknown rate, and not below it', () => {
+    const loud = [
+      ...Array.from({ length: 8 }, (_, i) => instRow(1, { landed: 80, unknown: 20, lost: 0 }, { runIndex: i })),
+      ...Array.from({ length: 8 }, (_, i) =>
+        instRow(1, { landed: 80, unknown: 20, lost: 0 }, asRedump({ runIndex: i })),
+      ),
+    ];
+    const a = capture();
+    report(loud, OPTS, TASKS_ARG);
+    a.restore();
+    expect(a.text()).toContain('ADVISORY: the input witness answered `unknown` for >10% of settles');
+
+    const quiet = [
+      ...Array.from({ length: 8 }, (_, i) => instRow(1, { landed: 95, unknown: 5, lost: 0 }, { runIndex: i })),
+      ...Array.from({ length: 8 }, (_, i) =>
+        instRow(1, { landed: 95, unknown: 5, lost: 0 }, asRedump({ runIndex: i })),
+      ),
+    ];
+    const b = capture();
+    report(quiet, OPTS, TASKS_ARG);
+    b.restore();
+    expect(b.text()).toContain(
+      'Input witness (cumulative across 1 instance(s)): landed 95 · unknown 5 · lost 0',
+    );
+    expect(b.text()).not.toContain('ADVISORY: the input witness');
+  });
+
+  it('prints nothing at all for a pre-tier4 store', () => {
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ runIndex: i })),
+      ...Array.from({ length: 8 }, (_, i) => redump({ runIndex: i })),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+    expect(out.text()).not.toContain('Input witness');
+  });
+});
+
+/**
+ * Arm purity and the G3 whitelist (tier4 §2.3, wave3-evaluation §1.4).
+ *
+ * F5 was recorded INFRA on wave 3 because an agent pressed an unsupported key:
+ * a one-line `error:` with no page bytes in it counted as an arm impurity.
+ */
+describe('redumpImpurities — what actually violates arm purity', () => {
+  it('counts diffs, no-changes and unclassified observations', () => {
+    expect(redumpImpurities({ full: 8, diff: 1, nochange: 0, other: 0, error: 0 })).toBe(1);
+    expect(redumpImpurities({ full: 8, diff: 0, nochange: 2, other: 0, error: 0 })).toBe(2);
+    // The G2 pre-flight used to test diff|nochange only, so an `other` was
+    // caught by the scored-run G3 and missed by the free one. One definition.
+    expect(redumpImpurities({ other: 1 })).toBeGreaterThan(0);
+  });
+
+  it('excludes the error kind — both arms can receive it identically', () => {
+    expect(redumpImpurities({ full: 8, diff: 0, nochange: 0, other: 0, error: 3 })).toBe(0);
+  });
+
+  it('tolerates a pre-tier4 kinds object with no error key', () => {
+    expect(redumpImpurities({ full: 8, diff: 0, nochange: 0, other: 0 })).toBe(0);
+  });
+});
+
+describe('report — G3 over the new taxonomy', () => {
+  const diffRows = () => Array.from({ length: 8 }, (_, i) => row({ runIndex: i }));
+
+  it('does not fire on a re-dump arm whose only non-full replies were bare errors', () => {
+    const rows = [
+      ...diffRows(),
+      ...Array.from({ length: 8 }, (_, i) =>
+        redump({ runIndex: i, kinds: { full: 8, diff: 0, nochange: 0, other: 0, error: 2 } }),
+      ),
+    ];
+    const out = capture();
+    const code = report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    expect(out.text()).not.toContain('G3: ');
+    expect(code).not.toBe(EXIT.INFRA);
+  });
+
+  it('still fires on an unclassified observation, which is where a diff would hide', () => {
+    const rows = [
+      ...diffRows(),
+      ...Array.from({ length: 8 }, (_, i) =>
+        redump({ runIndex: i, kinds: { full: 8, diff: 0, nochange: 0, other: 1, error: 0 } }),
+      ),
+    ];
+    const out = capture();
+    const code = report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    expect(out.text()).toContain('G3: 8 re-dump episodes received an observation that was not a FULL SNAPSHOT');
+    expect(out.text()).toContain('does not bear on arm purity');
+    expect(code).toBe(EXIT.INFRA);
+  });
+});
+
+/**
+ * The post-resync metric, restricted rather than deleted (tier4 §4, from
+ * wave3-evaluation §0.2).
+ *
+ * The old line printed a post_resync failure count per arm, side by side, and
+ * the side-by-side was read as a comparison — 65 vs 236. It is not one: the arm
+ * forcing routes every re-dump observation through `opts.full`, so every
+ * re-dump act tags post_resync and its "count" degenerates to "all non-ok
+ * acts". The proxy tag stays arm-blind; the report is where the honesty goes.
+ */
+describe('report — resync-window fragility is diff-arm only, and says so', () => {
+  const act = (tags: string[], attribution: string) => ({ action: 'click', tags, attribution });
+
+  it('prints diff-arm rates only, with the exclusion note', () => {
+    const diffActs = [
+      act(['post_resync'], 'wrong_element'),
+      act(['post_resync'], 'ok'),
+      act([], 'ok'),
+      act([], 'ok'),
+    ];
+    // Every re-dump act tags post_resync, which IS the vacuity. If any of these
+    // reached the block, the restriction would not be real.
+    const redumpActs = [
+      act(['post_resync'], 'wrong_element'),
+      act(['post_resync'], 'wrong_element'),
+      act(['post_resync'], 'wrong_element'),
+    ];
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ runIndex: i, acts: diffActs })),
+      ...Array.from({ length: 8 }, (_, i) => redump({ runIndex: i, acts: redumpActs })),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+
+    const text = out.text();
+    expect(text).toContain('Resync-window fragility (diff arm ONLY — see note):');
+    // 8 rows × 1 non-ok of 2 tagged acts; and 0 non-ok of 16 untagged.
+    expect(text).toContain('within 2 observations of a FULL SNAPSHOT: 8/16 acts non-ok (50.0%)');
+    expect(text).toContain('all other acts:                           0/16 acts non-ok (0.0%)');
+    expect(text).toContain('the re-dump arm is excluded BY CONSTRUCTION');
+    expect(text).toContain('No cross-arm reading of this block is');
+    // The re-dump arm's 24 non-ok tagged acts appear NOWHERE in the block.
+    const start = text.indexOf('Resync-window fragility');
+    const block = text.slice(start, text.indexOf('licensed.', start) + 'licensed.'.length);
+    expect(block).not.toContain('24');
+    expect(block).not.toContain('re-dump arm:');
+    // And the old side-by-side line is gone, not merely relabelled.
+    expect(text).not.toContain('(of those, within 2 steps of a FULL SNAPSHOT)');
+  });
+
+  it('prints an em dash rather than dividing by zero', () => {
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => row({ runIndex: i, acts: [] })),
+      ...Array.from({ length: 8 }, (_, i) => redump({ runIndex: i, acts: [] })),
+    ];
+    const out = capture();
+    report(rows, OPTS, TASKS_ARG);
+    out.restore();
+    expect(out.text()).toContain('within 2 observations of a FULL SNAPSHOT: —');
+    expect(out.text()).toContain('all other acts:                           —');
   });
 });

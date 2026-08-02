@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dispatch queue</title>
+  </head>
+  <body>
+    <main>
+      <h1>Dispatch queue</h1>
+
+      <!-- The INSERTION half of positional identity (docs/design/tier4.md §1.6,
+           guard G15). bench/fixtures/queue.html is the removal half; this page
+           is its mirror, built to the same conventions on purpose — they are
+           copied here, not re-derived, because the construction is the fixture.
+
+           WHY EVERY ROW MUST BE INDISTINGUISHABLE TO THE WALKER:
+
+             - `siblingDiscriminator` consults ONLY <a> and <h1>..<h4> siblings
+               (and, one level up, a `:scope > a|h1|h2|h3`). No row and no
+               button here has either nearby, so nothing can key against its
+               own content.
+             - `identityKey` Tier 1 needs data-testid/data-test/data-qa/data-cy,
+               a `name` attribute on a form control, or a non-generated `id`.
+               The rows and their Take buttons have NONE of those.
+             - `listitem` is a semantic container, so its name comes from
+               `explicitName` (aria-label/labelledby only) and never from its
+               textContent. No <li> here carries one.
+
+           So all five rows fall through to the same S-tier key
+           `S|0|listitem||list:tickets|…` and `disambiguate` appends a
+           document-order ordinal: bare, |#1 … |#4. Identity IS the ordinal.
+
+           WHAT THE PREPEND DOES. "Add urgent ticket" unshifts a row and
+           re-renders the whole list with `replaceChildren` — the SPA pattern,
+           all-new DOM nodes. The key SET is unchanged apart from gaining one
+           more ordinal, so nothing was removed and P1
+           (`positionalFamilyLostAMember`) cannot see it. Meanwhile every held
+           ref rebinds one row DOWN: the bare key, which the agent read as
+           row 1, now names the row that was just inserted above it.
+
+           THE LOG IS THE POINT. Clicking a Take button does not mutate the
+           list; it appends `took: <rowId>` to #log, resolved by the row's
+           CURRENT index into the state array. The row ids (r1..r5, u1, u2…)
+           exist ONLY in that JS array — never in a DOM attribute — so nothing
+           in the accessibility tree can leak them, and the log is the page's
+           own independent record of which row an act actually hit. That is
+           what makes the silent retarget observable from outside the engine.
+
+           THE DIVIDER SPAN is a function of the row's CURRENT index, not a row
+           property — queue.html's rule, and for the same two reasons:
+             1. Five same-shape siblings would hit COLLAPSE_RUN (5) and render
+                as "… N more listitems", hiding the rows the guard counts.
+                Marking every third index caps any same-shape run at 2, at
+                every list length this page can reach.
+             2. Because the marker follows the position rather than the row,
+                the diff after an insertion carries no shape churn at all.
+                What is left is the pure signal: the status count, and the one
+                wrong-ended `add`.
+
+           THIS FIXTURE IS INSERT-MUTATING BY DESIGN AND MUST NEVER BE IMPORTED
+           BY `bench/tasks.mjs`. The `nth` solver targeting in bench/task.mjs is
+           only valid on removals-only fixtures (see the note on `resolveLabel`
+           there, and queue.html's header). It is a GUARD fixture, never a task
+           — docs/design/tier4.md §10. -->
+
+      <p data-status>5 tickets waiting</p>
+
+      <!-- Addressed by attribute, not by id, for queue.html's reason: a
+           non-generated id would give this paragraph a stable Tier-1 key, its
+           text change would arrive as a propDelta update on a ref the model has
+           never been shown, and diff.ts would route it to `unread` instead of
+           emitting it. Keyed by its own content, the change arrives as a
+           remove plus an add. -->
+
+      <ul aria-label="Tickets"></ul>
+
+      <button id="add-urgent">Add urgent ticket</button>
+
+      <div id="log"></div>
+    </main>
+
+    <script>
+      (function () {
+        // Row identity lives HERE and nowhere else. Nothing writes it into the
+        // DOM, so no walker tier can see it and no ref can carry it.
+        var state = [
+          { id: 'r1' }, { id: 'r2' }, { id: 'r3' }, { id: 'r4' }, { id: 'r5' },
+        ];
+        var urgent = 0;
+
+        var listEl = document.querySelector('ul[aria-label="Tickets"]');
+        var statusEl = document.querySelector('p[data-status]');
+        var logEl = document.getElementById('log');
+
+        function el(tag, text) {
+          var n = document.createElement(tag);
+          if (text !== null && text !== undefined) n.textContent = text;
+          return n;
+        }
+
+        function render() {
+          var rows = state.map(function (item, i) {
+            var li = document.createElement('li');
+            if (i % 3 === 0) li.append(el('span', 'divider'));
+            li.append(el('span', 'Ticket'));
+            li.append(el('button', 'Take'));
+            return li;
+          });
+          listEl.replaceChildren.apply(listEl, rows);
+          statusEl.textContent = state.length + ' tickets waiting';
+        }
+
+        // Delegated on the list, resolved by CURRENT position. A click on the
+        // row the agent believes is row 1 is recorded as whatever row is
+        // physically first at the moment of the click — which is exactly the
+        // question the guard asks the page.
+        listEl.addEventListener('click', function (ev) {
+          var b = ev.target && ev.target.closest ? ev.target.closest('button') : null;
+          if (!b || !listEl.contains(b)) return;
+          var li = b.closest('li');
+          if (!li) return;
+          var idx = Array.prototype.indexOf.call(listEl.children, li);
+          if (idx < 0 || !state[idx]) return;
+          logEl.append(el('p', 'took: ' + state[idx].id));
+        });
+
+        // OUTSIDE the list, with a distinct label and a non-generated id, so it
+        // keys Tier-1 and can never join the family it mutates.
+        document
+          .getElementById('add-urgent')
+          .addEventListener('click', function () {
+            urgent++;
+            state.unshift({ id: 'u' + urgent });
+            render();
+          });
+
+        render();
+      })();
+    </script>
+  </body>
+</html>

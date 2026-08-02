@@ -9,6 +9,7 @@ import {
 } from '@modelcontextprotocol/node';
 import * as z from 'zod';
 import type { TabManager } from '@main/tabs.js';
+import { witnessTally } from '@core/snapshot/act.js';
 import { registerBrowserTools } from './tools.js';
 
 /**
@@ -83,6 +84,14 @@ export async function startMcpServer(
     // own per-process array (type, pid, cpu, memory) and nothing else. The
     // array is passed through verbatim so a consumer reading only the fields
     // it knows keeps working when Electron adds one.
+    //
+    // `witness` is the same kind of fact about the apparatus rather than the
+    // page: three cumulative counts of how the input witness resolved since
+    // this process started (docs/design/tier4.md §6.3). Its purpose is to make
+    // the witness's OWN health measurable — a run in which it degraded to
+    // unknown-mode is one where W1's lost-detection was blind, and until now
+    // nothing outside the process could tell that from a healthy run. Event
+    // tallies only: no key, no ref, no URL.
     if (req.method === 'GET' && (req.url ?? '').split('?')[0] === '/metrics') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
@@ -90,6 +99,7 @@ export async function startMcpServer(
           pid: process.pid,
           uptimeS: Math.round(process.uptime()),
           metrics: app.getAppMetrics(),
+          witness: witnessTally(),
         }),
       );
       return;
