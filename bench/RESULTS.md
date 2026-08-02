@@ -1103,3 +1103,63 @@ data-driven.
 What wave 2 can never settle: sub-12pp penalties, unconditional −5pp parity,
 this occurrence's wedge root cause, and the pre-P1 queue wrong-element ratio —
 that question dies with the cohort by design.
+
+
+---
+
+# Task-success, wave 3 — 230 episodes, Sonnet 5 (2026-08-01/02)
+
+`--new-cohort --n 5` (pilot) then `--n 35` (interim TRIM) · 3 discriminative
+tasks x 35/arm + 2 canaries x 5 · $76.91 against the $85 cap · zero wedged
+episodes · canaries 20/20 · full adjudication: `docs/design/wave3-evaluation.md`.
+
+**Wave 3 — PASS.** "On this 3-task positional-identity suite (post-P1
+engine) with claude-sonnet-5, no diff-bookkeeping penalty larger than 10pp
+in task success or +0.4 wrong-element actions per run was found."
+At n=105/arm the smallest true drop this run could distinguish from the
+−10pp bound is about 23.5pp. Margin clearance: success CI lower −7.0pp
+clears the bound by +3.0pp; wrong-element CI upper +0.286 clears +0.40 by
+0.114/run.
+
+MARGIN PROVENANCE. The −10pp bound is wave 3's preregistered PRIMARY and is
+the same number wave 2 carried as a secondary; it was frozen before any
+wave-3 episode ran (run-log preregistration block, printed before the
+pilot). The wave-2 −5pp/"parity" vocabulary is retired — unreachable at
+any affordable n off the ceiling, and wave 2 cleared it by 0.25pp only via
+a post-hoc quarantine. The +0.4/run wrong-element bound replaced the pooled
++0.2/run with the arithmetic in wave2-evaluation §4.2. The realized n is
+105/arm, not the designed 135: the preregistered interim rule fired TRIM at
+the pilot ($0.374/ep > $0.35, a cost condition, blind to the arm delta) and
+capped later phases at −−n 35. At the observed rates that widened the CI
+half-width to ~12.6pp against the ~9.8pp projected at full quotas; the PASS
+stands on the realized interval, not the projection.
+
+Disclosures, all mandatory beside any citation:
+1. `report()` exits 3 INFRA on this store: G3 reads one re-dump observation
+   as arm contamination. The observation is a 26-byte engine validation
+   error (`error: unsupported key: F5`) carrying zero page bytes, produced
+   on a dispatch-free code path the arm forcing never touches; the ruling
+   and spec fix are in wave3-evaluation §1. This verdict is computed out of
+   band with the suite's own stats code; the verdict class is PASS under
+   every disposition of that episode (included / excluded / flipped to
+   success).
+2. Direction: the point estimates favor diffs (+5.7pp success, −0.21
+   wrong-el/run, fewer wrong-element on all three tasks), but every CI
+   includes zero. Directional colour, not a finding; the licensed claim is
+   the bound above and nothing stronger.
+3. Cost: the diff arm cost MORE in dollars — $0.3622 vs $0.3470/episode
+   (+4.4%) at 0.73× the observation bytes (11,075 vs 15,240 chars/ep). The
+   wave-1/-2 inversion persists at ~3× wave-2's observation volume; the
+   crossover remains the size sweep's question (§4).
+4. Canaries 20/20 in both arms. They license exactly one sentence: the
+   apparatus and easy-task floor held. Their numbers appear in no claim.
+5. Apparatus: zero wedged episodes; G6b quiet; zero truncated observations;
+   zero dead clicks/types (six no-page-effect scrolls, witness-silent by
+   design). The single GPU-pid transition in the report is the pilot→full
+   app restart between two Aperture instances, not a crash (wave3-evaluation
+   §0.1); within each instance the GPU process creationTime is constant
+   across all 230 samples.
+6. Comparisons with wave 2 are directional narrative only — different
+   engine (post-P1), different tasks, never pooled, never CI'd.
+
+---
