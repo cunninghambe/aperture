@@ -412,16 +412,21 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     sdkSubtype: sdk?.subtype ?? null,
     durationMs: Date.now() - t0,
     failureClass: null, // filled by H9 below
-    /** C2(b)+(c): null when the model read what the proxy returned. */
+    /** C2(b): null when the model read what the proxy returned. EXCLUDES. */
     apparatusContaminated: null,
+    /** C2(c): the byte/token arithmetic when it looks impossible. NEVER excludes. */
+    obsBytesAdvisory: null,
     diffStream,
     fullStream,
   };
 
   // C2 — POST-EPISODE RECONCILIATION. Last, because it reads the finished row:
   // the detector's evidence comes off the SDK stream, the arithmetic off the
-  // row's own token totals, and neither is available any earlier.
+  // row's own token totals, and neither is available any earlier. They land in
+  // SEPARATE fields because they carry different authority: C2(b) disqualifies
+  // the episode, C2(c) only asks a human to look at it.
   row.apparatusContaminated = contaminationOf(row, sdk?.capRejections ?? []);
+  row.obsBytesAdvisory = observationBytesReconciliation(row);
   return row;
 }
 
@@ -441,69 +446,141 @@ const MAX_TURNS_EXHAUSTED = /(reached maximum number of turns|error_max_turns)/i
  * scored, and H9 counts all of them against the 10% ceiling.
  *
  * `apparatus_contaminated` joins them under C4. It is not a failure in the
- * ordinary sense — a contaminated episode can even SUCCEED, and two of the four
- * on record did — which is exactly why it has to be here rather than left as an
- * annotation. Its cost, its turn count and its `obsChars` are all statements
- * about an apparatus that swapped the observation for an error, and every one of
- * them would otherwise be averaged into a headline.
+ * ordinary sense — a contaminated episode can even SUCCEED — which is exactly why
+ * it has to be here rather than left as an annotation. Its cost, its turn count
+ * and its `obsChars` are all statements about an apparatus that swapped the
+ * observation for an error, and every one of them would otherwise be averaged
+ * into a headline.
+ *
+ * ONLY C2(b) PUTS AN EPISODE IN THIS CLASS. Membership costs the episode AND —
+ * under H11's second clause — every other episode in its (task, class) cell, in
+ * every arm, for every claim. That is the correct price for an apparatus that
+ * demonstrably ate an observation, and far too high a price for a heuristic's
+ * guess: the four episodes C2(c) once put here were delivered in full, and two of
+ * them had SUCCEEDED. The bar for this set is a witness, not an inference.
  */
 export const HARNESS_CLASSES = new Set(['tool_fault', 'harness_fault', 'apparatus_contaminated']);
 
 /**
- * C2(c) — THE ARITHMETIC THAT CATCHES WHAT THE DETECTOR MISSES.
+ * C2(c) — THE ARITHMETIC, AND WHY IT IS ADVISORY RATHER THAN A CLASSIFIER.
  *
- * `sdkMcpCapVerdict` matches a string the SDK owns and may reword. This does
- * not: it asks whether the bytes the proxy says it returned could possibly have
- * become the tokens the API says it billed.
+ * `sdkMcpCapVerdict` (C2b) matches a string the SDK owns and may reword. This
+ * does not: it asks whether the bytes the proxy says it returned could possibly
+ * have become the tokens the API says it billed.
  *
- * Every observation the model receives is new context, so it must be paid for as
- * `inputTokens + cacheCreate` — cache READS are re-reads of context banked on an
- * earlier turn and would double-count. The ratio obsChars / new-context-tokens
- * therefore has a hard ceiling: no tokenizer averages more than a handful of
- * characters per token on aria YAML or Aperture diffs, and the denominator also
- * carries the system prompt, the tool schemas and every assistant message, none
- * of which contribute to the numerator. It can only be pushed DOWN by real work.
+ * THE DENOMINATOR IS EVERY BILLED CONTEXT TOKEN, CACHE READS INCLUDED. The first
+ * version of this check used `inputTokens + cacheCreate` on the reasoning that a
+ * cache READ is a re-read of context banked on an earlier turn and would
+ * double-count. That reasoning was WRONG, and it cost four episodes. A tool
+ * result the SDK serves from cache on turn 7 was put in front of the model on
+ * turn 7 just as surely as one it paid cache-creation rates for on turn 3 — the
+ * BILLING RATE differs, the DELIVERY does not, and this check is about delivery.
  *
- * MEASURED over the 86 uncontaminated episodes of the pilot cohort, the ratio
- * spans 0.24 to 2.28. The four contaminated ones sit at 7.85, 9.18, 17.18 and
- * 49.47 — the numerator counts a snapshot the denominator never paid for. A
- * ceiling of 4.0 is 1.75x above the highest honest episode and 2x below the
- * lowest contaminated one, which is as wide a moat as the data offers.
+ * The false positive it produced is the reason the rule is written out here. On
+ * `catalog-order` the pw arms re-send an ~87K-char page snapshot every turn: the
+ * first send lands in `cacheCreate`, every later one in `cacheRead`. So
+ * `obsChars` accumulated while the denominator stood still, and the ratio ran to
+ * 14.7 / 25.5 / 26.5 / 35.0 on four episodes whose every byte WAS delivered —
+ * C2b saw no rejection and no truncation on any of them, the largest single
+ * observation was ~90K chars (~26K tokens) against a pinned 50,000-token cap, and
+ * TWO OF THE FOUR SUCCEEDED with three correct page actions each. An agent handed
+ * a read-this-file error in place of the page cannot click three correct refs.
  *
- * Two guards keep it from firing on episodes it cannot speak about: a scripted
- * or never-billed run has no denominator at all, and below ~10K observed chars
- * the fixed prompt-and-schema overhead dominates the denominator so hard that
- * the ratio cannot reach the ceiling for any reason, honest or otherwise.
+ * With cache reads in the denominator the check becomes a PHYSICAL bound instead
+ * of an empirical one. Every delivered observation forms part of the input of at
+ * least one subsequent request, so
+ *
+ *     obsChars  <=  (inputTokens + cacheCreate + cacheRead) * charsPerToken
+ *
+ * and no BPE tokenizer averages 4+ characters per token on aria YAML or Aperture
+ * diffs. A ratio above 4.0 means bytes that were never billed AT ALL — at any
+ * rate, on any turn — which is the only thing this arithmetic can honestly
+ * witness. Below that it is silent, because the denominator also grows with every
+ * re-read of the conversation and therefore says nothing about any single result.
+ *
+ * WHY IT NO LONGER EXCLUDES ANYTHING.
+ *
+ * MEASURED over the 52 eligible episodes of the pinned-cap cohort, every one of
+ * them C2b-clean, the corrected ratio spans 0.026 to 1.174. There is no
+ * contaminated class in that cohort to bound the ceiling from above: since
+ * `MAX_MCP_OUTPUT_TOKENS` was pinned, C2b — which reads the POST-substitution
+ * bytes the model actually received — has fired zero times, here or in the pilot.
+ * The original derivation ("above the highest honest episode, below the lowest
+ * contaminated one") therefore has only half its inputs, and neither half of the
+ * remaining choice is defensible:
+ *
+ *   fit to all 52, which are all honest     4.0 is already 3.4x over the top of
+ *                                           the range; 1.75x over it gives 2.05
+ *                                           and the check fires on NOTHING. It is
+ *                                           inert, not validated.
+ *   keep calling the four contaminated      1.75x over the other 48 gives 0.697,
+ *   and fit to the other 48                 which re-flags three of the four. That
+ *                                           is the same false positive with a new
+ *                                           number, fitted to its own conclusion.
+ *
+ * And the boundary does not hold still. On the pilot cohort the same two
+ * populations sit at 0.399 and 0.495; on this one at 0.398 and 0.654. What ranks
+ * catalog-order at the top is conversation SHAPE — few turns, enormous per-turn
+ * observations, so fewer re-reads per observed byte — and shape is a property of
+ * the task, not of delivery. A cell whose pages are big enough to matter is
+ * exactly the cell this ratio will keep accusing.
+ *
+ * A heuristic that cannot be shown to separate must not silently exclude cells.
+ * So this one is PRINTED, NEVER CLASSIFIED ON: `contaminationOf` does not consult
+ * it, `apparatus_contaminated` is C2b's word alone — the detector that has
+ * byte-level evidence — and if this ever fires it is a prompt to go and look, not
+ * a verdict. C2b remains load-bearing and is unchanged.
+ *
+ * Two guards keep it from speaking about episodes it cannot: a scripted or
+ * never-billed run has no denominator at all, and below ~10K observed chars the
+ * fixed prompt-and-schema overhead dominates so hard that the ratio cannot reach
+ * the ceiling for any reason, honest or otherwise.
  */
-export const CHARS_PER_NEW_CONTEXT_TOKEN_CEILING = 4;
+export const CHARS_PER_DELIVERED_CONTEXT_TOKEN_CEILING = 4;
 const RECONCILE_MIN_OBS_CHARS = 10000;
 
 export function observationBytesReconciliation(r) {
-  const newContextTokens = (r.inputTokens ?? 0) + (r.cacheCreate ?? 0);
-  if (!newContextTokens) return null;
+  // DELIVERED context, not newly-created context: a cache read is a re-read of
+  // bytes the model is being shown again, and it is still being shown them.
+  const deliveredContextTokens =
+    (r.inputTokens ?? 0) + (r.cacheCreate ?? 0) + (r.cacheRead ?? 0);
+  if (!deliveredContextTokens) return null;
   if ((r.obsChars ?? 0) < RECONCILE_MIN_OBS_CHARS) return null;
-  const ratio = r.obsChars / newContextTokens;
-  if (ratio <= CHARS_PER_NEW_CONTEXT_TOKEN_CEILING) return null;
+  const ratio = r.obsChars / deliveredContextTokens;
+  if (ratio <= CHARS_PER_DELIVERED_CONTEXT_TOKEN_CEILING) return null;
   return {
+    /** Never a reason in `apparatusContaminated`. Printed, and that is all. */
+    advisory: true,
     ratio,
     obsChars: r.obsChars,
-    newContextTokens,
-    ceiling: CHARS_PER_NEW_CONTEXT_TOKEN_CEILING,
+    deliveredContextTokens,
+    ceiling: CHARS_PER_DELIVERED_CONTEXT_TOKEN_CEILING,
     why:
-      `${r.obsChars} observed chars against ${newContextTokens} new-context tokens is ` +
-      `${ratio.toFixed(1)} chars/token, over the ${CHARS_PER_NEW_CONTEXT_TOKEN_CEILING} ceiling. ` +
-      'Those bytes were returned by the proxy; they were not billed, so they were not delivered.',
+      `${r.obsChars} observed chars against ${deliveredContextTokens} delivered-context tokens is ` +
+      `${ratio.toFixed(1)} chars/token, over the ${CHARS_PER_DELIVERED_CONTEXT_TOKEN_CEILING} ceiling — ` +
+      'more bytes than any tokenizer could have made those tokens from, so some were never billed ' +
+      'on any turn. ADVISORY: go and look. It excludes nothing on its own; C2b is what disqualifies.',
   };
 }
 
 /**
- * C2(b)+(c) — build the episode's contamination record, or null if it is clean.
+ * C2(b) — build the episode's contamination record, or null if it is clean.
  *
- * Two independent witnesses, deliberately: the detector reads the SDK's own
- * words, the reconciliation reads the API's own arithmetic. Either alone is
- * enough to disqualify the episode. Keeping both means a reworded SDK error
- * cannot make the contamination invisible, and a contamination the arithmetic
- * cannot resolve (a small over-cap result) is still named.
+ * ONE WITNESS, AND IT IS THE ONE WITH THE BYTES. This used to admit a second
+ * reason from C2(c)'s arithmetic on the theory that two independent detectors are
+ * harder to fool than one. They are — but only if both of them are right, and
+ * C2(c) was not: it excluded four delivered episodes (see the header above) while
+ * C2(b), reading the post-substitution `tool_result` text the model actually
+ * received, correctly said nothing. A second witness that cannot be shown to
+ * separate does not make the verdict safer, it makes it wrong more often, and
+ * every one of its mistakes silently deletes a cell from the comparison.
+ *
+ * So C2(c) is advisory now and lives on `obsBytesAdvisory`; this function is
+ * C2(b) alone. If the SDK rewords its over-cap error the detector goes blind —
+ * that risk is real and it is why H1 prints the verbatim bytes every selftest,
+ * where a human can see the wording change. It is a better risk than a heuristic
+ * quietly excluding the episodes with the biggest pages, which is exactly the
+ * population the whole experiment is about.
  */
 export function contaminationOf(r, capRejections = []) {
   const reasons = [];
@@ -515,8 +592,6 @@ export function contaminationOf(r, capRejections = []) {
       sample: capRejections[0].text,
     });
   }
-  const recon = observationBytesReconciliation(r);
-  if (recon) reasons.push({ reason: 'chars_per_token_implausible', ...recon });
   if (!reasons.length) return null;
   return {
     reasons,
@@ -534,6 +609,34 @@ export function contaminationOf(r, capRejections = []) {
       'model saw it, so obsChars overstates what was observed by an unknown amount and may not ' +
       'be used in any claim.',
   };
+}
+
+/**
+ * THE SAME VERDICT, RE-DERIVED FROM AN EPISODE ALREADY ON DISK.
+ *
+ * `apparatusContaminated` is stamped at episode time, so episodes recorded while
+ * C2(c) was still a classifier carry a `chars_per_token_implausible` reason that
+ * this file no longer believes. Re-running them to erase it would cost the whole
+ * cohort — `codeVersion` hashes every byte of `bench/headtohead/**`, so the edit
+ * that fixed the bug also severs all 90 stored episodes from the harness that
+ * would rescore them, and "re-run the four" is not a thing that can happen.
+ *
+ * It does not need to. The stored record names its own reasons, so the verdict is
+ * RE-DERIVABLE from evidence already written down: keep the reasons that came
+ * from a witness (C2b), drop the ones that came from the retired heuristic, and
+ * an episode left with nothing is what it always was — clean. No numbers are
+ * edited and no episode is re-run; the same bytes are simply read by a rule that
+ * is now correct. Every consumer of contamination goes through here rather than
+ * touching `r.apparatusContaminated`, so old and new rows judge alike.
+ */
+const WITNESSED_CONTAMINATION_REASONS = new Set(['sdk_mcp_output_cap']);
+
+export function contaminationOnRecord(r) {
+  const rec = r?.apparatusContaminated;
+  if (!rec) return null;
+  const reasons = (rec.reasons ?? []).filter((x) => WITNESSED_CONTAMINATION_REASONS.has(x.reason));
+  if (!reasons.length) return null;
+  return reasons.length === rec.reasons.length ? rec : { ...rec, reasons };
 }
 
 /**
@@ -566,7 +669,7 @@ export function classifyFailure(r) {
    * check on purpose — a contaminated episode that PASSED is the dangerous one,
    * because nothing about it looks wrong until its cost lands in a mean.
    */
-  if (r.apparatusContaminated) return 'apparatus_contaminated';
+  if (contaminationOnRecord(r)) return 'apparatus_contaminated';
   // Anything this harness originated, said in its own voice (§9's prefix rule).
   if (typeof r.driverError === 'string' && isHarnessFault(r.driverError)) return 'harness_fault';
   if (!r.success && r.steps === 0 && r.obsChars === 0 && r.upstreamMs === 0) return 'harness_fault';
@@ -2086,7 +2189,7 @@ export function report(rows, surfaceOverheadChars = {}) {
   const scored = rows.filter((r) => !HARNESS_CLASSES.has(classifyFailure(r)));
   const excluded = rows.length - scored.length;
   const zeroContact = rows.filter((r) => classifyFailure(r) === 'harness_fault').length;
-  const contaminated = rows.filter((r) => r.apparatusContaminated);
+  const contaminated = rows.filter((r) => contaminationOnRecord(r));
 
   console.log(
     `\n${rows.length} episode(s) on record · ${excluded} excluded as harness fault (§6 H9)` +
@@ -2097,23 +2200,47 @@ export function report(rows, surfaceOverheadChars = {}) {
 
   // --- C2/C4: the contamination roll, named episode by episode ---
   if (contaminated.length) {
-    console.log(`APPARATUS CONTAMINATION — ${contaminated.length} episode(s) did not measure the arm (§C2)`);
+    console.log(`APPARATUS CONTAMINATION — ${contaminated.length} episode(s) did not measure the arm (§C2b)`);
     for (const r of contaminated) {
-      const why = r.apparatusContaminated.reasons.map((x) => x.reason).join(' + ');
+      const rec = contaminationOnRecord(r);
+      const why = rec.reasons.map((x) => x.reason).join(' + ');
       console.log(
         `  ${r.task.padEnd(18)} ${r.arm.padEnd(16)} run${r.runIndex}  ${r.success ? 'SUCCEEDED' : 'failed   '}  ` +
           `obsChars ${String(r.obsChars).padStart(7)} RETURNED-NOT-DELIVERED  [${why}]`,
       );
-      for (const x of r.apparatusContaminated.reasons) {
-        if (x.reason === 'sdk_mcp_output_cap') {
-          console.log(`      the SDK ${x.verdicts.join('/')} ${x.count} tool result(s) over MAX_MCP_OUTPUT_TOKENS:`);
-          console.log(`      ${JSON.stringify(x.sample.slice(0, 200))}`);
-        } else {
-          console.log(`      ${x.why}`);
-        }
+      for (const x of rec.reasons) {
+        console.log(`      the SDK ${x.verdicts.join('/')} ${x.count} tool result(s) over MAX_MCP_OUTPUT_TOKENS:`);
+        console.log(`      ${JSON.stringify(x.sample.slice(0, 200))}`);
       }
     }
     console.log('  Their cost, turns and observed bytes are facts about this harness, not about any arm.');
+    console.log('');
+  }
+
+  /**
+   * --- C2c: THE ADVISORY ROLL. PRINTED, AND THAT IS ALL ---
+   *
+   * Deliberately below the contamination roll and deliberately not folded into
+   * it. These episodes ARE scored, ARE in every mean, and are named here only so
+   * a human can go and look. Recomputed rather than read off the row, so an
+   * episode stamped before C2(c) was demoted is judged by today's arithmetic —
+   * which is the whole point of the fix that demoted it.
+   */
+  const advisories = rows
+    .map((r) => ({ r, a: observationBytesReconciliation(r) }))
+    .filter((x) => x.a);
+  if (advisories.length) {
+    console.log(`OBSERVED-BYTES ADVISORY — ${advisories.length} episode(s) (§C2c). NOT EXCLUDED, NOT A VERDICT.`);
+    for (const { r, a } of advisories) {
+      console.log(
+        `  ${r.task.padEnd(18)} ${r.arm.padEnd(16)} run${r.runIndex}  ` +
+          `${a.ratio.toFixed(2)} chars per delivered-context token (ceiling ${a.ceiling})`,
+      );
+      console.log(`      ${a.why}`);
+    }
+    console.log('  C2b — which reads the bytes the model actually received — is what disqualifies an');
+    console.log('  episode. This arithmetic has never been shown to separate delivered from');
+    console.log('  undelivered on this cohort, so it excludes nothing.');
     console.log('');
   }
 
@@ -2385,7 +2512,8 @@ function dryRun(opts) {
   }
   console.log('');
   console.log(`  MAX_MCP_OUTPUT_TOKENS  ${MAX_MCP_OUTPUT_TOKENS} — set by the harness in every arm's SDK env (C1)`);
-  console.log(`  contamination bound    ${CHARS_PER_NEW_CONTEXT_TOKEN_CEILING} chars per new-context token (C2c)`);
+  console.log(`  contamination detector C2b — the SDK's own over-cap error, read off the delivered tool_result. THIS is what excludes.`);
+  console.log(`  obs-bytes advisory     ${CHARS_PER_DELIVERED_CONTEXT_TOKEN_CEILING} chars per delivered-context token, cache reads INCLUDED (C2c). Printed only; excludes nothing.`);
   console.log('');
   console.log(`  ref grammar     /^e\\d+$/ enforced in pw-sealed; refusal: ${JSON.stringify('error: "<value>" is not a known element ref')}`);
   console.log(`  §3.4 withheld   ${Object.keys(PW_STOCK_WITHHELD).join(', ')}`);
