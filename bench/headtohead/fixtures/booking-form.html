@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Book an appointment</title>
+  </head>
+  <!--
+    T1 booking-form — neutral small, form completion.
+    Authored to headtohead.md section 4.3's spec, which was fixed before this
+    file existed. Markup is ordinary: labels tied to fields by id/for, a
+    fieldset+legend around the radio group, one landmark, one h1. No testid
+    attribute anywhere, no native select, and every control has a unique
+    accessible name, per the section 4.2 rule-2 checklist the linter enforces.
+    The notes field is real and is deliberately outside the allowed set.
+  -->
+  <body>
+    <!--
+      Ordinary page furniture, added during phase-0 calibration to bring the page
+      into section 4.2's small size band (see FIXTURE_CHANGELOG.md). None of
+      it is in the allowed set: an agent that wanders into it is acting on the
+      wrong element, which is exactly what the second metric measures.
+    -->
+    <nav aria-label="Clinic">
+      <ul>
+        <li><a href="/clinic/opening-hours">Opening hours</a></li>
+        <li><a href="/clinic/directions">Directions and parking</a></li>
+        <li><a href="/clinic/practitioners">Our practitioners</a></li>
+        <li><a href="/clinic/fees">Fees and cover</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <h1>Book an appointment</h1>
+      <p>Fill in your details and choose a slot. We will hold it for 24 hours.</p>
+      <p>
+        Appointments run for forty minutes. If you need longer, say so in the
+        notes and the desk will call you back to arrange it.
+      </p>
+
+      <section>
+        <h2>Before you arrive</h2>
+        <ul>
+          <li>Bring a list of anything you are currently taking.</li>
+          <li>Arrive ten minutes early if this is your first visit.</li>
+          <li>Cancellations inside four hours are charged in full.</li>
+        </ul>
+      </section>
+
+      <form id="booking">
+        <div>
+          <label for="cust-name">Full name</label>
+          <input type="text" id="cust-name" name="cust-name" data-bench="name" />
+        </div>
+        <div>
+          <label for="cust-email">Email address</label>
+          <input type="email" id="cust-email" name="cust-email" data-bench="email" />
+        </div>
+        <div>
+          <label for="cust-phone">Phone number</label>
+          <input type="tel" id="cust-phone" name="cust-phone" data-bench="phone" />
+        </div>
+        <div>
+          <label for="cust-notes">Notes</label>
+          <textarea id="cust-notes" name="cust-notes" data-bench="notes"></textarea>
+        </div>
+
+        <fieldset>
+          <legend>Preferred slot</legend>
+          <div>
+            <input type="radio" id="slot-morning" name="slot" value="morning" data-bench="slot-morning" />
+            <label for="slot-morning">Morning</label>
+          </div>
+          <div>
+            <input type="radio" id="slot-afternoon" name="slot" value="afternoon" data-bench="slot-afternoon" />
+            <label for="slot-afternoon">Afternoon</label>
+          </div>
+          <div>
+            <input type="radio" id="slot-evening" name="slot" value="evening" data-bench="slot-evening" />
+            <label for="slot-evening">Evening</label>
+          </div>
+        </fieldset>
+
+        <div>
+          <input type="checkbox" id="confirm-email" name="confirm-email" data-bench="confirm-email" />
+          <label for="confirm-email">Send confirmation by email</label>
+        </div>
+
+        <button type="button" id="submit" data-bench="submit">Book appointment</button>
+      </form>
+
+      <div id="panel"></div>
+    </main>
+
+    <footer>
+      <ul>
+        <li><a href="/legal/privacy">Privacy notice</a></li>
+        <li><a href="/legal/terms">Terms of service</a></li>
+        <li><a href="/contact">Contact the desk</a></li>
+      </ul>
+    </footer>
+
+    <script src="/bench.js"></script>
+    <script>
+      var state = {
+        name: '', email: '', phone: '', notes: '',
+        slot: '', confirm: false, submitted: false,
+      };
+
+      var form = document.getElementById('booking');
+      var panel = document.getElementById('panel');
+
+      function bind(id, key) {
+        document.getElementById(id).addEventListener('input', function (ev) {
+          state[key] = ev.target.value;
+        });
+      }
+      bind('cust-name', 'name');
+      bind('cust-email', 'email');
+      bind('cust-phone', 'phone');
+      bind('cust-notes', 'notes');
+
+      ['morning', 'afternoon', 'evening'].forEach(function (s) {
+        document.getElementById('slot-' + s).addEventListener('change', function (ev) {
+          if (ev.target.checked) state.slot = s;
+        });
+      });
+
+      document.getElementById('confirm-email').addEventListener('change', function (ev) {
+        state.confirm = ev.target.checked;
+      });
+
+      // Submitting REPLACES the form with a confirmation panel. The refs the
+      // agent has been holding all die at once, in both engines, which is the
+      // ordinary consequence of an ordinary submit and not a trap built for
+      // either one.
+      document.getElementById('submit').addEventListener('click', function () {
+        state.submitted = true;
+        form.remove();
+        var h = document.createElement('h2');
+        h.textContent = 'Booking confirmed';
+        var p = document.createElement('p');
+        p.textContent =
+          'Thank you, ' + state.name + '. Your ' + (state.slot || 'unspecified') +
+          ' appointment is held. A confirmation ' +
+          (state.confirm ? 'will be emailed to ' + state.email : 'was not requested') + '.';
+        panel.replaceChildren(h, p);
+      });
+
+      window.bench.register(function () {
+        return {
+          name: state.name,
+          email: state.email,
+          phone: state.phone,
+          notes: state.notes,
+          slot: state.slot,
+          confirm: state.confirm,
+          submitted: state.submitted,
+        };
+      });
+    </script>
+  </body>
+</html>

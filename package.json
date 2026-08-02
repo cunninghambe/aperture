@@ -20,6 +20,7 @@
     "bench:guards": "node bench/guards.mjs",
     "bench:task": "node bench/task.mjs",
     "bench:size": "node bench/size.mjs",
+    "bench:h2h": "node bench/headtohead/h2h.mjs",
     "bench:live": "node bench/live.mjs"
   },
   "build": {

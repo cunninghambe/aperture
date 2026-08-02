@@ -1,0 +1,102 @@
+{
+  "generator": "2026-08-02.1",
+  "generatedAt": "2026-08-02T07:54:54.552Z",
+  "bulkWords": [
+    "Verrandel",
+    "Thoskil",
+    "Palverine",
+    "Oskomere",
+    "Fallowdyne",
+    "Questrel",
+    "Marnwick",
+    "Draverly",
+    "Sablecourt",
+    "Hollowmere",
+    "Brambleton",
+    "Kestrenn",
+    "Ondermill",
+    "Yarrowfen",
+    "Calverston",
+    "Rethingham",
+    "Wexbury",
+    "Tarnholt",
+    "Merrowgate",
+    "Pellingsworth",
+    "Ashgrove",
+    "Windlecombe",
+    "Stonebeck",
+    "Lambourne",
+    "Thicketwell",
+    "Gravensea",
+    "Orlingham",
+    "Pindarrow"
+  ],
+  "sizePlan": {
+    "journal-comment": {
+      "navGroups": 5,
+      "navPerGroup": 4,
+      "sections": 26,
+      "footerGroups": 4,
+      "footerPerGroup": 4
+    },
+    "console-quota": {
+      "navGroups": 12,
+      "navPerGroup": 4,
+      "tables": 8,
+      "rowsPerTable": 4,
+      "colsPerTable": 4,
+      "panels": 27
+    },
+    "catalog-order": {
+      "navGroups": 3,
+      "navPerGroup": 4,
+      "categories": 8,
+      "productsPerCategory": 34
+    }
+  },
+  "witnessSha": "d17fea2bfeea926c",
+  "fixtures": [
+    {
+      "id": "journal-comment",
+      "file": "journal-comment.html",
+      "htmlBytes": 26741,
+      "approxRefs": 97,
+      "sha": "87e0a5f749c842a1",
+      "params": {
+        "navGroups": 5,
+        "navPerGroup": 4,
+        "sections": 26,
+        "footerGroups": 4,
+        "footerPerGroup": 4
+      }
+    },
+    {
+      "id": "console-quota",
+      "file": "console-quota.html",
+      "htmlBytes": 31425,
+      "approxRefs": 89,
+      "sha": "b3da5067269a635b",
+      "params": {
+        "navGroups": 12,
+        "navPerGroup": 4,
+        "tables": 8,
+        "rowsPerTable": 4,
+        "colsPerTable": 4,
+        "panels": 27
+      }
+    },
+    {
+      "id": "catalog-order",
+      "file": "catalog-order.html",
+      "htmlBytes": 107312,
+      "approxRefs": 898,
+      "sha": "85466758b6af1159",
+      "params": {
+        "navGroups": 3,
+        "navPerGroup": 4,
+        "categories": 8,
+        "productsPerCategory": 34
+      }
+    }
+  ]
+}

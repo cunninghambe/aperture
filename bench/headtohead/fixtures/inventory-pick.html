@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Requisition</title>
+  </head>
+  <!--
+    T2 inventory-pick — neutral small, filter / locate-and-pick.
+    Two headed groups of five distinctly named parts, each with a visible price
+    and an "Add <part> to requisition" button; a quantity stepper appears on a
+    row once it is added. Every button name is unique, so the identical-sibling
+    construction that section 4.2 bans (and that lives, disclosed, in the home
+    set) cannot form here.
+    The status line reads "Requisition: Hex bolt - qty 3" so the deciding
+    information travels through the observation channel in either engine; the
+    regex it satisfies was fixed in the design document before this file
+    existed.
+  -->
+  <body>
+    <main>
+      <h1>Requisition</h1>
+      <p role="status" id="status">Requisition: empty</p>
+
+      <section>
+        <h2>Fasteners</h2>
+        <ul id="fasteners"></ul>
+      </section>
+
+      <section>
+        <h2>Adhesives</h2>
+        <ul id="adhesives"></ul>
+      </section>
+    </main>
+
+    <script src="/bench.js"></script>
+    <script>
+      // Prices are literals, not computed: a fixture whose content depends on a
+      // clock or a random number is a fixture two runs cannot compare.
+      var PARTS = {
+        fasteners: [
+          { id: 'hex-bolt', name: 'Hex bolt', price: 0.18 },
+          { id: 'wing-nut', name: 'Wing nut', price: 0.41 },
+          { id: 'shoulder-screw', name: 'Shoulder screw', price: 0.62 },
+          { id: 'clevis-pin', name: 'Clevis pin', price: 0.95 },
+          { id: 'lock-washer', name: 'Lock washer', price: 0.27 }
+        ],
+        adhesives: [
+          { id: 'epoxy-tube', name: 'Epoxy tube', price: 4.1 },
+          { id: 'contact-cement', name: 'Contact cement', price: 6.35 },
+          { id: 'thread-locker', name: 'Thread locker', price: 5.2 },
+          { id: 'gasket-sealant', name: 'Gasket sealant', price: 7.8 },
+          { id: 'wood-glue', name: 'Wood glue', price: 3.55 }
+        ]
+      };
+
+      var req = []; // [{part, qty}]
+
+      function nameOf(id) {
+        var all = PARTS.fasteners.concat(PARTS.adhesives);
+        for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i].name;
+        return id;
+      }
+
+      function entry(id) {
+        for (var i = 0; i < req.length; i++) if (req[i].part === id) return req[i];
+        return null;
+      }
+
+      function renderStatus() {
+        var s = document.getElementById('status');
+        if (!req.length) {
+          s.textContent = 'Requisition: empty';
+          return;
+        }
+        s.textContent =
+          'Requisition: ' +
+          req.map(function (r) { return nameOf(r.part) + ' - qty ' + r.qty; }).join(', ');
+      }
+
+      function renderGroup(key) {
+        var ul = document.getElementById(key);
+        var kids = PARTS[key].map(function (p) {
+          var li = document.createElement('li');
+
+          var label = document.createElement('span');
+          label.textContent = p.name + ' - $' + p.price.toFixed(2);
+          li.append(label);
+
+          var add = document.createElement('button');
+          add.type = 'button';
+          add.setAttribute('data-bench', 'add:' + p.id);
+          add.textContent = 'Add ' + p.name.toLowerCase() + ' to requisition';
+          add.addEventListener('click', function () {
+            if (!entry(p.id)) req.push({ part: p.id, qty: 1 });
+            render(key);
+          });
+          li.append(add);
+
+          var e = entry(p.id);
+          if (e) {
+            var qty = document.createElement('span');
+            qty.textContent = 'qty ' + e.qty;
+            li.append(qty);
+
+            var inc = document.createElement('button');
+            inc.type = 'button';
+            inc.setAttribute('data-bench', 'inc:' + p.id);
+            inc.textContent = 'Increase ' + p.name.toLowerCase() + ' quantity';
+            inc.addEventListener('click', function () {
+              entry(p.id).qty += 1;
+              render(key);
+            });
+            li.append(inc);
+          }
+          return li;
+        });
+        ul.replaceChildren.apply(ul, kids);
+      }
+
+      // Only the group that changed is rebuilt. Rebuilding both on every click
+      // would restate ten rows for a one-row change in EVERY arm — realistic of
+      // nothing, and it would inflate the diff arm's bytes for a reason that has
+      // nothing to do with diffs.
+      function render(only) {
+        if (!only || only === 'fasteners') renderGroup('fasteners');
+        if (!only || only === 'adhesives') renderGroup('adhesives');
+        renderStatus();
+      }
+
+      render();
+      window.bench.register(function () {
+        return { requisition: req.map(function (r) { return { part: r.part, qty: r.qty }; }) };
+      });
+    </script>
+  </body>
+</html>

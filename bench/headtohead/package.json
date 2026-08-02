@@ -1,0 +1,14 @@
+{
+  "name": "aperture-headtohead",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Head-to-head harness: Aperture vs Playwright MCP. NESTED on purpose (docs/design/headtohead.md §8) — the root package.json stays untouched so no dependency churn can trigger a rebuild or move any cohort's buildVersion, and @playwright/mcp is pinned here, independently.",
+  "scripts": {
+    "postinstall": "node -e \"console.log('pw mcp:', require('@playwright/mcp/package.json').version)\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@playwright/mcp": "0.0.78"
+  }
+}

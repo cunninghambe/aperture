@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account preferences</title>
+  </head>
+  <!--
+    T3 account-prefs — neutral small, dependent controls.
+    The delivery radios and the digest textbox DO NOT EXIST until notifications
+    are enabled: there is no ref to hold and none to go stale, so the agent has
+    to learn from the toggle's own report that they arrived. Unsaved edits are
+    not state; only "Save changes" commits, which is what makes this a
+    dependent-controls task rather than three independent clicks.
+  -->
+  <body>
+    <!--
+      Ordinary page furniture, added during phase-0 calibration to bring the page
+      into section 4.2's small size band (see FIXTURE_CHANGELOG.md). None of
+      it is in the allowed set.
+    -->
+    <nav aria-label="Account">
+      <ul>
+        <li><a href="/account/profile">Profile</a></li>
+        <li><a href="/account/security">Security</a></li>
+        <li><a href="/account/billing">Billing</a></li>
+        <li><a href="/account/devices">Devices</a></li>
+        <li><a href="/account/export">Export your data</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <h1>Account preferences</h1>
+      <p>
+        Changes are held as a draft until you save them. Nothing on this page
+        takes effect before that.
+      </p>
+
+      <section>
+        <h2>Notifications</h2>
+        <div>
+          <input type="checkbox" id="notifications" name="notifications" data-bench="notifications" />
+          <label for="notifications">Enable notifications</label>
+        </div>
+        <div id="dependent"></div>
+      </section>
+
+      <button type="button" id="save" data-bench="save">Save changes</button>
+      <p role="status" id="status">No changes saved yet.</p>
+
+      <section>
+        <h2>Elsewhere in your account</h2>
+        <ul>
+          <li><a href="/account/sessions">Review signed-in sessions</a></li>
+          <li><a href="/account/recovery">Update your recovery address</a></li>
+          <li><a href="/account/api">Manage API credentials</a></li>
+        </ul>
+        <p>
+          Notification settings apply to this account only. Shared workspaces
+          keep their own preferences and are managed by their owners.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <ul>
+        <li><a href="/legal/privacy">Privacy notice</a></li>
+        <li><a href="/support">Support</a></li>
+        <li><a href="/status">Service status</a></li>
+      </ul>
+    </footer>
+
+    <script src="/bench.js"></script>
+    <script>
+      var draft = { notifications: false, method: '', frequency: '' };
+      var saved = { notifications: false, method: '', frequency: '' };
+
+      var dependent = document.getElementById('dependent');
+
+      function el(tag, text, attrs) {
+        var n = document.createElement(tag);
+        if (text !== null && text !== undefined) n.textContent = text;
+        if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+      }
+
+      function renderDependent() {
+        if (!draft.notifications) {
+          dependent.replaceChildren();
+          return;
+        }
+        var kids = [];
+
+        var fs = document.createElement('fieldset');
+        fs.append(el('legend', 'Delivery method'));
+        [['email', 'Email'], ['sms', 'SMS'], ['push', 'Push']].forEach(function (m) {
+          var wrap = document.createElement('div');
+          var r = el('input', null, {
+            type: 'radio', name: 'method', id: 'method-' + m[0], value: m[0],
+            'data-bench': 'method-' + m[0]
+          });
+          if (draft.method === m[0]) r.checked = true;
+          r.addEventListener('change', function () { if (r.checked) draft.method = m[0]; });
+          var lab = el('label', m[1], { for: 'method-' + m[0] });
+          wrap.append(r, lab);
+          fs.append(wrap);
+        });
+        kids.push(fs);
+
+        var row = document.createElement('div');
+        var lab2 = el('label', 'Digest frequency', { for: 'frequency' });
+        var inp = el('input', null, {
+          type: 'text', id: 'frequency', name: 'frequency', 'data-bench': 'frequency'
+        });
+        inp.value = draft.frequency;
+        inp.addEventListener('input', function (ev) { draft.frequency = ev.target.value; });
+        row.append(lab2, inp);
+        kids.push(row);
+
+        dependent.replaceChildren.apply(dependent, kids);
+      }
+
+      document.getElementById('notifications').addEventListener('change', function (ev) {
+        draft.notifications = ev.target.checked;
+        if (!draft.notifications) {
+          draft.method = '';
+          draft.frequency = '';
+        }
+        renderDependent();
+      });
+
+      document.getElementById('save').addEventListener('click', function () {
+        saved = {
+          notifications: draft.notifications,
+          method: draft.method,
+          frequency: draft.frequency
+        };
+        document.getElementById('status').textContent =
+          'Saved: notifications ' + (saved.notifications ? 'on' : 'off') +
+          ', delivery ' + (saved.method || 'none') +
+          ', digest ' + (saved.frequency || 'none') + '.';
+      });
+
+      renderDependent();
+      window.bench.register(function () {
+        return {
+          notifications: saved.notifications,
+          method: saved.method,
+          frequency: saved.frequency
+        };
+      });
+    </script>
+  </body>
+</html>

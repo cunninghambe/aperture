@@ -1,0 +1,7 @@
+# Measurements and scratch, not source — the same rule bench/task/results/ and
+# bench/size/results.jsonl follow: a cohort that followed a checkout onto a
+# different machine would be pooled with episodes from a build it never ran on.
+results/
+.agent-cwd/
+.playwright-mcp/
+node_modules/
