@@ -114,22 +114,57 @@ export const refRefusal = (v) => `error: "${v}" is not a known element ref`;
 // The arm definitions — prose that lands on every stored episode
 // ---------------------------------------------------------------------------
 
+/**
+ * THE SIZE-BUDGET DISCLOSURE — appended to every SEALED arm's definition, so it
+ * lands on every sealed episode's stamp and cannot be dropped from a write-up.
+ *
+ * The sealed schema advertises `budgetTokens` in all three sealed arms, because
+ * H4 requires the three surfaces to be byte-identical. It is not a neutral
+ * parameter: it is an APERTURE PRODUCT AFFORDANCE, and the harness injects it
+ * (20000) on neutral-large for the Aperture arms only — otherwise Aperture's own
+ * default budget would truncate a large page and the suite would be measuring
+ * our budget against their page (§6 H6).
+ *
+ * THE RULING (coordinator's, final): there is NO mapping from `budgetTokens` to
+ * any Playwright parameter. Playwright's snapshot has its own size controls —
+ * `depth` on `browser_snapshot`, and `browser_find` — and they are STOCK-SURFACE
+ * affordances: they ship in the 17-tool surface, they are measured in pw-stock,
+ * and inventing a sealed-arm translation for them would be this harness playing
+ * the competitor's hand. The sealed pw snapshot therefore stays `{}` — whole
+ * page, the product's own default — delivered in full and billed in full.
+ *
+ * What changes is only the HONESTY of the refusal: a sealed agent that passes
+ * `budgetTokens` on a pw arm is told once, in one line, that the parameter is
+ * not available on this surface, instead of having it silently dropped and
+ * being left to believe its request was honoured.
+ */
+const SEALED_SIZE_BUDGET_DISCLOSURE =
+  ' SIZE-BUDGET DISCLOSURE (all sealed arms): budgetTokens is an Aperture product affordance, ' +
+  'injected by the harness at 20000 on neutral-large for the APERTURE arms only (§6 H6). ' +
+  'Playwright has no equivalent and none is synthesised: the sealed pw snapshot is taken with {} ' +
+  '— whole page, the product\'s own default — delivered in full and billed in full. Playwright\'s ' +
+  'own size controls (browser_snapshot `depth`, browser_find) are stock-surface affordances, ' +
+  'measured in pw-stock and never translated into the sealed surface. A sealed agent that passes ' +
+  'budgetTokens on a pw arm receives a fixed one-line notice rather than a silent drop.';
+
 export const H2H_ARM_DEFINITION = {
   'aperture-diff':
     'engine: Aperture (HTTP MCP, :8817). browser_act: no observe override — Aperture returns its ' +
     'default, a diff against the state the agent already holds. browser_snapshot: mode forwarded ' +
-    'as the agent asked. Sealed 3-tool surface.',
+    'as the agent asked. Sealed 3-tool surface.' + SEALED_SIZE_BUDGET_DISCLOSURE,
   'aperture-redump':
     'engine: Aperture (HTTP MCP, :8817). browser_act: observe="full" injected at the proxy on ' +
     'every call. browser_snapshot: mode="full" forced at the proxy, so a voluntary snapshot ' +
-    'cannot come back as a diff. Sealed 3-tool surface. Decomposition control (headtohead.md §3.5).',
+    'cannot come back as a diff. Sealed 3-tool surface. Decomposition control (headtohead.md §3.5).' +
+    SEALED_SIZE_BUDGET_DISCLOSURE,
   'pw-sealed':
     'engine: Playwright MCP 0.0.78 (stdio, --isolated). Sealed 3-tool surface with byte-identical ' +
     'names and schemas, shimmed onto browser_click/browser_type/browser_press_key/browser_hover/' +
     'browser_mouse_wheel/browser_snapshot (headtohead.md §3.2). Ref grammar /^(f\\d+)?e\\d+$/ ' +
     'enforced — 0.0.78 frame-prefixes refs after the first navigation; §3.2 assumed bare eN. ' +
     'Playwright default observation: full aria snapshot per action, subject to the 0.0.78 ' +
-    'link/absence findings recorded on the cohort as pwObservationMode.',
+    'link/absence findings recorded on the cohort as pwObservationMode.' +
+    SEALED_SIZE_BUDGET_DISCLOSURE,
   'pw-stock':
     'engine: Playwright MCP 0.0.78 (stdio, --isolated). Playwright core surface forwarded verbatim ' +
     'minus the §3.4 withheld set, plus task_done. Selector targeting left in and measured. ' +
@@ -155,6 +190,25 @@ export const H2H_ARM_DEFINITION = {
  * The imperative is kept at product strength. The pilot measured that weakening
  * it moves behaviour (G4 63.6% → 73.7%), so softening it here would deflate the
  * very cost advantage under measurement.
+ *
+ * C5 — THE COMPLETENESS FALSEHOOD, AND THE ONE SENTENCE THAT REPAIRS IT.
+ *
+ * "The report after each action is complete: anything it does not mention is
+ * unchanged" is TRUE of Aperture, which always says something — a diff, or that
+ * nothing changed. It is FALSE of pw-sealed: measured on the pinned 0.0.78 under
+ * `--codegen none`, `browser_press_key`, `browser_mouse_wheel` and a
+ * `browser_type` without `submit` return ZERO BYTES (handlers that never call
+ * setIncludeSnapshot, a Page header that renders only on change, and no codegen
+ * left to print). Read against an empty response, the sentence asserts that the
+ * ENTIRE PAGE is unchanged — a statement the harness put in the model's mouth,
+ * in one arm only, at the exact moments that arm was told nothing.
+ *
+ * The repair is ONE ADDED SENTENCE, and it is true in both arms: in pw-sealed it
+ * describes the case that actually arises, and in the Aperture arms it describes
+ * a case that never does. The original sentence is left byte-identical so the
+ * imperative keeps its measured strength; the exception is carved out beside it
+ * rather than by weakening it. It is the SHARED sealed description, so H4's
+ * byte-identity across the three sealed arms is preserved by construction.
  */
 export const H2H_ACT_DESCRIPTION =
   'Click, type, hover, scroll, or press a key on the page, then observe what ' +
@@ -162,7 +216,9 @@ export const H2H_ACT_DESCRIPTION =
   'The browser reports the result of each action for you. That is the whole point: ' +
   'do not call browser_snapshot after every action. ' +
   'The report after each action is complete: anything it does not mention is ' +
-  'unchanged. Do not call browser_snapshot to re-verify what a report already ' +
+  'unchanged. An empty report is the exception: it means the action produced no ' +
+  'report at all, and tells you nothing about the page either way. ' +
+  'Do not call browser_snapshot to re-verify what a report already ' +
   'told you — it will return nothing new.\n\n' +
   'Input is dispatched as real browser input, so framework handlers, native ' +
   'widgets and validation behave exactly as they do for a human.';
@@ -172,6 +228,21 @@ export const H2H_ACT_DESCRIPTION =
 export const H2H_DONE_DESCRIPTION =
   'Call this once, when you believe the task is complete. It ends the ' +
   'session. Do not call it before you have actually done the work.';
+
+/**
+ * C3 — the fixed one-line notice a pw arm returns for `budgetTokens`.
+ *
+ * A DESIGNED REFUSAL, not a fault: spelled `error: …` exactly as Aperture spells
+ * its own refusals, so it carries no HARNESS_ERROR_PREFIX, classifies as kind
+ * `error`, and does not enter H9's fault rate. The sealed surface has to look
+ * the same in both arms right down to how it says no.
+ *
+ * It replaces a SILENT DROP. Three times in the pilot a sealed agent on a pw arm
+ * asked for a smaller snapshot, got the whole page back, and had no way to learn
+ * that the parameter it had been shown in the schema does nothing here. An agent
+ * that tries the right thing three times deserves to be told once.
+ */
+export const PW_BUDGET_TOKENS_NOTICE = 'error: budgetTokens is not available on this surface';
 
 // ---------------------------------------------------------------------------
 // §3.4 — what pw-stock does NOT get
@@ -413,6 +484,8 @@ export async function startH2hProxy({
       snapshotLinksResolved: 0,
       snapshotLinksUnresolved: 0,
       snapshotAbsent: 0,
+      /** C3: how often the agent asked for a size budget the pw surface has not got. */
+      budgetTokensRefused: 0,
     };
     return ep;
   }
@@ -429,7 +502,26 @@ export async function startH2hProxy({
       tool,
       kind,
       chars: text.length,
-      truncated: isPw ? false : isTruncated(text),
+      /**
+       * C2(a) — MEASURED IN EVERY ARM.
+       *
+       * This read `isPw ? false : isTruncated(text)`: a hard-coded claim that
+       * the competitor's observations are never cut short, asserted by the
+       * harness rather than observed. The reasoning was sound as far as it went
+       * — Playwright has no token budget of its own — and it is the same class
+       * of mistake as everything else in this batch: a fact about the other
+       * product written into the apparatus instead of measured by it. The
+       * neighbouring instance of that class cost four episodes, where the
+       * harness recorded half a megabyte of "observation" the SDK had already
+       * refused to deliver. A field that can only ever say `false` in one arm
+       * measures nothing in that arm.
+       *
+       * `isTruncated` looks for Aperture's budget marker, so on a pw arm this is
+       * still EXPECTED to stay false — the difference is that it is now expected
+       * to rather than defined to, and if a pw response ever does carry that
+       * marker the store will say so. H3 fails any preflight where it fires.
+       */
+      truncated: isTruncated(text),
       upstreamMs: upstreamMs ?? 0,
       ...asked,
       text,
@@ -670,15 +762,38 @@ export async function startH2hProxy({
 
   async function doSnapshot(args) {
     if (ep.done) return 'error: this session is finished — task_done was already called.';
+
+    /**
+     * C3 — `budgetTokens` on a pw arm is REFUSED IN WORDS, before anything else.
+     *
+     * NO STEP IS CHARGED, and the placement above `ep.steps++` is the whole
+     * point. The ref-grammar refusal below does charge a step, because there the
+     * agent did something WRONG — it tried to smuggle a selector past the sealed
+     * grammar, and §1.3 wants that counted. Here the agent did something RIGHT:
+     * it used a parameter this harness advertised to it, in a schema H4 forces
+     * to be byte-identical across arms. Charging the competitor a step out of its
+     * budget for a control WE put in front of it and cannot honour would be the
+     * harness manufacturing a loss.
+     *
+     * The notice IS recorded as an observation: those bytes really did reach the
+     * agent, all 52 of them, and an observation the model read but the store does
+     * not hold is the class of gap C2 exists to close.
+     */
+    if (isPw && args?.budgetTokens !== undefined) {
+      recordObservation('browser_snapshot', PW_BUDGET_TOKENS_NOTICE, { mode: null, expand: null }, 0);
+      ep.budgetTokensRefused++;
+      return PW_BUDGET_TOKENS_NOTICE;
+    }
+
     if (ep.steps >= ep.maxSteps) return budgetRefusal();
     ep.steps++;
 
     if (isPw) {
-      // §3.2: mode/expand/budgetTokens are Aperture semantics. Playwright is
-      // always full, never collapsed, never budgeted — so `full` is honoured,
-      // `auto` upgrades to full, `expand` is vacuously satisfied and
-      // `budgetTokens` is ignored. Recorded as forwarded, not as asked, and
-      // printed in the run log rather than silently dropped.
+      // §3.2, AS RULED (C3): `mode` and `expand` are Aperture semantics and
+      // Playwright is always full and never collapsed, so `full` is honoured,
+      // `auto` upgrades to full and `expand` is vacuously satisfied. The call
+      // goes up as `{}` — whole page, Playwright's own default. `budgetTokens`
+      // never reaches here; it was refused in words above.
       const r = await callUpstream('browser_snapshot', {});
       recordObservation('browser_snapshot', r.text, { mode: 'full', expand: true }, r.upstreamMs);
       if (r.transportFault) ep.toolFaults++;

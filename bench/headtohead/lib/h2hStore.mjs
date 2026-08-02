@@ -39,8 +39,16 @@ export {
 } from '../../lib/store.mjs';
 
 /** Hand-bumped when a change to how an h2h episode is produced or scored is
- *  deliberate and old episodes should not pool with new ones. */
-export const H2H_SUITE_VERSION = '2026-08-02.1';
+ *  deliberate and old episodes should not pool with new ones.
+ *
+ *  .2 — the contamination batch. The SDK's MCP output cap is now pinned by the
+ *  harness instead of left to a default nobody set (so the largest legitimate
+ *  observation is DELIVERED, not swapped for a read-this-file error); truncation
+ *  is measured in every arm; over-cap episodes are marked apparatus_contaminated
+ *  and excluded from every claim. Episodes produced before this cannot pool with
+ *  episodes produced after it — some of the old ones record bytes the model was
+ *  never shown. */
+export const H2H_SUITE_VERSION = '2026-08-02.2';
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
@@ -116,6 +124,7 @@ export function buildH2hIdentity({
   chromium,
   pwObservationMode,
   launchFlags,
+  maxMcpOutputTokens,
 }) {
   const harness = hashTree(root, h2hDir);
   const homeFixtures = hashTree(root, join(root, 'bench', 'fixtures'));
@@ -141,6 +150,18 @@ export function buildH2hIdentity({
     pwVersion,
     chromium,
     pwObservationMode,
+    /**
+     * AND ONE MORE THE SPEC DID NOT ANTICIPATE, for the same reason as
+     * `pwObservationMode`: it decides what the agent was actually shown.
+     *
+     * The SDK rejects an MCP tool result over `MAX_MCP_OUTPUT_TOKENS` WHOLESALE,
+     * replacing it with a short error telling the agent to read a file off disk.
+     * Unset, the ceiling is a 25,000-token default that a remote gate can also
+     * move — so two runs a week apart could hand the same page to the model in
+     * one and hand it an error in the other, and nothing in the identity would
+     * say so. Pinned here, stamped here, and never poolable across values.
+     */
+    maxMcpOutputTokens: maxMcpOutputTokens ?? null,
     launchFlags,
     files: [...all, ...build.files],
     neutralFixtureCount: neutralFixtures.length,
@@ -161,7 +182,7 @@ export function h2hEpisodeKey({ task, arm, runIndex, codeVersion, model }) {
 const CHECKED = [
   'codeVersion', 'buildVersion', 'suiteVersion', 'model', 'promptHash',
   'armDefinition', 'verdictRule', 'toolsHash', 'pwVersion', 'chromiumRevision',
-  'pwObservationMode',
+  'pwObservationMode', 'maxMcpOutputTokens',
 ];
 
 const LABEL = {
@@ -176,6 +197,7 @@ const LABEL = {
   pwVersion: 'pwVersion         (@playwright/mcp, pinned)',
   chromiumRevision: 'chromiumRevision  (the browser the competitor drove)',
   pwObservationMode: 'pwObservationMode (snapshot links resolved, or as shipped)',
+  maxMcpOutputTokens: 'maxMcpOutputTokens (the SDK cap above which a tool result is REJECTED, not delivered)',
 };
 
 const show = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
@@ -209,6 +231,7 @@ export function checkH2hIntegrity({ rows, malformed = [], cohort = null, identit
       case 'pwVersion': return identity.pwVersion;
       case 'chromiumRevision': return identity.chromium?.revision ?? null;
       case 'pwObservationMode': return identity.pwObservationMode;
+      case 'maxMcpOutputTokens': return identity.maxMcpOutputTokens;
       default: return null;
     }
   };
@@ -279,5 +302,6 @@ export function stampH2hEpisode(row, identity, armDefinitions, toolsHash) {
     pwVersion: identity.pwVersion,
     chromiumRevision: identity.chromium?.revision ?? null,
     pwObservationMode: identity.pwObservationMode,
+    maxMcpOutputTokens: identity.maxMcpOutputTokens,
   };
 }

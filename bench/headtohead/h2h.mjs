@@ -54,6 +54,7 @@ import {
   H2H_ACT_DESCRIPTION, H2H_ARM_DEFINITION, H2H_DONE_DESCRIPTION, H2H_PROXY_PORT,
   PW_ARMS, APERTURE_ARMS, SEALED_ARMS, PW_STOCK_WITHHELD, PW_STOCK_KEPT,
   startH2hProxy, PW_OBSERVATION_MODES, HARNESS_ERROR_PREFIX, isHarnessFault,
+  PW_BUDGET_TOKENS_NOTICE,
 } from './lib/proxy.mjs';
 import {
   chromiumBuild, launchFlagsFor, PW_PINNED_VERSION, pwPackageVersion, pwScratchDir, startPw,
@@ -87,7 +88,84 @@ export const VERDICT_RULE = {
   mechanism: 'H10: MECHANISM CONFIRMED only if observation bytes explain ≥50% of the cost delta',
   ceiling: 'H12: both headline arms ≥98% pooled success ⇒ INCONCLUSIVE-by-ceiling; only economics survives',
   floor: 'H11: any (task,class) cell where BOTH headline arms succeed <50% is excluded from cost claims',
+  contamination:
+    'H11 floor, second clause: any task cell in which ANY arm has an apparatus_contaminated episode is ' +
+    'excluded from EVERY claim — reliability, precision, economics and decomposition alike, not only cost, ' +
+    'and regardless of success rates. The surviving episodes of a contaminated arm are the ones that ' +
+    'happened to stay under the SDK cap, which is to say the CHEAPEST ones; scoring what is left would ' +
+    'read a survivorship artefact as a result. The exclusion is printed and the arm is named.',
 };
+
+/**
+ * C1 — THE CAP THE HARNESS MUST SET, AND THE ONE NUMBER IN THIS FILE THAT
+ * DECIDES WHETHER THE MODEL SEES THE PAGE AT ALL.
+ *
+ * The SDK reads `MAX_MCP_OUTPUT_TOKENS` from the environment. Over that ceiling
+ * it does not truncate the MCP tool result and it does not pass it on — it
+ * REJECTS IT WHOLESALE and hands the model a ~1.3KB error instead, telling it
+ * the output was saved to a file and to go read it with offset/limit and jq.
+ * The agent under test has no filesystem tools. So the arm was billed for a
+ * page it was never shown, `obsChars` recorded the bytes the proxy returned,
+ * and the episode looked like a competitor that read half a megabyte and still
+ * failed. Four episodes on record say exactly that (catalog-order, both pw arms,
+ * runs 0 and 1).
+ *
+ * Left unset, the ceiling is a 25,000-token default that a remote gate can also
+ * move underneath a running cohort. MEASURED: catalog-order's pw-sealed snapshot
+ * — the largest LEGITIMATE observation any arm produces — is 87,009 chars, i.e.
+ * ~21,750 tokens at 4 chars/token and ~25,000 at the 3.5 chars/token that aria
+ * YAML actually runs closer to. That is not "inside the default": it is ON the
+ * default, to within the error of the estimate, which is precisely why some
+ * catalog-order episodes were eaten and the smaller fixtures were not. A
+ * benchmark whose largest fixture straddles a ceiling nobody set is not
+ * measuring page size; it is measuring how close the fixture got to a number the
+ * harness never chose.
+ *
+ * 50,000 puts ~2.3x headroom over that observation — the response would have to
+ * average under 1.75 chars per token to be refused, which no tokenizer does. It is
+ * SET EXPLICITLY, THE SAME VALUE IN EVERY ARM, stamped into the cohort identity
+ * and printed in H0. Same value everywhere is not a nicety: a cap that differed
+ * by arm would silently delete the competitor's observation channel and call the
+ * result a win.
+ */
+export const MAX_MCP_OUTPUT_TOKENS = 50000;
+
+/**
+ * C2(b) — THE OVER-CAP REJECTION, AS THE SDK ACTUALLY SPELLS IT.
+ *
+ * Reconstructed from the pinned SDK's own bundle rather than guessed, because a
+ * detector written from a memory of an error message is a detector that goes
+ * quietly stale. The over-cap path formats one of two strings, and they share a
+ * head and a tail that no page content produces:
+ *
+ *   persisted     `Error: result (445,509 characters across 8,912 lines) exceeds
+ *                  maximum allowed tokens. Output has been saved to <path>.
+ *                  Format: Plain text …`
+ *   persist-failed `Error: result (445,509 characters) exceeds maximum allowed
+ *                  tokens. Failed to save output to file: … If this MCP server
+ *                  provides pagination or filtering tools, use them …`
+ *
+ * A third path (large-output-files disabled, or image content) truncates instead
+ * and appends `[OUTPUT TRUNCATED - exceeded 25000 token limit]`. That one is
+ * still a delivered-vs-returned lie — the model got a prefix and `obsChars`
+ * recorded the whole thing — so it is detected too.
+ *
+ * MATCHED AGAINST THE TOOL RESULT THE MODEL RECEIVED, never against what the
+ * proxy sent: the SDK echoes each turn's `tool_result` blocks back on the stream
+ * as a `user` message, and that content is the post-substitution bytes. This is
+ * the only place in the apparatus where "delivered" is observable at all.
+ */
+export const SDK_MCP_CAP_REJECTION =
+  /Error: result \([\d,]+ characters(?: across [\d,]+ lines?)?\) exceeds maximum allowed tokens\./;
+export const SDK_MCP_CAP_TRUNCATION = /\[OUTPUT TRUNCATED - exceeded \d+ token limit\]/;
+
+/** null when the text is a real observation; otherwise which cap path ate it. */
+export function sdkMcpCapVerdict(text) {
+  if (typeof text !== 'string') return null;
+  if (SDK_MCP_CAP_REJECTION.test(text)) return 'rejected';
+  if (SDK_MCP_CAP_TRUNCATION.test(text)) return 'truncated';
+  return null;
+}
 
 /**
  * §3.3: the existing SYSTEM_PROMPT from bench/task.mjs, byte-identical across
@@ -295,7 +373,7 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     .join('\n');
   const fullStream = ep.observations.map((o) => o.text).join('\n');
 
-  return {
+  const row = {
     task: task.id,
     class: task.class,
     arm,
@@ -319,6 +397,7 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     nonRefTargeting: ep.nonRefTargeting,
     snapshotLinksUnresolved: ep.snapshotLinksUnresolved,
     snapshotAbsent: ep.snapshotAbsent,
+    budgetTokensRefused: ep.budgetTokensRefused ?? 0,
     unclassified: ep.observations
       .filter((o) => o.kind === 'other')
       .map((o) => ({ tool: o.tool, head: o.text.slice(0, 240) })),
@@ -333,9 +412,17 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
     sdkSubtype: sdk?.subtype ?? null,
     durationMs: Date.now() - t0,
     failureClass: null, // filled by H9 below
+    /** C2(b)+(c): null when the model read what the proxy returned. */
+    apparatusContaminated: null,
     diffStream,
     fullStream,
   };
+
+  // C2 — POST-EPISODE RECONCILIATION. Last, because it reads the finished row:
+  // the detector's evidence comes off the SDK stream, the arithmetic off the
+  // row's own token totals, and neither is available any earlier.
+  row.apparatusContaminated = contaminationOf(row, sdk?.capRejections ?? []);
+  return row;
 }
 
 /**
@@ -350,10 +437,104 @@ async function runEpisode({ proxy, collector, task, arm, driver, runIndex }) {
 const MAX_TURNS_EXHAUSTED = /(reached maximum number of turns|error_max_turns)/i;
 
 /**
- * Failure classes that mean THE APPARATUS FAILED, not the arm. Neither may be
- * scored, and H9 counts both against the 10% ceiling.
+ * Failure classes that mean THE APPARATUS FAILED, not the arm. None may be
+ * scored, and H9 counts all of them against the 10% ceiling.
+ *
+ * `apparatus_contaminated` joins them under C4. It is not a failure in the
+ * ordinary sense — a contaminated episode can even SUCCEED, and two of the four
+ * on record did — which is exactly why it has to be here rather than left as an
+ * annotation. Its cost, its turn count and its `obsChars` are all statements
+ * about an apparatus that swapped the observation for an error, and every one of
+ * them would otherwise be averaged into a headline.
  */
-export const HARNESS_CLASSES = new Set(['tool_fault', 'harness_fault']);
+export const HARNESS_CLASSES = new Set(['tool_fault', 'harness_fault', 'apparatus_contaminated']);
+
+/**
+ * C2(c) — THE ARITHMETIC THAT CATCHES WHAT THE DETECTOR MISSES.
+ *
+ * `sdkMcpCapVerdict` matches a string the SDK owns and may reword. This does
+ * not: it asks whether the bytes the proxy says it returned could possibly have
+ * become the tokens the API says it billed.
+ *
+ * Every observation the model receives is new context, so it must be paid for as
+ * `inputTokens + cacheCreate` — cache READS are re-reads of context banked on an
+ * earlier turn and would double-count. The ratio obsChars / new-context-tokens
+ * therefore has a hard ceiling: no tokenizer averages more than a handful of
+ * characters per token on aria YAML or Aperture diffs, and the denominator also
+ * carries the system prompt, the tool schemas and every assistant message, none
+ * of which contribute to the numerator. It can only be pushed DOWN by real work.
+ *
+ * MEASURED over the 86 uncontaminated episodes of the pilot cohort, the ratio
+ * spans 0.24 to 2.28. The four contaminated ones sit at 7.85, 9.18, 17.18 and
+ * 49.47 — the numerator counts a snapshot the denominator never paid for. A
+ * ceiling of 4.0 is 1.75x above the highest honest episode and 2x below the
+ * lowest contaminated one, which is as wide a moat as the data offers.
+ *
+ * Two guards keep it from firing on episodes it cannot speak about: a scripted
+ * or never-billed run has no denominator at all, and below ~10K observed chars
+ * the fixed prompt-and-schema overhead dominates the denominator so hard that
+ * the ratio cannot reach the ceiling for any reason, honest or otherwise.
+ */
+export const CHARS_PER_NEW_CONTEXT_TOKEN_CEILING = 4;
+const RECONCILE_MIN_OBS_CHARS = 10000;
+
+export function observationBytesReconciliation(r) {
+  const newContextTokens = (r.inputTokens ?? 0) + (r.cacheCreate ?? 0);
+  if (!newContextTokens) return null;
+  if ((r.obsChars ?? 0) < RECONCILE_MIN_OBS_CHARS) return null;
+  const ratio = r.obsChars / newContextTokens;
+  if (ratio <= CHARS_PER_NEW_CONTEXT_TOKEN_CEILING) return null;
+  return {
+    ratio,
+    obsChars: r.obsChars,
+    newContextTokens,
+    ceiling: CHARS_PER_NEW_CONTEXT_TOKEN_CEILING,
+    why:
+      `${r.obsChars} observed chars against ${newContextTokens} new-context tokens is ` +
+      `${ratio.toFixed(1)} chars/token, over the ${CHARS_PER_NEW_CONTEXT_TOKEN_CEILING} ceiling. ` +
+      'Those bytes were returned by the proxy; they were not billed, so they were not delivered.',
+  };
+}
+
+/**
+ * C2(b)+(c) — build the episode's contamination record, or null if it is clean.
+ *
+ * Two independent witnesses, deliberately: the detector reads the SDK's own
+ * words, the reconciliation reads the API's own arithmetic. Either alone is
+ * enough to disqualify the episode. Keeping both means a reworded SDK error
+ * cannot make the contamination invisible, and a contamination the arithmetic
+ * cannot resolve (a small over-cap result) is still named.
+ */
+export function contaminationOf(r, capRejections = []) {
+  const reasons = [];
+  if (capRejections.length) {
+    reasons.push({
+      reason: 'sdk_mcp_output_cap',
+      count: capRejections.length,
+      verdicts: [...new Set(capRejections.map((c) => c.verdict))],
+      sample: capRejections[0].text,
+    });
+  }
+  const recon = observationBytesReconciliation(r);
+  if (recon) reasons.push({ reason: 'chars_per_token_implausible', ...recon });
+  if (!reasons.length) return null;
+  return {
+    reasons,
+    obsChars: r.obsChars,
+    /**
+     * THE ANNOTATION C2 EXISTS FOR. `obsChars` is not wrong — it is the honest
+     * count of what the proxy put on the wire — but on a contaminated episode it
+     * is NOT what the model read, and every downstream consumer of it (H10's
+     * decomposition, the per-arm obs-chars column, the cost-per-byte story)
+     * silently assumes it is.
+     */
+    obsCharsMeaning:
+      'RETURNED, NOT DELIVERED — obsChars counts the bytes this proxy returned to the SDK. ' +
+      'The SDK replaced at least one of those tool results with an over-cap error before the ' +
+      'model saw it, so obsChars overstates what was observed by an unknown amount and may not ' +
+      'be used in any claim.',
+  };
+}
 
 /**
  * §6 H9: every failed episode is classified from the WITNESS and the reply
@@ -375,6 +556,17 @@ export const HARNESS_CLASSES = new Set(['tool_fault', 'harness_fault']);
  * whole verdict.
  */
 export function classifyFailure(r) {
+  /**
+   * C4 — CONTAMINATION FIRST, AND IT OUTRANKS SUCCESS.
+   *
+   * Every other branch below asks what the ARM did. This one asks whether the
+   * episode measured the arm at all, and when the answer is no there is nothing
+   * left for the other branches to classify: the agent was answering a different
+   * question from the one the harness thinks it asked. Placed above the success
+   * check on purpose — a contaminated episode that PASSED is the dangerous one,
+   * because nothing about it looks wrong until its cost lands in a mean.
+   */
+  if (r.apparatusContaminated) return 'apparatus_contaminated';
   // Anything this harness originated, said in its own voice (§9's prefix rule).
   if (typeof r.driverError === 'string' && isHarnessFault(r.driverError)) return 'harness_fault';
   if (!r.success && r.steps === 0 && r.obsChars === 0 && r.upstreamMs === 0) return 'harness_fault';
@@ -491,6 +683,27 @@ function scriptedDriver(proxy, task, arm, wire = null) {
 const SCRATCH = join(HERE, '.agent-cwd');
 
 /**
+ * C2(b) — every `tool_result` text the SDK put in front of the model this turn.
+ *
+ * Exported and pure so the detector can be exercised for $0 against a
+ * reconstructed cap rejection. A detector that has only ever been run against
+ * the happy path is a detector that has never been run.
+ */
+export function toolResultTexts(message) {
+  const content = message?.message?.content;
+  if (typeof content === 'string') return [content];
+  if (!Array.isArray(content)) return [];
+  const out = [];
+  for (const block of content) {
+    if (block?.type !== 'tool_result') continue;
+    const c = block.content;
+    if (typeof c === 'string') out.push(c);
+    else if (Array.isArray(c)) for (const b of c) if (typeof b?.text === 'string') out.push(b.text);
+  }
+  return out;
+}
+
+/**
  * §F7 — consume an SDK message stream, banking usage AS IT ARRIVES.
  *
  * The old code tallied after the loop, off the final `result`. `for await`
@@ -516,6 +729,14 @@ export async function drainSdkStream(q, acc) {
     for await (const m of q) {
       if (m.type === 'system' && m.subtype === 'init') {
         acc.mcpServers = m.mcp_servers ?? [];
+      } else if (m.type === 'user') {
+        // C2(b): DELIVERED, not returned. The proxy knows what it handed the
+        // SDK; only this frame knows what the SDK handed the model.
+        for (const text of toolResultTexts(m)) {
+          const verdict = sdkMcpCapVerdict(text);
+          if (!verdict) continue;
+          acc.capRejections.push({ verdict, text: text.slice(0, 400), chars: text.length });
+        }
       } else if (m.type === 'assistant') {
         const u = m.message?.usage ?? {};
         const model = m.message?.model;
@@ -575,6 +796,29 @@ export function browserServerProblem(mcpServers) {
 }
 
 /**
+ * The environment every arm's SDK subprocess runs under.
+ *
+ * Pure and exported so C1 can be CHECKED FOR $0. The cap it sets decides whether
+ * the largest fixture reaches the model or is replaced by an error, which makes
+ * it as load-bearing as any pin in H0 — and an SDK run costs money to produce,
+ * so a cap that could only be verified by billing one would never be verified.
+ */
+export function sdkEnv(base = process.env) {
+  const env = { ...base };
+  delete env.ANTHROPIC_API_KEY; // measured: the SDK uses Claude Code's own auth
+  /**
+   * C1 — SET, NOT INHERITED, AND THE SAME IN EVERY ARM.
+   *
+   * Assigned AFTER the spread so an operator's shell value cannot move the
+   * cohort's ceiling out from under it: this number is part of the experiment's
+   * identity, and an experiment whose identity is whatever was exported in the
+   * terminal is not an experiment.
+   */
+  env.MAX_MCP_OUTPUT_TOKENS = String(MAX_MCP_OUTPUT_TOKENS);
+  return env;
+}
+
+/**
  * The SDK driver — `bench/task.mjs`'s `agentDriver`, arm-parameterised.
  *
  * TWO THINGS IT DOES THAT THE ORIGINAL DID NOT, both learned from the pw-stock
@@ -611,14 +855,15 @@ function agentDriver(proxy, task, arm, opts) {
     subtype: null,
     /** null = never announced; otherwise the SDK's own init report. */
     mcpServers: null,
+    /** C2(b): tool results the SDK refused to deliver over the MCP output cap. */
+    capRejections: [],
   };
 
   const run = async () => {
     if (!existsSync(SCRATCH)) mkdirSync(SCRATCH, { recursive: true });
     writeFileSync(join(SCRATCH, '.gitignore'), '*\n');
 
-    const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY; // measured: the SDK uses Claude Code's own auth
+    const env = sdkEnv();
 
     const allowed = proxy
       .registeredTools()
@@ -797,6 +1042,33 @@ async function guardH0(ctx) {
   notes.push(`  chromium               rev ${chromium.revision} (${chromium.browserVersion}) via playwright-core ${chromium.playwrightCore}`);
   notes.push(`  aperture buildVersion  ${ctx.identity.buildVersion}`);
   notes.push(`  aperture codeVersion   ${ctx.identity.codeVersion}   (bench/headtohead/** + both fixture dirs)`);
+
+  /**
+   * C1 — THE CAP, PRINTED BEFORE ANYTHING ELSE IS BELIEVED.
+   *
+   * H0 exists to show a human every pin the cohort depends on. This one decides
+   * whether the model is shown the page or an error telling it to read a file,
+   * and until this batch it was not pinned, not printed and not stamped.
+   */
+  notes.push(
+    `  MAX_MCP_OUTPUT_TOKENS  ${MAX_MCP_OUTPUT_TOKENS}   (SET by the harness in every arm's SDK env; ` +
+      'above this the SDK REJECTS an MCP tool result wholesale)',
+  );
+  notes.push(
+    '                         largest legitimate observation MEASURED 87,009 chars (catalog-order, pw-sealed) ' +
+      `≈ 21.8K-25K tokens → ~${(MAX_MCP_OUTPUT_TOKENS / 22000).toFixed(1)}x headroom.`,
+  );
+  notes.push(
+    '                         Unset, the ceiling is a 25,000-token default a remote gate can move — i.e. ON ' +
+      'that observation, which is what ate four episodes.',
+  );
+  if (ctx.identity.maxMcpOutputTokens !== MAX_MCP_OUTPUT_TOKENS) {
+    problems.push(
+      `H0 — the cohort identity stamps maxMcpOutputTokens ${JSON.stringify(ctx.identity.maxMcpOutputTokens)} ` +
+        `but the runner sets ${MAX_MCP_OUTPUT_TOKENS}. The value the episodes are stamped with must be the ` +
+        'value the agents ran under, or the stamp is decoration.',
+    );
+  }
 
   // The launch flags are byte-compared against §3.2/§3.4, which is the only way
   // a flag that drifted can be told from a flag that was always wrong.
@@ -1510,10 +1782,18 @@ export function harnessFaultCheck(rows) {
     const classes = a.map((r) => classifyFailure(r));
     const faults = classes.filter((c) => HARNESS_CLASSES.has(c)).length;
     const zero = classes.filter((c) => c === 'harness_fault').length;
+    // C4: contamination counts toward the fault rate, and is named separately
+    // because the fix is different — a shim fault is a bug in this file, a
+    // contamination is the SDK deleting an observation between us and the model.
+    const dirty = classes.filter((c) => c === 'apparatus_contaminated').length;
     if (faults / a.length > 0.1) {
+      const detail = [
+        zero ? `${zero} never reached the tool surface at all` : null,
+        dirty ? `${dirty} apparatus_contaminated — the model was not shown what the proxy returned` : null,
+      ].filter(Boolean);
       out.push(
         `H9 — ${arm}: ${faults}/${a.length} episodes (${(100 * faults / a.length).toFixed(0)}%) faulted in the ` +
-          `shim, the transport or the apparatus${zero ? ` (${zero} of them never reached the tool surface at all)` : ''}. ` +
+          `shim, the transport or the apparatus${detail.length ? ` (${detail.join('; ')})` : ''}. ` +
           'A comparison whose failure mode is "the competitor scored zero ' +
           'because our shim broke" is worthless.',
       );
@@ -1756,6 +2036,9 @@ async function runScoredPhase(ctx, phase, storePath, identity, stored, toolsHash
     pwVersion: identity.pwVersion,
     chromium: identity.chromium,
     pwObservationMode: identity.pwObservationMode,
+    // C1: on the sidecar as well as on every row, so a cold `--report` can say
+    // what ceiling the episodes it is scoring were actually delivered under.
+    maxMcpOutputTokens: identity.maxMcpOutputTokens,
     launchFlags: identity.launchFlags,
     pwBrowserOverride: opts.pwBrowser ?? null,
   });
@@ -1795,26 +2078,87 @@ async function runScoredPhase(ctx, phase, storePath, identity, stored, toolsHash
 
 export function report(rows, surfaceOverheadChars = {}) {
   const problems = [];
-  // Both harness classes are excluded, not just `tool_fault`: an episode whose
-  // agent never reached the tool surface is not a slower or worse result, it is
-  // no result, and averaging it in would let a broken arm masquerade as a
-  // beaten one.
+  // All THREE harness classes are excluded, not just `tool_fault`: an episode
+  // whose agent never reached the tool surface — or whose observations the SDK
+  // ate before the model saw them — is not a slower or worse result, it is no
+  // result, and averaging it in would let a broken arm masquerade as a beaten
+  // one.
   const scored = rows.filter((r) => !HARNESS_CLASSES.has(classifyFailure(r)));
   const excluded = rows.length - scored.length;
   const zeroContact = rows.filter((r) => classifyFailure(r) === 'harness_fault').length;
+  const contaminated = rows.filter((r) => r.apparatusContaminated);
 
   console.log(
     `\n${rows.length} episode(s) on record · ${excluded} excluded as harness fault (§6 H9)` +
-      (zeroContact ? ` — ${zeroContact} of them never reached the tool surface` : ''),
+      (zeroContact ? ` — ${zeroContact} of them never reached the tool surface` : '') +
+      (contaminated.length ? ` — ${contaminated.length} apparatus_contaminated` : ''),
   );
   console.log(`total spend $${rows.reduce((a, r) => a + (r.costUsd ?? 0), 0).toFixed(2)}\n`);
 
+  // --- C2/C4: the contamination roll, named episode by episode ---
+  if (contaminated.length) {
+    console.log(`APPARATUS CONTAMINATION — ${contaminated.length} episode(s) did not measure the arm (§C2)`);
+    for (const r of contaminated) {
+      const why = r.apparatusContaminated.reasons.map((x) => x.reason).join(' + ');
+      console.log(
+        `  ${r.task.padEnd(18)} ${r.arm.padEnd(16)} run${r.runIndex}  ${r.success ? 'SUCCEEDED' : 'failed   '}  ` +
+          `obsChars ${String(r.obsChars).padStart(7)} RETURNED-NOT-DELIVERED  [${why}]`,
+      );
+      for (const x of r.apparatusContaminated.reasons) {
+        if (x.reason === 'sdk_mcp_output_cap') {
+          console.log(`      the SDK ${x.verdicts.join('/')} ${x.count} tool result(s) over MAX_MCP_OUTPUT_TOKENS:`);
+          console.log(`      ${JSON.stringify(x.sample.slice(0, 200))}`);
+        } else {
+          console.log(`      ${x.why}`);
+        }
+      }
+    }
+    console.log('  Their cost, turns and observed bytes are facts about this harness, not about any arm.');
+    console.log('');
+  }
+
+  /**
+   * --- C4: H11's FLOOR, SECOND CLAUSE — CONTAMINATION EXCLUDES THE WHOLE CELL ---
+   *
+   * Dropping the contaminated EPISODES is not enough, and this is the part that
+   * is easy to get wrong. The episodes that survive in a contaminated arm are
+   * the ones whose observations happened to fit under the SDK cap — which is to
+   * say the SMALLEST and therefore CHEAPEST ones. Scoring the survivors reads a
+   * survivorship artefact as a result, and it reads it in the direction that
+   * flatters whichever arm was NOT contaminated.
+   *
+   * So the exclusion is by CELL, it is triggered by ONE arm (not both), it does
+   * not care what the success rates were, and unlike the <50% clause it removes
+   * the cell from EVERY claim rather than only the cost ones. It is applied
+   * BEFORE the per-arm table, not after it, because a table is read as a result
+   * whatever a later paragraph says about it. Named out loud, with the arm,
+   * because an exclusion nobody can see is an exclusion nobody can audit.
+   */
+  const contaminatedCells = new Map();
+  for (const r of contaminated) {
+    if (!contaminatedCells.has(r.task)) contaminatedCells.set(r.task, new Map());
+    const byArm = contaminatedCells.get(r.task);
+    byArm.set(r.arm, (byArm.get(r.arm) ?? 0) + 1);
+  }
+  if (contaminatedCells.size) {
+    console.log('H11/C4 — EXCLUDED FROM EVERY CLAIM (an arm in this cell was contaminated):');
+    for (const [task, byArm] of contaminatedCells) {
+      const who = [...byArm].map(([arm, n]) => `${arm} x${n}`).join(', ');
+      console.log(`  ${task.padEnd(18)} contaminated in: ${who}`);
+    }
+    console.log('  Not a capability finding and not a cost finding — the cell was never measured.');
+    console.log('  The surviving episodes of a contaminated arm are the ones that fit under the cap,');
+    console.log('  i.e. the cheapest ones; scoring what is left would report survivorship as a result.');
+    console.log('');
+  }
+  const claimable = scored.filter((r) => !contaminatedCells.has(r.task));
+
   const rate = (rs) => (rs.length ? rs.filter((r) => r.success).length / rs.length : 0);
-  console.log('PER ARM, PER CLASS');
+  console.log('PER ARM, PER CLASS' + (contaminatedCells.size ? '  (contaminated cells removed)' : ''));
   console.log('  arm              class           n   success   wrong-el/run   $/ep      obs chars/ep   turns');
   for (const arm of ARMS) {
     for (const cls of CLASSES) {
-      const rs = scored.filter((r) => r.arm === arm && r.class === cls);
+      const rs = claimable.filter((r) => r.arm === arm && r.class === cls);
       if (!rs.length) continue;
       console.log(
         `  ${arm.padEnd(16)} ${cls.padEnd(14)} ${String(rs.length).padStart(3)}   ` +
@@ -1828,8 +2172,8 @@ export function report(rows, surfaceOverheadChars = {}) {
   // --- H11: the capability floor, applied BEFORE any cost claim ---
   const excludedCells = [];
   for (const t of ALL_TASKS) {
-    const a = scored.filter((r) => r.task === t.id && r.arm === 'aperture-diff');
-    const b = scored.filter((r) => r.task === t.id && r.arm === 'pw-sealed');
+    const a = claimable.filter((r) => r.task === t.id && r.arm === 'aperture-diff');
+    const b = claimable.filter((r) => r.task === t.id && r.arm === 'pw-sealed');
     if (!a.length || !b.length) continue;
     if (rate(a) < 0.5 && rate(b) < 0.5) excludedCells.push(t.id);
   }
@@ -1837,11 +2181,11 @@ export function report(rows, surfaceOverheadChars = {}) {
     console.log(`\nH11 — excluded from every cost claim (both headline arms <50%): ${excludedCells.join(', ')}`);
     console.log('  A failing arm\'s episodes are not the same work. Reported as a capability finding.');
   }
-  const costable = scored.filter((r) => !excludedCells.includes(r.task));
+  const costable = claimable.filter((r) => !excludedCells.includes(r.task));
 
   // --- §7.1 reliability, pooled over ALL tasks ---
-  const a = scored.filter((r) => r.arm === 'aperture-diff');
-  const b = scored.filter((r) => r.arm === 'pw-sealed');
+  const a = claimable.filter((r) => r.arm === 'aperture-diff');
+  const b = claimable.filter((r) => r.arm === 'pw-sealed');
   const sCI = propDiffCI(a.filter((r) => r.success).length, a.length, b.filter((r) => r.success).length, b.length);
   console.log('\nRELIABILITY (primary) — aperture-diff − pw-sealed, Newcombe 95%, pooled over all tasks');
   console.log(`  delta ${fmtSigned(sCI.delta)}  CI [${fmtSigned(sCI.lo)}, ${fmtSigned(sCI.hi)}]  bound −10pp`);
@@ -1908,15 +2252,15 @@ export function report(rows, surfaceOverheadChars = {}) {
     ['aperture-redump', 'pw-sealed', 'ENGINE + DIALECT at equal observation strategy'],
     ['aperture-diff', 'pw-sealed', 'the product headline'],
   ]) {
-    const xs = scored.filter((r) => r.arm === x);
-    const ys = scored.filter((r) => r.arm === y);
+    const xs = claimable.filter((r) => r.arm === x);
+    const ys = claimable.filter((r) => r.arm === y);
     if (!xs.length || !ys.length) continue;
     const s = propDiffCI(xs.filter((r) => r.success).length, xs.length, ys.filter((r) => r.success).length, ys.length);
     console.log(`  ${x} − ${y}: success ${fmtSigned(s.delta)} [${fmtSigned(s.lo)}, ${fmtSigned(s.hi)}]   ${what}`);
   }
 
   // --- §7.4's affordance sentence ---
-  const stock = scored.filter((r) => r.arm === 'pw-stock');
+  const stock = claimable.filter((r) => r.arm === 'pw-stock');
   if (stock.length && b.length) {
     const half = (sCI.hi - sCI.lo) / 2;
     const d = rate(stock) - rate(b);
@@ -1936,7 +2280,7 @@ export function report(rows, surfaceOverheadChars = {}) {
   console.log('\nWALL-CLOCK (reported, never verdicted — §2)');
   for (const arm of ARMS) {
     for (const cls of CLASSES) {
-      const rs = scored.filter((r) => r.arm === arm && r.class === cls);
+      const rs = claimable.filter((r) => r.arm === arm && r.class === cls);
       if (!rs.length) continue;
       const ms = rs.map((r) => r.durationMs);
       const up = rs.map((r) => r.upstreamMs ?? 0);
@@ -2031,13 +2375,17 @@ function dryRun(opts) {
     ['act key key', 'browser_press_key { key }', ''],
     ['act hover ref', 'browser_hover { target: ref }', ''],
     ['act scroll deltaY', 'browser_mouse_move_xy{640,360} → browser_mouse_wheel{deltaX:0,deltaY}', '0.0.78 wheel takes no position; the move is how "viewport centre" is honoured. Only the wheel reply is the observation.'],
-    ['browser_snapshot *', 'browser_snapshot {}', 'mode/expand/budgetTokens are Aperture semantics; full honoured, auto upgraded, expand vacuous, budget ignored'],
+    ['browser_snapshot mode/expand', 'browser_snapshot {}', 'Aperture semantics; full honoured, auto upgraded, expand vacuous. {} is the whole page — Playwright\'s own default — delivered and billed in full'],
+    ['browser_snapshot budgetTokens', `(refused: ${JSON.stringify(PW_BUDGET_TOKENS_NOTICE)})`, 'C3 ruling: NO budgetTokens→depth mapping. depth/find are stock-surface affordances, measured in pw-stock. Refusal costs no step'],
     ['task_done', '(handled at the proxy, never forwarded)', ''],
   ];
   for (const [a, b, why] of rows) {
-    console.log(`    ${a.padEnd(26)} -> ${b}`);
-    if (why) console.log(`    ${' '.repeat(26)}    ${why}`);
+    console.log(`    ${a.padEnd(30)} -> ${b}`);
+    if (why) console.log(`    ${' '.repeat(30)}    ${why}`);
   }
+  console.log('');
+  console.log(`  MAX_MCP_OUTPUT_TOKENS  ${MAX_MCP_OUTPUT_TOKENS} — set by the harness in every arm's SDK env (C1)`);
+  console.log(`  contamination bound    ${CHARS_PER_NEW_CONTEXT_TOKEN_CEILING} chars per new-context token (C2c)`);
   console.log('');
   console.log(`  ref grammar     /^e\\d+$/ enforced in pw-sealed; refusal: ${JSON.stringify('error: "<value>" is not a known element ref')}`);
   console.log(`  §3.4 withheld   ${Object.keys(PW_STOCK_WITHHELD).join(', ')}`);
@@ -2084,6 +2432,7 @@ async function main() {
     chromium: chromiumBuild(),
     pwObservationMode: opts.pwObservation,
     launchFlags: { sealed: launchFlagsFor('pw-sealed', '<scratch>'), stock: launchFlagsFor('pw-stock', '<scratch>') },
+    maxMcpOutputTokens: MAX_MCP_OUTPUT_TOKENS,
   });
 
   if (opts.newCohort) {
@@ -2181,7 +2530,7 @@ async function main() {
   }
 
   console.log(`\nhead-to-head · stamp ${stamp} · store ${storePath}`);
-  console.log(`identity: code ${identity.codeVersion} · build ${identity.buildVersion} · pw ${identity.pwVersion} · chromium ${identity.chromium.revision} · pwObservation ${identity.pwObservationMode}\n`);
+  console.log(`identity: code ${identity.codeVersion} · build ${identity.buildVersion} · pw ${identity.pwVersion} · chromium ${identity.chromium.revision} · pwObservation ${identity.pwObservationMode} · maxMcpOutputTokens ${identity.maxMcpOutputTokens}\n`);
 
   const fixtures = await startFixtureServer();
   const collector = await startCollector();
