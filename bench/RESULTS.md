@@ -1163,3 +1163,70 @@ Disclosures, all mandatory beside any citation:
    engine (post-P1), different tasks, never pooled, never CI'd.
 
 ---
+
+
+---
+
+# Size sweep, Tier B — 54 scored episodes, Sonnet 5 (2026-08-02)
+
+`bench/size.mjs --sweep --n 6 --force-budget` · 5 tiers, N=6/6/6/5/4 per arm ·
+codeVersion 05315affc1963c77 (same engine as wave 3) · adjudication:
+`docs/design/sweep-evaluation.md`.
+
+**Page-size sweep, Tier B (2026-08-02, stamp `05315affc1963c77` /
+`469784c4c2c2d98e` — the wave-3 stamp; cross-cites wave 3, not wave 2).**
+On `cart-adjust` with `claude-sonnet-5`, over full-snapshot weights
+1,116–38,081 chars (s1–s5), N = 6/6/6/5/4 per arm (the preregistered
+budget adjustment at s4/s5, then `--force-budget` on the owner's explicit
+in-session headroom ruling), 100% success in both arms at every tier,
+zero truncated observations:
+
+Δ$/ep (diff − re-dump; seeded-bootstrap 90% CIs): s1 −$0.0066
+[−0.0478, +0.0227] · s2 +$0.0009 [−0.0120, +0.0129] · s3 −$0.0338
+[−0.0469, −0.0204] · s4 −$0.1123 [−0.1275, −0.0903] · s5 −$0.1900
+[−0.2377, −0.1420] — at s3/s4/s5 the diff arm is 19% / 39% / 43%
+cheaper per episode.
+
+**The diff arm is never significantly dearer at any measured size, and
+is significantly cheaper from s3 (≈10k chars, ≈2.5k tokens) up, with the
+advantage growing monotonically with page weight.** No crossover exists
+in the measured range. The point estimate changes sign between s2 and
+s3, but the crossover's lower edge is unresolved: at s1–s2 the intervals
+include zero, so this run neither confirms nor refutes the +4–6%
+small-page premium of waves 1–3 (which would be +$0.005–0.007/ep here);
+it caps any such premium at +20% of episode cost at s1 and +10% at s2.
+This is a *one-sided* no-crossover: not the design's "diffs cheaper
+everywhere ≥ s1" (they are only indistinguishable at s1–s2), and not the
+harness's printed "every tier's CI straddles zero" (false for s3–s5; the
+band code hit an untested branch — see sweep-evaluation §2).
+
+Residual behaviour, disclosed: the diff arm bought ~1 voluntary
+observation per episode at every tier (0.80–1.25/ep, flat — no growth
+with page size; re-dump 0.00), costing it +1.0 SDK turn on average —
+usually a 162-char `nochange` check, at worst one voluntary full
+re-dump. Scored intention-to-treat, so this bias runs *against* the diff
+arm and is included in every number above. Excluding it (vol = 0
+episodes only) makes Δ$ more negative at every tier and flips s2's point
+estimate to −$0.0216; no sign conclusion depends on it.
+
+Cost model: the preregistered two-regressor fit passed its R² ≥ 0.9 gate
+(R² = 0.921, n = 54) but recovered a **negative per-turn coefficient**
+(fitted prefix −13,273 chars vs 4,268 measured), so the per-turn /
+per-char decomposition is unidentified on this design and is not cited.
+Descriptive only: cost regressed on conversation-input chars alone gives
+R² = 0.908 with slope 8.1×10⁻⁷ $/char ≈ $3.25/M tokens, consistent with
+the model's input list price. The raw per-tier dollars are the result;
+the fit is a sanity check, not a finding.
+
+Scope: one task (4–6 steps), one model, one engine, synthetic inert
+padding, page weights 1.1k–38k chars. Says nothing about other tasks or
+models, real websites, the truncation regime, task-pressure regimes
+(wave-3-class episodes run 11–23 turns; these run 7–9), or page sizes
+beyond the ladder.
+
+Provenance: `bench/size/results.jsonl` also contains 4 episodes from an
+earlier aborted run (`runId 2026-08-02T05:07:14.729Z`, $0.40, stopped by
+the $60 rule without `--force-budget`); recomputations must filter
+`runId 2026-08-02T05:39:27.192Z`. Actual spend $9.88 vs $88.52
+projected — the linear-in-page-size projection is ~9× pessimistic
+because cost is dominated by the per-episode floor, not page weight.
