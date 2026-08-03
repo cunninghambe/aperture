@@ -176,6 +176,7 @@ export type FillDenyCode =
   | 'CONSENT_RATE_LIMITED'
   | 'CONSENT_NO_WINDOW'
   | 'FILL_REVERTED'
+  | 'FILL_INTERRUPTED'
   | 'FILL_UNCONFIRMED'
   | 'WRITE_FAILED'
   | 'SUBMIT_SKIPPED_FOCUS_LOST'
@@ -222,7 +223,14 @@ export interface FillTargetResult {
  */
 export type FillChannelResult =
   | { ok: true; results: FillTargetResult[]; focusedKey: string | null }
-  | { ok: false; reason: FillSkipReason; key?: string };
+  /**
+   * `wrote` is how many targets had already been written when the refusal
+   * happened — a COUNT, never a value, and absent for every refusal decided
+   * before the write pass began. It exists because the atomic path can now stop
+   * MID-write, when a page mutates a later target from an earlier one's event
+   * handlers, and "nothing was inserted" would be false in that case.
+   */
+  | { ok: false; reason: FillSkipReason; key?: string; wrote?: number };
 
 /** One field the fill path is about to write into. */
 export interface FillTargetRequest {

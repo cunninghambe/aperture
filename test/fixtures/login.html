@@ -46,6 +46,23 @@
     <p id="vaultlog">vault-log: (not rendered)</p>
     <div id="echo"></div>
 
+    <!--
+      THE HREF SINK.
+
+      `redactTainted` scrubbed `value`, `text`, `name` and `rows` and not
+      `href`, which the renderer emits on every full snapshot AND in a diff. An
+      independent review measured the escape on this exact shape:
+
+          link e7 "Continue to checkout" /leak?pw=guard-pw-93a1
+
+      A link's target is the cheapest thing a late-injected skimmer can write —
+      it needs no network of its own — so this is the sink that mattered most
+      for the one adversary needles exist against. The echo button below writes
+      the password into it; G19b asserts it does not come back, and G19's
+      whole-snapshot check fails on it too.
+    -->
+    <p><a id="leaklink" href="/checkout">Continue to checkout</a></p>
+
     <form id="signin">
       <p>
         <label for="u">Email or username</label>
@@ -103,6 +120,7 @@
         const otprow = document.getElementById('otprow');
         const log = document.getElementById('vaultlog');
         const echo = document.getElementById('echo');
+        const leaklink = document.getElementById('leaklink');
 
         // Page shapes. Each guard loads the shape it needs; nothing here is
         // toggled by Aperture, so a mis-shaped page is a visible setup error
@@ -126,6 +144,30 @@
           ov.setAttribute('aria-modal', 'true');
           ov.textContent = 'We use cookies.';
           document.body.appendChild(ov);
+        }
+
+        // THE INTERLEAVING. The write pass's own event turns, weaponised.
+        //
+        // Aperture writes username → password → otp in one task, and every step
+        // of it runs page JavaScript synchronously: `focus()` fires
+        // focus/focusin, and the dispatched `input`/`change` fire theirs. So the
+        // username's handlers ALWAYS get to run before the password is written,
+        // and at c375415 a handler that did `p.type = 'text'` there got the
+        // saved password written into a plain-text field while Aperture
+        // answered `filled username and password …`.
+        //
+        // This is not the same window G22 measures. G22 unmasks while the
+        // CONSENT DIALOG is open, which the validation pass catches; this
+        // unmasks 200ms later, after validation has already passed. The guard
+        // is G22b.
+        if (mode === 'race') {
+          const flip = () => {
+            if (p) p.type = 'text';
+            render();
+          };
+          u.addEventListener('focus', flip);
+          u.addEventListener('input', flip);
+          u.addEventListener('change', flip);
         }
 
         // The snap-back field: a controlled component that rejects the write on
@@ -157,6 +199,10 @@
           // legitimately holds into visible text, where a snapshot or a
           // browser_read would otherwise carry it straight into agent context.
           echo.textContent = 'copy ' + (p ? p.value : '') + (o ? ' ' + o.value : '');
+          // The SECOND sink, and the one that escaped: a link target. It is not
+          // innerText, so browser_read never sees it — only the snapshot line
+          // does, which is why the href gets a guard of its own (G19b).
+          leaklink.href = '/leak?pw=' + (p ? p.value : '') + (o ? '&c=' + o.value : '');
           render();
         });
         document.getElementById('showbtn').addEventListener('click', () => {

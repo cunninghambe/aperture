@@ -324,6 +324,10 @@ ipcRenderer.on(
       // navigation cannot commit in the middle of one. The residual window is
       // not "as long as the human reads the dialog"; it is zero.
       //
+      // THAT ARGUMENT IS ABOUT NAVIGATION AND NOTHING ELSE. One task is not one
+      // turn: the page's own handlers run inside this one, between validation
+      // and the writes. See the write pass for the re-check that closes it.
+      //
       // `location` is read from the isolated world, where the page cannot
       // redefine it.
       if (location.origin !== req.expectedOrigin) {
@@ -341,91 +345,21 @@ ipcRenderer.on(
       };
 
       for (const t of req.targets) {
+        // An identity key the current index does not hold at all. Everything
+        // else — including `isConnected`, whose absence was the old handler's
+        // first defect, "the value is in the page" versus "the value is in a
+        // node nobody can see" — is `checkTarget`'s.
         const el = index.get(t.key);
-        // Writing into a detached node and reporting success was the old
-        // handler's first defect: `isConnected` is the difference between "the
-        // value is in the page" and "the value is in a node nobody can see".
-        if (!el || !el.isConnected) {
+        if (!el) {
           fail(t, 'gone');
           continue;
         }
-        // The top-frame rule, enforced rather than hoped for. A preload without
-        // `nodeIntegrationInSubFrames` runs in the main frame only and the
-        // walker does not descend into subframes, so this should be
-        // unreachable — which is exactly why it is checked rather than
-        // asserted in a comment.
-        if (el.ownerDocument !== document) {
-          fail(t, 'subframe');
+        const bad = checkTarget(t, el);
+        if (bad) {
+          fail(t, bad);
           continue;
         }
-
-        const credential = t.kind !== 'profile';
-        const writable =
-          el instanceof HTMLInputElement ||
-          (!credential && el instanceof HTMLTextAreaElement);
-        if (!writable) {
-          // The old handler `continue`d silently past anything that was not an
-          // input or textarea, so a partial fill was indistinguishable from a
-          // complete one.
-          fail(t, 'not-input');
-          continue;
-        }
-
-        const input = el as HTMLInputElement | HTMLTextAreaElement;
-
-        if (t.kind === 'password') {
-          // A password only ever goes into a masked field. A plain-text field's
-          // value IS serialised by the walker, so a "show password" toggle left
-          // on turns the next snapshot into a disclosure.
-          if (!(input instanceof HTMLInputElement) || input.type !== 'password') {
-            fail(t, 'not-masked');
-            continue;
-          }
-        }
-        if (t.kind === 'otp') {
-          if (
-            !(input instanceof HTMLInputElement) ||
-            input.type === 'password' ||
-            input.type === 'hidden'
-          ) {
-            fail(t, 'not-input');
-            continue;
-          }
-        }
-
-        // "A human could not do it either" — the rule the `select` path already
-        // follows. A click on a disabled control is discarded by the browser; a
-        // write here is not, so nothing else stops it.
-        //
-        // `isDisabled` AND NOT `input.disabled`, and this is a deliberate
-        // strengthening of what docs/design/vaultfill.md section 6.2 asks for.
-        // The IDL `disabled` property reflects the CONTENT ATTRIBUTE only, so it
-        // is `false` for a control disabled by an ancestor `<fieldset disabled>`
-        // — the control is unusable to a human and this write would have gone
-        // straight into it. That is the identical hole the `select` path closed
-        // for exactly this reason (see the `aperture:select` handler below), and
-        // repeating it here would be repeating a bug this codebase has already
-        // paid for once. The change can only ever refuse MORE, never less.
-        // Measured by guard G25b.
-        if (isDisabled(input) || input.readOnly) {
-          fail(t, 'not-editable');
-          continue;
-        }
-
-        if (credential) {
-          const r = input.getBoundingClientRect();
-          if (r.width < MIN_FILL_WIDTH || r.height < MIN_FILL_HEIGHT) {
-            fail(t, 'too-small');
-            continue;
-          }
-        }
-
-        if (!setterFor(input)) {
-          fail(t, 'no-setter');
-          continue;
-        }
-
-        checked.push({ t, el: input });
+        checked.push({ t, el });
       }
 
       // ATOMIC: any failure means nothing is written at all. Because validation
@@ -437,12 +371,66 @@ ipcRenderer.on(
       }
 
       // Write pass.
+      //
+      // VALIDATION AND THE WRITE ARE ONE TASK, BUT THEY ARE NOT ONE TURN, AND
+      // THE DIFFERENCE IS THE WHOLE REASON FOR THE RE-CHECK BELOW.
+      //
+      // The same-task argument above is about NAVIGATION: a cross-document
+      // commit cannot land in the middle of one task, so the origin echo is
+      // exact. It says nothing about the page's own JavaScript, which runs
+      // synchronously and repeatedly inside this loop: `focus()` fires
+      // focus/focusin handlers, and the dispatched `input`/`change` fire
+      // theirs. Targets are written username → password → otp, so the
+      // username's handlers ALWAYS run before the password is written.
+      //
+      // MEASURED at c375415 by an independent review, with a fixture whose
+      // username `focus`/`input` handler mutates the password field: `p.type =
+      // 'text'`, `p.disabled = true` and `p.readOnly = true` each produced
+      // `filled username and password …` while the page's own witness read
+      // `pw-match:true pw-type:text`. The saved password went into an unmasked
+      // field — in cleartext on the human's own screen — and into fields no
+      // human could have typed in, and Aperture reported plain success. Three
+      // pieces of shipped text asserted the opposite.
+      //
+      // So every predicate is re-asserted for each target BETWEEN `focus()` and
+      // `setter.call`. Nothing page-authored runs in that gap: the setter comes
+      // from this isolated world's prototype, so the page cannot intercept it,
+      // and there is no `await` between the two lines. What the page does AFTER
+      // its value has been written is not something any check here can prevent
+      // — the page owns its DOM and already holds the value — and the honest
+      // claim is therefore about the instant of the write, which is what the
+      // tool description and `PASSWORD_FIELD_NOT_MASKED` now say.
+      //
+      // `checkTarget` is the SAME function the pre-pass used, deliberately: two
+      // spellings of one predicate set is how the two passes would drift, and
+      // the drift would be silent. Guarded by G22b.
       const written: { t: FillTarget; el: HTMLInputElement | HTMLTextAreaElement }[] = [];
       const reverted = new Set<string>();
       for (const { t, el } of checked) {
         const input = el as HTMLInputElement | HTMLTextAreaElement;
-        const setter = setterFor(input)!;
         input.focus();
+
+        const bad = checkTarget(t, input);
+        if (bad) {
+          if (req.atomic) {
+            // `wrote` is what keeps main's answer true. A refusal that arrives
+            // after an earlier target was already written is NOT the "nothing
+            // happened, take the taint back off" case, and main must not say
+            // "nothing was inserted" about a form that has a value in it.
+            // A count, not a value — this channel carries no secrets.
+            for (const t2 of req.targets) t2.value = '';
+            return reply({
+              ok: false,
+              reason: bad,
+              key: t.key,
+              wrote: written.length,
+            });
+          }
+          fail(t, bad);
+          continue;
+        }
+
+        const setter = setterFor(input)!;
         setter.call(input, t.value);
         // React and friends listen for these; setting .value alone leaves
         // controlled components with stale state.
@@ -503,6 +491,83 @@ ipcRenderer.on(
     }
   },
 );
+
+/**
+ * Every reason a target may not be written, in one place.
+ *
+ * ONE SPELLING, TWO CALL SITES. The pre-pass (which decides whether an atomic
+ * fill happens at all) and the re-check (which decides whether THIS write
+ * happens, immediately before it) must ask exactly the same question. Written
+ * out twice they would drift, and the drift would be silent in the direction
+ * that matters — the re-check is the one a hostile page is trying to get past.
+ *
+ * Returns `null` when the target is writable, or the fixed-vocabulary reason
+ * why not. Order matters: connectivity before frame before shape, so the reason
+ * reported is the first true thing about the element rather than the last.
+ */
+function checkTarget(t: FillTarget, el: HTMLElement): FillReason | null {
+  if (!el.isConnected) return 'gone';
+
+  // The top-frame rule, enforced rather than hoped for. A preload without
+  // `nodeIntegrationInSubFrames` runs in the main frame only and the walker
+  // does not descend into subframes, so this should be unreachable — which is
+  // exactly why it is checked rather than asserted in a comment.
+  if (el.ownerDocument !== document) return 'subframe';
+
+  const credential = t.kind !== 'profile';
+  const writable =
+    el instanceof HTMLInputElement || (!credential && el instanceof HTMLTextAreaElement);
+  // The old handler `continue`d silently past anything that was not an input or
+  // textarea, so a partial fill was indistinguishable from a complete one.
+  if (!writable) return 'not-input';
+
+  const input = el as HTMLInputElement | HTMLTextAreaElement;
+
+  // A password only ever goes into a masked field, AT THE INSTANT IT IS
+  // WRITTEN. Two reasons, and the first one is the one that survives the taint
+  // mechanism: a plain-text field puts the password in cleartext on the human's
+  // own screen, which is what the masked-field rule is for at the human end.
+  // The second is the snapshot — the walker serialises a text input's value,
+  // and taint covers the key it knows about, not one the page substitutes.
+  if (t.kind === 'password') {
+    if (!(input instanceof HTMLInputElement) || input.type !== 'password') {
+      return 'not-masked';
+    }
+  }
+  if (t.kind === 'otp') {
+    if (
+      !(input instanceof HTMLInputElement) ||
+      input.type === 'password' ||
+      input.type === 'hidden'
+    ) {
+      return 'not-input';
+    }
+  }
+
+  // "A human could not do it either" — the rule the `select` path already
+  // follows. A click on a disabled control is discarded by the browser; a write
+  // here is not, so nothing else stops it.
+  //
+  // `isDisabled` AND NOT `input.disabled`, and this is a deliberate
+  // strengthening of what docs/design/vaultfill.md section 6.2 asks for. The
+  // IDL `disabled` property reflects the CONTENT ATTRIBUTE only, so it is
+  // `false` for a control disabled by an ancestor `<fieldset disabled>` — the
+  // control is unusable to a human and this write would have gone straight into
+  // it. That is the identical hole the `select` path closed for exactly this
+  // reason (see the `aperture:select` handler below), and repeating it here
+  // would be repeating a bug this codebase has already paid for once. The
+  // change can only ever refuse MORE, never less. Measured by guard G25b.
+  if (isDisabled(input) || input.readOnly) return 'not-editable';
+
+  if (credential) {
+    const r = input.getBoundingClientRect();
+    if (r.width < MIN_FILL_WIDTH || r.height < MIN_FILL_HEIGHT) return 'too-small';
+  }
+
+  if (!setterFor(input)) return 'no-setter';
+
+  return null;
+}
 
 /**
  * The native value setter from THIS world's prototype.

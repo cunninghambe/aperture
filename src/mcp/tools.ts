@@ -264,9 +264,11 @@ const DENY_STRINGS: Record<FillDenyCode, string> = {
     'could not type into it either. Nothing was inserted.',
   PASSWORD_FIELD_NOT_MASKED:
     'refused: the password field is showing its contents as plain text — a ' +
-    '"show password" toggle is probably on. Aperture only inserts a password ' +
-    'into a masked field, because a plain-text field\'s value appears in the ' +
-    'page snapshot. Ask the human to hide it, then call again.',
+    '"show password" toggle is probably on, or a script on this page turned ' +
+    'the masking off. Aperture writes a password only into a field that is ' +
+    'masked at the instant it writes, because a plain-text field puts the ' +
+    'password on the human\'s own screen in the clear. Ask the human to hide ' +
+    'it, then call again.',
   FIELD_IN_SUBFRAME:
     'refused: that field is inside an embedded frame. Aperture fills saved ' +
     'sign-ins into the top-level page only. The human must sign in themselves ' +
@@ -291,6 +293,11 @@ const DENY_STRINGS: Record<FillDenyCode, string> = {
     'warning: the values were inserted and the page did not keep them — a ' +
     'script on this page cleared or rewrote «n» of «m» fields. The sign-in is ' +
     'NOT filled. Tell the human; this site may need them to type it.',
+  FILL_INTERRUPTED:
+    'warning: this page changed the sign-in form while Aperture was filling ' +
+    'it — «why» — so Aperture stopped partway. «n» of «m» fields were ' +
+    'written; the rest were not, and the sign-in is NOT filled. Do NOT retry. ' +
+    'Tell the human what happened and let them check the form themselves.',
   FILL_UNCONFIRMED:
     'unknown: Aperture inserted the values but the page did not confirm within ' +
     '5s. It may or may not be filled. Do NOT call this again — call ' +
@@ -332,13 +339,25 @@ export const VAULT_FILL_SCHEMA_KEYS = Object.keys(VAULT_FILL_SCHEMA.shape);
 /** Exported for the totality and no-record-origin tests. */
 export function denyString(
   code: FillDenyCode,
-  vars: { origin?: string; n?: number; m?: number; candidates?: string } = {},
+  vars: {
+    origin?: string;
+    n?: number;
+    m?: number;
+    candidates?: string;
+    /**
+     * FILL_INTERRUPTED only. Drawn from `SKIP_PROSE` — Aperture's own fixed
+     * vocabulary, keyed by the preload's closed reason union — so this slot
+     * cannot carry a page-authored byte however it is called.
+     */
+    why?: string;
+  } = {},
 ): string {
   return DENY_STRINGS[code]
     .replace(/«origin»/g, vars.origin ?? '')
     .replace(/«n»/g, vars.n === undefined ? '' : String(vars.n))
     .replace(/«m»/g, vars.m === undefined ? '' : String(vars.m))
-    .replace(/«candidates»/g, vars.candidates ?? '');
+    .replace(/«candidates»/g, vars.candidates ?? '')
+    .replace(/«why»/g, vars.why ?? '');
 }
 
 export { DENY_STRINGS };
@@ -744,8 +763,12 @@ export function registerBrowserTools(
         'is no tool anywhere in this server that returns one.\n\n' +
         'You name the saved sign-in. You do NOT name the field: Aperture ' +
         'chooses which field on the page receives which value, and it will ' +
-        'refuse rather than guess. A password is only ever inserted into a ' +
-        'masked password field in the top-level page.\n\n' +
+        'refuse rather than guess. A password is only ever written into a ' +
+        'masked password field in the top-level page, re-checked at the ' +
+        'instant of the write — if the page changes that field mid-fill, ' +
+        'Aperture stops and tells you rather than writing. What a page does ' +
+        'with a value after it has been written is the page\'s own business; ' +
+        'it holds the value by then.\n\n' +
         'Calling action:"apply" raises a confirmation dialog that only the ' +
         'human can approve. You cannot see it, cannot skip it, and no ' +
         'parameter bypasses it — do not promise the human it will not appear. ' +
@@ -989,6 +1012,22 @@ export function registerBrowserTools(
         // Not a refusal: the page never answered, so whether anything landed is
         // genuinely unknown and the taint and needles must stay.
         return text(denyString('FILL_UNCONFIRMED'));
+      }
+      if (res.wrote) {
+        // The refusal arrived MID-write: the page changed a later target from
+        // an earlier one's event handlers, and the preload stopped rather than
+        // writing into whatever it had become. Values are already in the form,
+        // so this is the not-landed case's rule and not the nothing-happened
+        // one — taint and needles STAY, and the answer must not say "nothing
+        // was inserted".
+        return text(
+          denyString('FILL_INTERRUPTED', {
+            n: res.wrote,
+            m: fills.length,
+            // Aperture's own fixed vocabulary, not the page's bytes.
+            why: SKIP_PROSE[res.reason],
+          }),
+        );
       }
       unmarkTainted(id, keys);
       dropNeedles(id, needleValues);

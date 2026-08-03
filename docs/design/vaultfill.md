@@ -309,8 +309,8 @@ nag surface.
 | 9 | `vault.touch()`, but only when `via === 'human'` — a human just proved presence (§9.4) | — |
 | 10 | Resolve secrets: `vault.secretsForFill(entryId, committedOrigin)`; TOTP generated here, at the last possible moment (§7) | `TOTP_ALREADY_ISSUED` · `TOTP_UNAVAILABLE` |
 | 11 | `markTainted(tabId, keys)` and `registerNeedles(tabId, values)` — **before** the write, so no concurrent snapshot can read a value that is already in the DOM | — |
-| 12 | `requestFill(wc, { expectedOrigin, atomic: true, targets })` (§6). The preload re-checks origin, kind, maskedness, frame, connectivity, editability and size in ONE task, then writes, then verifies at T+250ms | see §6.3 and §10 |
-| 13 | On a global refusal (`ok:false`) — nothing was written, because validation is complete before the first write — `unmarkTainted` and drop the needles | — |
+| 12 | `requestFill(wc, { expectedOrigin, atomic: true, targets })` (§6). The preload re-checks origin, kind, maskedness, frame, connectivity, editability and size in ONE task, re-asserts the per-target checks immediately before each write, then verifies at T+250ms | see §6.3 and §10 |
+| 13 | On a global refusal (`ok:false`) with `wrote` absent or 0 — nothing was written — `unmarkTainted` and drop the needles. With `wrote > 0` the page moved the goalposts mid-write: values are in the form, so taint and needles STAY and the answer is `FILL_INTERRUPTED` | `FILL_INTERRUPTED` |
 | 14 | On success: `vault.noteUsed(entryId)` (persisting, best-effort, never fails the fill) | — |
 | 15 | If `submit` and every target landed and `focusedKey` is still the password field: CDP Enter, witnessed (§8.3) | `SUBMIT_SKIPPED_FOCUS_LOST` · `SUBMIT_UNCONFIRMED` |
 | 16 | Report (§11) | — |
@@ -476,6 +476,16 @@ residual window is not "as long as the human reads the dialog" — it is zero.
 (`location` is read from the isolated world, where the page cannot redefine
 it.)
 
+**That argument is about navigation and nothing else, and this section's first
+version drew a wider conclusion from it than it can carry.** One task is not one
+*turn*: `focus()` and the dispatched `input`/`change` run the page's own
+handlers synchronously, inside this same task, after validation and between the
+remaining writes. An independent review measured the consequence at `c375415` —
+a username `focus` handler doing `p.type = 'text'` got the saved password
+written into a plain-text field while Aperture answered `filled username and
+password …`. The write pass below therefore re-asserts every predicate
+immediately before each individual write.
+
 Then, for every target, in order, **before any write** — collecting failures,
 not writing on the first pass:
 
@@ -486,19 +496,45 @@ not writing on the first pass:
 | `el instanceof HTMLInputElement` (credential kinds; profile also allows `HTMLTextAreaElement`) | `not-input` |
 | kind `password` ⇒ `el.type === 'password'` | `not-masked` |
 | kind `otp` ⇒ `el.type !== 'password'` and not `hidden` | `not-input` |
-| `!el.disabled && !el.readOnly` | `not-editable` |
+| `!isDisabled(el) && !el.readOnly` | `not-editable` |
 | `r = el.getBoundingClientRect(); r.width >= 16 && r.height >= 8` (credential kinds only) | `too-small` |
 | the value setter exists on the prototype | `no-setter` |
+
+(`isDisabled` and not `el.disabled`: the IDL property reflects the content
+attribute only, so it is `false` for a control disabled by an ancestor
+`<fieldset disabled>`. §6.2's original `!el.disabled` was implemented literally,
+found to let a password land in a disabled field, and strengthened. G25b.)
+
+Those checks live in **one function, called from both passes**. Two spellings of
+one predicate set is how they would drift, and the drift would be silent in the
+direction that matters.
 
 If `atomic` and any target failed validation: reply `{ ok:false, reason, key }`
 and **write nothing**. If not `atomic`: skip the failed targets, record their
 reasons, and write the rest.
 
-Write pass, per surviving target: `el.focus()`, then
-`setter.call(el, value)`, then `dispatchEvent(new Event('input', {bubbles:true}))`,
-then `new Event('change', {bubbles:true})`. Immediately re-read `el.value`; if
-it differs from what was written, mark that target `landed:false` and record
-`reverted` (this catches `maxlength` truncation and synchronous sanitisers).
+Write pass, per surviving target: `el.focus()`, **then re-run the whole check
+list above for that target**, then `setter.call(el, value)`, then
+`dispatchEvent(new Event('input', {bubbles:true}))`, then
+`new Event('change', {bubbles:true})`. Immediately re-read `el.value`; if it
+differs from what was written, mark that target `landed:false` and record
+`reverted` (this catches synchronous sanitisers; NOT `maxlength`, which does not
+constrain a programmatic assignment — §17.8).
+
+The re-check is what makes the invariant true rather than intended: nothing
+page-authored runs between it and `setter.call` (the setter is this world's
+prototype setter, so the page cannot intercept it, and there is no `await`
+between the two lines). If it fails under `atomic`, the preload **stops** and
+replies `{ ok:false, reason, key, wrote }`, where `wrote` is the number of
+targets already written — a count, never a value. Main uses it to keep taint and
+needles in place and to answer `FILL_INTERRUPTED`, which does not claim that
+nothing was inserted, because by then something was. Under `!atomic` the target
+is skipped and recorded like any other.
+
+What this does **not** claim: that the field is still masked, connected or
+editable *afterwards*. A page owns its DOM and already holds the value it was
+given; the honest invariant is about the instant of the write, and the tool
+description and `PASSWORD_FIELD_NOT_MASKED` say exactly that. G22b.
 
 Then `setTimeout(250)`, and in the callback: for each written target, re-read
 and compare, producing the final `landed` boolean. Clear the closure's copies
@@ -724,7 +760,9 @@ scopes) does not stop a patient one.
 Every refusal is one of these codes. Each code maps to **exactly one wire
 string**, defined once in `src/mcp/tools.ts` as a `Record<DenyCode, string>` so
 the mapping is total and a new code cannot be added without a string. The only
-values ever interpolated are `safeOrigin()` output, integers, and — for
+values ever interpolated are `safeOrigin()` output, integers, one phrase drawn
+from `SKIP_PROSE` (Aperture's own fixed vocabulary, keyed by the preload's
+closed reason union — `FILL_INTERRUPTED`'s `«why»`), and — for
 `AMBIGUOUS_FIELDS` alone — page-authored labels, which go inside an envelope.
 
 | Code | Wire text (verbatim; `«…»` marks the only interpolations) |
@@ -744,7 +782,7 @@ values ever interpolated are `safeOrigin()` output, integers, and — for
 | `FIELD_GONE` | `refused: the field Aperture chose is no longer on the page. Nothing was inserted. Call browser_snapshot and try again.` |
 | `FIELD_OBSTRUCTED` | `refused: the password field is covered by another element — likely a modal or a cookie banner. Nothing was inserted. Dismiss it first.` |
 | `FIELD_NOT_EDITABLE` | `refused: the field Aperture chose is disabled or read-only, so a human could not type into it either. Nothing was inserted.` |
-| `PASSWORD_FIELD_NOT_MASKED` | `refused: the password field is showing its contents as plain text — a "show password" toggle is probably on. Aperture only inserts a password into a masked field, because a plain-text field's value appears in the page snapshot. Ask the human to hide it, then call again.` |
+| `PASSWORD_FIELD_NOT_MASKED` | `refused: the password field is showing its contents as plain text — a "show password" toggle is probably on, or a script on this page turned the masking off. Aperture writes a password only into a field that is masked at the instant it writes, because a plain-text field puts the password on the human's own screen in the clear. Ask the human to hide it, then call again.` |
 | `FIELD_IN_SUBFRAME` | `refused: that field is inside an embedded frame. Aperture fills saved sign-ins into the top-level page only. The human must sign in themselves here.` |
 | `FIELD_TOO_SMALL` | `refused: the field Aperture chose is too small to be a real input, which is what a hidden trap field looks like. Nothing was inserted.` |
 | `ORIGIN_CHANGED` | `refused: the page changed while the human was deciding, so Aperture did not write anything. The approval was for «origin» and the page is no longer on it. Nothing was inserted. Re-read the page and start again.` |
@@ -752,6 +790,7 @@ values ever interpolated are `safeOrigin()` output, integers, and — for
 | `CONSENT_RATE_LIMITED` | `refused: too many confirmation prompts in a short window. Aperture has paused filling; the human must re-approve in the browser.` |
 | `CONSENT_NO_WINDOW` | `refused: Aperture has no window to show the confirmation in. Nothing was inserted.` |
 | `FILL_REVERTED` | `warning: the values were inserted and the page did not keep them — a script on this page cleared or rewrote «n» of «m» fields. The sign-in is NOT filled. Tell the human; this site may need them to type it.` |
+| `FILL_INTERRUPTED` | `warning: this page changed the sign-in form while Aperture was filling it — «why» — so Aperture stopped partway. «n» of «m» fields were written; the rest were not, and the sign-in is NOT filled. Do NOT retry. Tell the human what happened and let them check the form themselves.` |
 | `FILL_UNCONFIRMED` | `unknown: Aperture inserted the values but the page did not confirm within 5s. It may or may not be filled. Do NOT call this again — call browser_snapshot and look at the form.` |
 | `WRITE_FAILED` | `error: the insertion failed inside the page. Nothing was left in a known state; call browser_snapshot and look at the form.` |
 | `SUBMIT_SKIPPED_FOCUS_LOST` | `filled, but not submitted: focus moved off the field before Aperture could press Enter, so it did not press it anywhere else. Click the sign-in button yourself.` |
@@ -798,6 +837,19 @@ into a `<div>` is redacted in **snapshots**, not only in `browser_read`), and
 `redactFreeText` (so it is redacted in `browser_read` too). Lifetime: cleared
 on `invalidate(tabId, true)` (document replaced), on vault lock, on tab close,
 and on a 10-minute timer, whichever is first.
+
+**Every serialised string field is a sink, and the first version of this missed
+one.** `redactTainted` scrubbed `value`, `text`, `name` and `rows`;
+`SnapshotNode.href` is the fifth, the renderer emits it on both the full
+snapshot and the diff, and an independent review measured the escape at
+`c375415`: after a successful fill, a page writing `a.href = '/leak?pw=' +
+value` produced `link e7 "Continue to checkout" /leak?pw=<the password>` in the
+next snapshot. It is also the sink `browser_read` structurally cannot see — a
+link target is not `innerText` — and the cheapest thing a late-injected skimmer
+can write, which is the exact adversary needles exist against. `href` is now
+scrubbed with the rest, with its own whitespace-free marker
+(`REDACTED_HREF = '(filled,value-withheld)'`) because an href is rendered
+unquoted and every reader of that line takes it as one token. G19 and G19b.
 
 Three honest statements about this:
 
@@ -901,8 +953,11 @@ this server that returns one.
 
 You name the saved sign-in. You do NOT name the field: Aperture chooses which
 field on the page receives which value, and it will refuse rather than guess.
-A password is only ever inserted into a masked password field in the top-level
-page.
+A password is only ever written into a masked password field in the top-level
+page, re-checked at the instant of the write — if the page changes that field
+mid-fill, Aperture stops and tells you rather than writing. What a page does
+with a value after it has been written is the page's own business; it holds the
+value by then.
 
 Calling action:"apply" raises a confirmation dialog that only the human can
 approve. You cannot see it, cannot skip it, and no parameter bypasses it — do
@@ -1057,9 +1112,11 @@ mitigation.
 | G18a | after apply, `pw-match:true` **and** `visible-decoy-set:false`: the password reached the masked field and only it |
 | G18b | on the fixture's snap-back field (an `input` listener that clears it), the result is `FILL_REVERTED`, not a success line |
 | G19 | after apply, `browser_snapshot` and `browser_read` contain neither the password nor the code, including after the fixture's "echo to a div" button copies the value into visible text |
+| G19b | the same echo button also writes the password into a link's `href`, and the rendered link line carries the marker rather than the value. Split from G19 because `href` fails for a different reason (it is a fifth serialised field the scrub forgot) and because `browser_read` cannot see it at all |
 | G20 | with `--e2e-consent-delay-ms=1500` and the fixture navigating at 800ms, the result is `ORIGIN_CHANGED` and the witness shows nothing written on either document |
 | G21 | with the password field removed by a click between plan and apply, the result is `FIELD_GONE` and nothing is written |
 | G22 | with "show password" toggled on, the result is `PASSWORD_FIELD_NOT_MASKED` and nothing is written |
+| G22b | with the fixture unmasking the password field from the USERNAME field's own `focus`/`input` handler — i.e. inside the write pass, after validation passed — the password does not land (`pw-match:false` with `pw-masked:false`, so the flip demonstrably happened) and the answer is `FILL_INTERRUPTED`. G22's window is the consent dialog; this is the window an attacker would actually use |
 | G23 | on `signup.html` (password + confirm), the result is `AMBIGUOUS_FIELDS`, no dialog, nothing written |
 | G24 | with an `aria-modal` overlay over the form, the result is `FIELD_OBSTRUCTED` and nothing is written |
 | G25 | with the password field `readonly`, the result is `FIELD_NOT_EDITABLE` and nothing is written |
@@ -1106,11 +1163,17 @@ others stay green, then revert. Record each result.
 | S8 | accept an `ORIGIN_MISMATCH` when a (newly added) `force` flag is passed | G17a |
 | S9 | let credential scope consult `grants` | G27b |
 | S10 | delete the `disabled`/`readOnly` check | G25 |
+| S11 | write `input.disabled` instead of `isDisabled(input)` — §6.2's check, literally | G25b |
+| S12 | drop `href` from `redactTainted`'s needle branch | G19b |
+| S13 | delete the write-pass re-check (`checkTarget` between `focus()` and `setter.call`) | G22b |
 
 A sabotage that does **not** turn its guard red is a defective guard, and it is
 fixed before the change lands. This table is what replaces the missing
 historical RED, and it is strictly stronger: it demonstrates discrimination
-against ten specific regressions rather than against one historical defect.
+against a named list of specific regressions rather than against one historical
+defect. (S11–S13 were added as they were found: S11 by the builder, S12 and S13
+by the review that blocked `c375415`. The recorded results are in
+`vaultfill-red-record.md` §2.)
 
 ### 15.4 Acceptance battery
 

@@ -389,6 +389,26 @@ function redactTainted(root: SnapshotNode, tainted: Set<string>, needles: string
       if (n.text) n.text = scrub(n.text, needles);
       if (n.name) n.name = scrub(n.name, needles);
       if (n.rows) n.rows = n.rows.map((row) => row.map((cell) => scrub(cell, needles)));
+      // `href` is the FIFTH serialised, page-controlled field, and it was the
+      // one this function forgot. An independent review measured it: after a
+      // successful fill, a page that writes `a.href = '/leak?pw=' + value`
+      // produced `link e7 "Continue to checkout" /leak?pw=<the password>` on
+      // the very next full snapshot, and in the diff too (`render.ts` emits it
+      // in both). This codebase has now had two findings on this one field —
+      // "a link's href could change under a stable label" was the first — so
+      // the rule is worth stating rather than re-deriving: EVERY string on
+      // SnapshotNode that the renderer can emit is a redaction sink.
+      //
+      // Its own marker, because an href is rendered UNQUOTED and every reader
+      // of that line — `render.ts`'s format and the bench stream reader alike —
+      // takes it as one whitespace-free token, which is exactly why
+      // `walker.ts`'s `sanitizeHref` strips whitespace on the way in. Putting
+      // spaces back here would undo that.
+      //
+      // Only the needle branch, deliberately: the tainted branch is about
+      // FIELDS Aperture wrote into, and an <input> has no href. Guarded by G19b
+      // (and by G19, whose whole-snapshot check covers this line too).
+      if (n.href) n.href = scrub(n.href, needles, REDACTED_HREF);
     }
     for (const c of n.children) stack.push(c);
   }
@@ -397,10 +417,17 @@ function redactTainted(root: SnapshotNode, tainted: Set<string>, needles: string
 /** The one marker, defined once. `tools.ts` imports it rather than repeating it. */
 export const REDACTED = '(filled, value withheld)';
 
-function scrub(s: string, needles: string[]): string {
+/**
+ * The same words, with no whitespace, for the one field that is rendered
+ * unquoted. See the `href` branch of `redactTainted` for why a space here
+ * would break the line format rather than merely look odd.
+ */
+export const REDACTED_HREF = '(filled,value-withheld)';
+
+function scrub(s: string, needles: string[], marker = REDACTED): string {
   let out = s;
   for (const needle of needles) {
-    if (out.includes(needle)) out = out.split(needle).join(REDACTED);
+    if (out.includes(needle)) out = out.split(needle).join(marker);
   }
   return out;
 }

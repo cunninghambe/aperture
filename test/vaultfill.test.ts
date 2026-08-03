@@ -306,6 +306,26 @@ describe('the deny-string table', () => {
     expect(denyString('FILL_REVERTED', { n: 1, m: 2 })).not.toMatch(/«|»/);
     expect(denyString('TOTP_ALREADY_ISSUED', { n: 12 })).not.toMatch(/«|»/);
     expect(denyString('AMBIGUOUS_FIELDS', { n: 2, candidates: 'x' })).not.toMatch(/«|»/);
+    expect(
+      denyString('FILL_INTERRUPTED', {
+        n: 1,
+        m: 2,
+        why: 'field is not a masked password field',
+      }),
+    ).not.toMatch(/«|»/);
+  });
+
+  it('14c. the one refusal that can follow a partial write never claims nothing was inserted', () => {
+    // The preload can now stop MID-write, because a page can mutate a later
+    // target from an earlier one's event handlers. Every OTHER refusal on this
+    // path is decided before the first write and several of them say so in
+    // those words; this one cannot, and a wrong "nothing was inserted" on a
+    // form that has a value in it is the false-report class this whole design
+    // is built against.
+    const s = denyString('FILL_INTERRUPTED', { n: 1, m: 2, why: 'x' });
+    expect(s).not.toMatch(/[Nn]othing was inserted/);
+    expect(s).toMatch(/1 of 2 fields were written/);
+    expect(s).toMatch(/NOT filled/);
   });
 
   it('15. ORIGIN_MISMATCH names the PAGE, never the record', () => {

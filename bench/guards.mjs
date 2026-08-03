@@ -253,6 +253,7 @@ const SAYS = {
   CONSENT_COOLDOWN: 'declined this fill less than a minute ago',
   TOTP_ALREADY_ISSUED: 'already inserted in the current 30-second window',
   FILL_REVERTED: 'the page did not keep them',
+  FILL_INTERRUPTED: 'changed the sign-in form while Aperture was filling it',
   FILLED: 'value withheld',
 };
 
@@ -961,6 +962,31 @@ const beta = refFor('Beta action', 'button');
           `browser_read carries it: ${read.includes(SEEDED_PW)}; ` +
           `marker present in read: ${/value withheld/.test(read)}`,
       );
+
+      // --- G19b: the href sink, named and asserted on its own ---------------
+      //
+      // Split from G19 rather than folded into it, because the two sinks fail
+      // for different reasons and an aggregate `!includes(pw)` would say only
+      // "something leaked". `href` is the field this codebase forgets: an
+      // independent review at c375415 measured
+      // `link e7 "Continue to checkout" /leak?pw=guard-pw-93a1` surviving the
+      // needle scrub, because `redactTainted` covered value/text/name/rows and
+      // not href. It is also the sink `browser_read` CANNOT see — a link target
+      // is not innerText — so only the snapshot line can catch it.
+      //
+      // The assertion is on the link's OWN line, not on the whole snapshot, so
+      // it stays about this field even if some other sink regresses.
+      const leakLine =
+        after.split('\n').find((l) => l.includes('/leak?pw=')) ??
+        after.split('\n').find((l) => l.includes('Continue to checkout')) ??
+        '';
+      check(
+        'G19b',
+        'the same credential does not escape through a link href, which browser_read cannot see at all',
+        leakLine !== '' && !leakLine.includes(SEEDED_PW) &&
+          leakLine.includes('/leak?pw=') && /value-withheld/.test(leakLine),
+        `link line: ${leakLine.trim().slice(0, 160) || '(no line carrying the echoed link)'}`,
+      );
     }
   }
 
@@ -1031,6 +1057,37 @@ const beta = refFor('Beta action', 'button');
       out.includes(SAYS.PASSWORD_FIELD_NOT_MASKED) && /pw-match:false/.test(w) &&
         /user-match:false/.test(w),
       `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G22b: the page unmasks the field INSIDE the write pass --------------
+  //
+  // The window G22 cannot reach, and the one an attacker would actually use.
+  // Validation and the writes are one task, so no navigation can land between
+  // them — but they are not one TURN: `focus()` and the dispatched
+  // `input`/`change` run the page's own handlers synchronously, and the write
+  // order is username → password, so the username's handlers always run first.
+  // A handler doing `p.type = 'text'` there was measured at c375415 putting the
+  // saved password into a plain-text field while Aperture answered
+  // `filled username and password …`.
+  //
+  // The page's own witness is what makes this readable: `pw-masked:false`
+  // proves the flip really happened (so the guard is not vacuous), and
+  // `pw-match:false` proves the password did not go in anyway. `user-match:true`
+  // is the honest part — atomic means "no writes if validation fails", not
+  // rollback, and the username written before the refusal stays where it is.
+  {
+    await goFixture(BASE, 'login.html', 'mode=race');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const w = await vwitness();
+    check(
+      'G22b',
+      'a password field unmasked from the username field\'s own handler, mid-write, does not receive the password',
+      out.includes(SAYS.FILL_INTERRUPTED) && !out.includes(SAYS.FILLED) &&
+        /pw-match:false/.test(w) && /pw-masked:false/.test(w) &&
+        /user-match:true/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 200)}\n        witness: ${w}`,
     );
   }
 
