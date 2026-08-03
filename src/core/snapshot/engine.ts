@@ -1,10 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, type WebContents } from 'electron';
 import { RefRegistry, assignRefs } from './registry.js';
-import { diffSnapshots, firstDifferingCell, indexByKey } from './diff.js';
+import {
+  diffSnapshots,
+  firstDifferingCell,
+  indexByKey,
+  retirePositionalRebinds,
+} from './diff.js';
 import { renderDiff, renderFull, renderUnchanged } from './render.js';
 import { VolatilityTracker } from './volatility.js';
-import type { Observation, Snapshot, SnapshotNode } from './types.js';
+import type { Observation, RefEntry, Snapshot, SnapshotNode } from './types.js';
 import type { FillChannelResult, FillRequest, FillTargetRequest } from '@shared/types.js';
 
 /**
@@ -207,6 +212,13 @@ export async function observe(
   // diffing, rendering, form matching — can observe a sensitive value.
   redactTainted(r.root, st.tainted, needlesFor(tabId));
 
+  // Positional families whose membership changed since the last walk lose
+  // their refs BEFORE revival can rebind them — every delivery path, full or
+  // diff (docs/design/tier5.md §2.3). First observation has nothing to compare.
+  const retired = st.last
+    ? retirePositionalRebinds(st.last.root, r.root, st.registry)
+    : undefined;
+
   // Assign refs across the whole tree before diffing, so both sides speak the
   // same names. This also re-attaches refs to nodes the registry already
   // knows even when their role is not addressable — see registry.assignRefs
@@ -237,6 +249,7 @@ export async function observe(
   const result = diffSnapshots(st.last.root, r.root, st.registry, {
     isVolatile: (key) => st.volatility.isVolatile(key),
     wasEmitted: (ref) => st.registry.wasEmitted(ref),
+    retiredRef: retired ? (key) => retired.get(key) : undefined,
   });
 
   // A rows-carrying update has no `text` of its own, and a table that rewrites
@@ -609,9 +622,21 @@ export function unmarkTainted(tabId: string, keys: string[]): void {
   for (const k of keys) st.tainted.delete(k);
 }
 
-/** Resolve a ref to the identity key the page-side index is keyed on. */
+/** Resolve a ref to the identity key the page-side index is keyed on.
+ *  Dead refs resolve to null: a retired positional ref's KEY is still live in
+ *  the page index — held by whatever row occupies the position now — and
+ *  resolving it is exactly the silent one-row-off landing (tier5 §1.2). */
 export function keyForRef(tabId: string, ref: string): string | null {
-  return stateFor(tabId).registry.resolve(ref)?.key ?? null;
+  const e = stateFor(tabId).registry.resolve(ref);
+  if (!e || e.state === 'dead') return null;
+  return e.key;
+}
+
+/** The full registry entry, dead or alive. The act path needs the
+ *  distinction: a DEAD ref refuses with recovery attached, an UNKNOWN ref
+ *  refuses bare (tier5 §3.4). */
+export function refEntry(tabId: string, ref: string): RefEntry | undefined {
+  return stateFor(tabId).registry.resolve(ref);
 }
 
 /**

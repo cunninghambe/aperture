@@ -13,6 +13,7 @@ import {
   observe,
   keyForRef,
   redactFreeText,
+  refEntry,
   registerNeedles,
   requestRead,
   requestSelect,
@@ -1229,12 +1230,27 @@ export function registerBrowserTools(
       }
 
       if (!ref) return text(`error: ref required for ${action}`);
-      const key2 = keyForRef(id, ref);
-      if (!key2) {
+      const entry = refEntry(id, ref);
+      if (!entry) {
         return text(
           `error: ${ref} is not a known element. Call browser_snapshot to re-read the page.`,
         );
       }
+      if (entry.state === 'dead') {
+        // A retired or destroyed ref. Its KEY may still be live in the page index
+        // — held by a different element than the one the agent read — so resolving
+        // it would land the act on the wrong element in silence (tier5 §1.2). Same
+        // reply shape as every other could-not-act: the observation IS the
+        // recovery, and the restatement that retired this ref already named its
+        // successors.
+        const { text: obs } = await observe(id, wc, { full: wantFull, budgetTokens });
+        return text(
+          `error: ${ref} could not be acted on (gone).\n` +
+            'The page as it stands now:\n' +
+            untrusted(safeOrigin(t.info(id)?.url ?? ''), obs),
+        );
+      }
+      const key2 = entry.key;
       // Acting on an element is the strongest possible signal that the agent
       // cares about it — clear any volatility suppression it accumulated.
       agentTouched(id, key2);

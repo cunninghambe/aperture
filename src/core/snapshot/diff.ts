@@ -18,6 +18,11 @@ export interface DiffOptions {
   isVolatile?: (key: string) => boolean;
   /** Whether the model has ever been shown this ref. */
   wasEmitted?: (ref: string) => boolean;
+  /** Refs the pre-pass retired this observation, by key — see
+   *  `retirePositionalRebinds`. A surviving key's old ref is dead but no longer
+   *  reachable through `byKeyLookup`; `gone` reporting needs this map to stay
+   *  truthful. */
+  retiredRef?: (key: string) => string | undefined;
 }
 
 export interface DiffResult {
@@ -55,6 +60,69 @@ const REPLACE_MIN_CHILDREN = 8;
  */
 function positionalBase(key: string): string {
   return key.replace(/\|#\d+$/, '');
+}
+
+/**
+ * Retire every ref of every positional family whose membership changed
+ * between two consecutive walks — the identity half of the P1/P2 escalation,
+ * and the close of the removal-side hole the head-to-head measured
+ * (docs/design/h2h-evaluation.md §2; docs/design/tier5.md).
+ *
+ * Runs BEFORE `assignRefs`, so the severed keys mint fresh refs and the
+ * restatement the escalation emits carries the successors. Returns
+ * key → retired ref, which `diffSnapshots` needs to keep the `gone` lists
+ * truthful: a surviving key's OLD ref is dead even though the key lives on,
+ * and `byKeyLookup` can no longer say so.
+ *
+ * The family here is GLOBAL (grouped by positionalBase over the whole tree),
+ * matching how `disambiguate` actually assigns ordinals — `ctx.seen` is
+ * walk-global. Retirement fires only when (a) the group's old and new key
+ * sets differ, and (b) at least one new key is already known to the registry
+ * — i.e. something is actually held that could rebind. A pure re-walk with
+ * unchanged membership retires nothing (the RESULTS.md §B property), a brand
+ * new family retires nothing, and a family that disappears retires at its
+ * REAPPEARANCE (when its dead keys would otherwise revive by position).
+ */
+export function retirePositionalRebinds(
+  oldRoot: SnapshotNode,
+  newRoot: SnapshotNode,
+  reg: RefRegistry,
+): Map<string, string> {
+  interface Group { old: Set<string>; nw: Set<string>; positional: boolean }
+  const groups = new Map<string, Group>();
+  const collect = (root: SnapshotNode, side: 'old' | 'nw'): void => {
+    const stack: SnapshotNode[] = [root];
+    while (stack.length) {
+      const n = stack.pop()!;
+      const base = positionalBase(n.key);
+      let g = groups.get(base);
+      if (!g) {
+        g = { old: new Set(), nw: new Set(), positional: false };
+        groups.set(base, g);
+      }
+      g[side].add(n.key);
+      if (isPositionalKey(n.key)) g.positional = true;
+      for (const c of n.children) stack.push(c);
+    }
+  };
+  collect(oldRoot, 'old');
+  collect(newRoot, 'nw');
+
+  const retired = new Map<string, string>();
+  for (const [, g] of groups) {
+    if (!g.positional) continue;
+    const union = new Set([...g.old, ...g.nw]);
+    if (union.size < 2) continue;
+    if (g.old.size === g.nw.size && [...g.old].every((k) => g.nw.has(k))) {
+      continue; // membership unchanged — nothing rebinds
+    }
+    if (![...g.nw].some((k) => reg.byKeyLookup(k))) continue; // nothing held
+    for (const k of union) {
+      const ref = reg.retireKey(k);
+      if (ref) retired.set(k, ref);
+    }
+  }
+  return retired;
 }
 
 export function diffSnapshots(
@@ -96,10 +164,23 @@ export function diffSnapshots(
    * lists only refs the model was actually shown, because naming refs it never
    * held is pure token waste — on a first-step replace that was most of the
    * list.
+   *
+   * The retired branch comes FIRST, before the survivor skip, and that ordering
+   * is the point: a SURVIVING positional key's old ref is dead too — the key
+   * lives on, bound to whatever element occupies the position now — so `gone`
+   * has to name it even though the key itself is a survivor
+   * (docs/design/tier5.md §3.2). It does not call `markDead`: the pre-pass
+   * already did, deliberately without `needsReannounce`, because a retired
+   * entry can never be revived.
    */
   function buryUnder(o: SnapshotNode, survivors: Set<string>): string[] {
     const gone: string[] = [];
     for (const key of keysOf(o)) {
+      const retiredRef = opts.retiredRef?.(key);
+      if (retiredRef) {
+        if (wasEmitted(retiredRef)) gone.push(retiredRef);
+        continue;
+      }
       if (survivors.has(key)) continue;
       const ref = reg.byKeyLookup(key)?.ref;
       if (!ref) continue;
@@ -219,6 +300,15 @@ export function diffSnapshots(
     // and the bench reader already speak. Cost is the container, paid only on
     // the membership-change event — which is precisely the event that
     // invalidated the ordinals.
+    //
+    // Since tier5 the restatement's refs are the NEXT GENERATION: the
+    // pre-pass `retirePositionalRebinds` has already retired every prior
+    // -generation ref of the family, `assignRefs` has minted fresh ones, and
+    // `buryUnder` names every retired ref the model was shown in `(gone: …)` —
+    // survivors included. Restating without retiring was the removal-side
+    // defect the head-to-head measured: same numbers, one row off, in silence
+    // (docs/design/tier5.md §1). The two are one design — retire without
+    // restating and the model would hold zero live refs for this family.
     if (
       positionalFamilyLostAMember(oldKids, newKids) ||
       positionalFamilyGainedAMember(oldKids, newKids)
@@ -246,6 +336,12 @@ export function diffSnapshots(
    * from both the new children AND the rest of the new tree (a key that turned
    * up elsewhere moved, it did not die) while at least one sibling survives in
    * place.
+   *
+   * This predicate decides the WIRE only. Since tier5 the IDENTITY decision
+   * belongs to `retirePositionalRebinds`, which runs as an engine pre-pass on
+   * every delivery path: the refs this restatement carries are a fresh
+   * generation and every prior-generation ref is retired and named in `gone`
+   * (docs/design/tier5.md §2.3). Not one byte of this predicate changed.
    */
   function positionalFamilyLostAMember(
     oldKids: SnapshotNode[],
@@ -301,6 +397,12 @@ export function diffSnapshots(
    * a signal for it (tier4 §1.4 residual 1). Nor a member that MOVED IN from
    * elsewhere in the old tree: its key already existed, so `added` stays false
    * (residual 2).
+   *
+   * Like P1, this predicate decides the WIRE only. The refs the restatement
+   * carries are a fresh generation since tier5: `retirePositionalRebinds`
+   * retires every prior-generation ref of the family before `assignRefs` can
+   * revive one, and `gone` names each one the model was shown
+   * (docs/design/tier5.md §2.3). Not one byte of this predicate changed.
    */
   function positionalFamilyGainedAMember(
     oldKids: SnapshotNode[],
@@ -432,7 +534,11 @@ export function diffSnapshots(
       for (const k of keysOf(removed)) {
         if (k === key) continue;
         if (newByKey.has(k)) continue;
-        const r = reg.byKeyLookup(k)?.ref;
+        // The retired fallback is belt-and-braces for the degenerate
+        // cross-parent same-base family (docs/design/tier5.md §4 residual 6):
+        // the pre-pass may have severed a key whose subtree is being removed
+        // here, and `byKeyLookup` can no longer name the ref it took away.
+        const r = reg.byKeyLookup(k)?.ref ?? opts.retiredRef?.(k);
         if (!r) continue;
         const known = wasEmitted(r);
         reg.markDead(r);

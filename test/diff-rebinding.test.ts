@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RefRegistry, assignRefs } from '../src/core/snapshot/registry.js';
-import { diffSnapshots } from '../src/core/snapshot/diff.js';
+import { diffSnapshots, retirePositionalRebinds } from '../src/core/snapshot/diff.js';
 import { renderDiff } from '../src/core/snapshot/render.js';
 import type { DiffOp, SnapshotNode } from '../src/core/snapshot/types.js';
 
@@ -49,6 +49,34 @@ import type { DiffOp, SnapshotNode } from '../src/core/snapshot/types.js';
  * `diff-blindfields.test.ts`, so this is a fast permanent regression rather than
  * a fixture. The live half is Builder A's G15 (`test/fixtures/prepend.html` +
  * `bench/guards.mjs`), recorded RED in docs/design/g15-red-record.md.
+ *
+ * ---
+ *
+ * APPENDED 2026-08-03 — tier5 moved the removal-path pins, and this paragraph
+ * is the record of why the literals above changed. `docs/design/tier5.md` §6.3
+ * authorises it explicitly and it is the one place tier5 supersedes tier4: the
+ * removal path is changed ON PURPOSE, so cases 1, 7 and 8 are RE-SPECIFIED
+ * rather than repaired. Restating a family while re-emitting the same ref
+ * numbers was the removal-side half of the positional hole — `gone` named only
+ * the tail ordinal, every survivor's key silently re-bound to whatever row slid
+ * into its position, and the head-to-head cohort measured the cost
+ * (`docs/design/h2h-evaluation.md` §2). Since tier5 a membership change retires
+ * the family's whole ref generation (`retirePositionalRebinds`) and the
+ * restatement carries fresh numbers.
+ *
+ * Two honest notes about that re-pin, because leaving them out would make this
+ * file read stronger than it is:
+ *
+ *   - The `observe` helper above did NOT call the pre-pass until this change,
+ *     so cases 1/7/8 were still GREEN on the post-tier5 engine when the fix
+ *     landed. Nothing forced the re-pin; it was made because a helper that
+ *     skips the engine's own ordering pins a configuration the product never
+ *     runs, and those three cases would have stayed green with the retirement
+ *     deleted.
+ *   - The historical RED/GREEN record above stands as history and is not
+ *     rewritten. Cases 7-8 were authored against the pre-P2 build and passed
+ *     there; that fact is still true and is still what they were for. What they
+ *     pin from today is the post-tier5 removal wire.
  */
 
 // --- constructed nodes -------------------------------------------------------
@@ -116,10 +144,16 @@ function page(kids: SnapshotNode[]): SnapshotNode {
 }
 
 /**
- * Diff two trees the way `engine.ts` does: refs assigned across each fresh walk
- * before it is diffed (engine.ts:206), then `diffSnapshots` with the default
+ * Diff two trees the way `engine.ts` does: the positional pre-pass over the two
+ * consecutive walks FIRST (engine.ts, before `assignRefs` — tier5 §2.3, and the
+ * ordering IS the mechanism, because `assignRefs` revives by key), then refs
+ * assigned across the fresh walk, then `diffSnapshots` with the default
  * `wasEmitted` — the model has been shown the page, which is the only state in
  * which a rebinding can hurt it.
+ *
+ * The pre-pass call was added by tier5 §6.3. Without it this helper measured
+ * `diff.ts` in a configuration the product never runs, and cases 1/7/8 below
+ * stayed green whether or not the retirement existed at all.
  */
 function observe(
   before: SnapshotNode,
@@ -127,8 +161,11 @@ function observe(
 ): { reg: RefRegistry; ops: DiffOp[]; wire: string } {
   const reg = new RefRegistry();
   assignRefs(before, reg);
+  const retired = retirePositionalRebinds(before, after, reg);
   assignRefs(after, reg);
-  const { ops } = diffSnapshots(before, after, reg);
+  const { ops } = diffSnapshots(before, after, reg, {
+    retiredRef: (key) => retired.get(key),
+  });
   // `commit: false` — the recorded bytes stay a pure function of the diff
   // rather than of how many times a test rendered it.
   const wire = renderDiff(
@@ -170,12 +207,15 @@ describe('P2 — growth of a positional family escalates to one replace', () => 
     // All seven rows restated, so every ordinal the model holds is re-derivable
     // from this one observation.
     expect(replace.subtree.children).toHaveLength(7);
-    // Pure growth kills nothing, so the `gone` suffix is empty and the existing
-    // renderer already spells that as no suffix at all (render.ts:438-440).
-    // This is the "zero new wire vocabulary" property, asserted (tier4 §1.3.2).
-    expect(replace.gone ?? []).toEqual([]);
-    expect(wire.split('\n')[1]).toMatch(/^! e\d+ replaced:$/);
-    expect(wire).not.toContain('gone:');
+    // RE-PINNED BY TIER5 §6.3 (was: `gone` empty, no suffix on the wire).
+    // Growth kills no ELEMENT, but it retires an entire ref GENERATION: the six
+    // refs the model held all re-bound one row down, so all six are dead and the
+    // seven restated rows carry fresh numbers. `gone` naming them is what makes
+    // the restatement self-describing, and it is still the existing suffix
+    // vocabulary — the "zero new wire vocabulary" property (tier4 §1.3.2) is
+    // unchanged by the re-pin.
+    expect(replace.gone).toEqual(['e3', 'e4', 'e5', 'e6', 'e7', 'e8']);
+    expect(wire.split('\n')[1]).toMatch(/^! e\d+ replaced \(gone: e3 e4 e5 e6 e7 e8\):$/);
     expect(wire).not.toContain('+ after');
   });
 
@@ -294,41 +334,61 @@ describe('P2 — what must NOT escalate', () => {
  * `positionalFamilyLostAMember` is not edited, not one byte — is checkable by
  * inspection; this is the half that is checkable by execution.
  */
-describe('P1 — removal behaviour is byte-identical, before and after P2', () => {
-  /** Captured verbatim from the pre-P2 run (tier3 §8 probe 2's second half). */
+describe('P1 — removal behaviour, re-pinned by tier5', () => {
+  /**
+   * RE-RECORDED FROM THE POST-TIER5 RUN (tier5 §6.3). The pre-tier5 literal is
+   * kept one line down because the DELTA is the evidence: `(gone: e9)` — the
+   * tail ordinal alone — with every survivor re-emitted under the SAME number
+   * it already had. That wire is what the head-to-head measured as a precision
+   * failure (h2h-evaluation §2): a plan captured before the removal stayed
+   * fully executable and landed one row off.
+   *
+   * Pre-tier5 header line, for the comparison: `! e2 replaced (gone: e9):`
+   * followed by `button e3` … `button e8`.
+   */
   const P1_REMOVAL_WIRE = [
     'page #1.1 (diff from #1.0)',
-    '! e2 replaced (gone: e9):',
+    '! e2 replaced (gone: e3 e4 e5 e6 e7 e8 e9):',
     '  list e2 "Tickets"',
     '    listitem',
-    '      button e3 "Take"',
+    '      button e10 "Take"',
     '    listitem',
-    '      button e4 "Take"',
+    '      button e11 "Take"',
     '    listitem',
-    '      button e5 "Take"',
+    '      button e12 "Take"',
     '    listitem',
-    '      button e6 "Take"',
+    '      button e13 "Take"',
     '    listitem',
-    '      button e7 "Take"',
+    '      button e14 "Take"',
     '    listitem',
-    '      button e8 "Take"',
+    '      button e15 "Take"',
   ].join('\n');
 
-  it('7. a 7 -> 6 removal produces the recorded ops and the recorded wire', () => {
+  it('7. a 7 -> 6 removal retires the generation and restates it with fresh refs', () => {
     const { reg, ops, wire } = observe(page([list(7)]), page([list(6)]));
 
-    // Deep-equal to the recorded P1 baseline: ONE replace, and the `gone` list
-    // naming exactly the ordinal that no longer exists.
+    // ONE replace, and the `gone` list naming the WHOLE prior generation —
+    // every ref the model held for this family, not merely the ordinal that no
+    // longer exists.
     expect(ops.map((o) => ({ ...o, subtree: undefined }))).toEqual([
-      { op: 'replace', ref: 'e2', gone: ['e9'], subtree: undefined },
+      {
+        op: 'replace',
+        ref: 'e2',
+        gone: ['e3', 'e4', 'e5', 'e6', 'e7', 'e8', 'e9'],
+        subtree: undefined,
+      },
     ]);
+    // The container is content-keyed, so it is not in the family and keeps its
+    // ref: retirement is scoped to the identity class with the defect.
     expect(reg.byKeyLookup('I|0|list|tickets')?.ref).toBe('e2');
-    expect(reg.byKeyLookup(ord(BTN_BASE, 6))?.ref).toBe('e9');
+    // The dead ordinal's key is gone from the index entirely, and the key that
+    // SURVIVED the removal now answers a number the model has never seen —
+    // which is the whole fix, in two lookups.
+    expect(reg.byKeyLookup(ord(BTN_BASE, 6))).toBeUndefined();
+    expect(reg.byKeyLookup(ord(BTN_BASE, 3))?.ref).toBe('e13');
+    expect(reg.resolve('e6')?.state).toBe('dead');
 
-    // And byte-equal on the wire. The wave-3 fixtures are removals-only by
-    // construction (queue.html's header, tier3 §3.1.2), so this is the unit
-    // half of tier4 §1.7's three-way byte-identity check — the half that runs
-    // on every `npm test` rather than only under `--selftest`.
+    // And byte-equal on the wire, re-recorded from the post-fix run.
     expect(wire).toBe(P1_REMOVAL_WIRE);
   });
 
@@ -341,10 +401,16 @@ describe('P1 — removal behaviour is byte-identical, before and after P2', () =
     const six = page([list(6)]);
     const five = page([list(5)]);
     assignRefs(seven, reg);
+    const retired1 = retirePositionalRebinds(seven, six, reg);
     assignRefs(six, reg);
-    const first = diffSnapshots(seven, six, reg);
+    const first = diffSnapshots(seven, six, reg, {
+      retiredRef: (key) => retired1.get(key),
+    });
+    const retired2 = retirePositionalRebinds(six, five, reg);
     assignRefs(five, reg);
-    const second = diffSnapshots(six, five, reg);
+    const second = diffSnapshots(six, five, reg, {
+      retiredRef: (key) => retired2.get(key),
+    });
 
     for (const [label, r] of [
       ['first', first],
@@ -359,8 +425,16 @@ describe('P1 — removal behaviour is byte-identical, before and after P2', () =
       expect(r.ops.some((o) => o.op === 'add'), label).toBe(false);
     }
 
-    // The dying ordinal, named each time: |#6 then |#5.
-    expect((first.ops[0] as Replace).gone).toEqual(['e9']);
-    expect((second.ops[0] as Replace).gone).toEqual(['e8']);
+    // RE-PINNED BY TIER5 §6.3 (was: the dying ordinal alone, `['e9']` then
+    // `['e8']`). Each restatement's `gone` now covers that GENERATION whole —
+    // seven refs at the first removal, the six fresh ones at the second — and
+    // no generation's refs survive into the next. Cardinality and disjointness
+    // rather than literals, so this stays a statement about the mechanism
+    // instead of about the allocator's counter.
+    const g1 = (first.ops[0] as Replace).gone!;
+    const g2 = (second.ops[0] as Replace).gone!;
+    expect(g1).toHaveLength(7);
+    expect(g2).toHaveLength(6);
+    expect(g1.filter((r) => g2.includes(r))).toEqual([]);
   });
 });

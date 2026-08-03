@@ -1210,6 +1210,268 @@ const beta = refFor('Beta action', 'button');
   }
 }
 
+// --- G29: a removal retires the whole generation, and a stale ref refuses ----
+//
+// The REMOVAL half of positional identity, and the half the head-to-head cohort
+// measured as a precision failure (docs/design/h2h-evaluation.md §2;
+// docs/design/tier5.md). P1 has restated a family that LOST a member since
+// tier2b — but the restatement re-emitted the SAME ref numbers, and the key set
+// shrinks at the TAIL whatever row physically left, so every survivor's ref
+// silently re-bound to whatever row slid into its position. `gone` named the
+// tail ref only, which affirmatively implies the rest are fine. A plan captured
+// before a removal executed one row off, labels agreeing, no error.
+//
+// The four legs are independent and none implies another:
+//   - G29a is the WIRE: the restatement retires the whole prior generation.
+//     `gone` must name the ref for a SURVIVING position (not merely the tail)
+//     and every restated Take ref must be a number the agent has never seen.
+//   - G29b is the ACT PATH, page-evidenced: the ref the agent held for the 4th
+//     row must refuse, and retire.html's own log must show that nothing landed.
+//     A build with G29a's honesty and no refusal still lands the wrong row.
+//   - G29c is the green-stable control (the G15b analog): the successors the
+//     restatement hands over are TRUE and usable with no re-read. It passes
+//     PRE-fix as well as post — the restatement was already truthful; the refs
+//     were the lie — so it is what says G29a/b are not passing by breaking the
+//     wire.
+//   - G29d is the DELIVERY-PATH claim: the same refusal on a FULL snapshot,
+//     which never diffs at all. It fails on any build that implements
+//     retirement inside the escalation instead of on `observe()`'s common path.
+//
+// Recorded RED against the pre-fix build before the tier5 fix landed:
+// docs/design/g29-red-record.md — including the hazard the green guard can
+// never show again, the held ref landing on the row below it and the page
+// logging `took: r5` for a click the agent read as r4.
+
+{
+  const retireModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/retire.html?guardrun=${Date.now()}`,
+  });
+  await sleep(2500);
+  const retireInitial = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(retireInitial)) {
+    console.error(
+      'G29 could not run: retire.html did not produce a full snapshot.\n' +
+        retireInitial.slice(0, 400),
+    );
+    process.exit(3);
+  }
+  applyObservation(retireModel, retireInitial);
+
+  const takeEntries = [...retireModel.entries()].filter(
+    ([, e]) => e.label === 'Take' && e.role === 'button',
+  );
+  if (takeEntries.length !== 6) {
+    console.error(
+      `G29 could not run: "Take" resolves to ${takeEntries.length} buttons on retire.html, expected 6.`,
+    );
+    process.exit(3);
+  }
+  const dismiss = [...retireModel.entries()].filter(
+    ([, e]) => e.label === 'Dismiss first ticket' && e.role === 'button',
+  );
+  if (dismiss.length !== 1) {
+    console.error(
+      `G29 could not run: "Dismiss first ticket" resolves to ${dismiss.length} buttons on retire.html.`,
+    );
+    process.exit(3);
+  }
+
+  // Document order on the WIRE, not Map order. The ref an agent holds for
+  // "the 4th row" is the fourth one it READ; the Map's iteration order is
+  // registry allocation order, which is not the same claim.
+  const TAKE_LINE = /^\s*button (e\d+) "Take"/;
+  const takeRefsIn = (text) => {
+    const out = [];
+    for (const line of text.split('\n')) {
+      const m = TAKE_LINE.exec(line);
+      if (m) out.push(m[1]);
+    }
+    return out;
+  };
+  const takeRefs = takeRefsIn(retireInitial);
+  if (takeRefs.length !== 6) {
+    console.error(
+      `G29 could not run: the full snapshot carried ${takeRefs.length} \`button eN "Take"\` lines, expected 6.`,
+    );
+    process.exit(3);
+  }
+  // r4's Take, as the model read it. r1 is about to be dismissed, so post-
+  // removal this POSITION belongs to r5 — which is what makes a silent rebind
+  // land one row off rather than nowhere.
+  const heldRef = takeRefs[3];
+
+  const reply = await call('browser_act', { action: 'click', ref: dismiss[0][0] });
+  await sleep(300);
+
+  const lines = reply.split('\n');
+  const at = lines.findIndex((l) => /^! e\d+ replaced/.test(l));
+  // A replace renders its subtree indented beneath the header line
+  // (render.ts:431-440), so the block ends at the next unindented line.
+  const block = [];
+  if (at >= 0) {
+    for (let i = at + 1; i < lines.length; i++) {
+      if (!/^\s+\S/.test(lines[i])) break;
+      block.push(lines[i]);
+    }
+  }
+  const restatedRefs = takeRefsIn(block.join('\n'));
+  const goneRefs =
+    at >= 0 ? (/\(gone: ([^)]*)\)/.exec(lines[at])?.[1] ?? '').split(/\s+/).filter(Boolean) : [];
+  const fresh = restatedRefs.filter((r) => !takeRefs.includes(r));
+  const opLines = lines
+    .filter((l) => /^[~+\->!(]|^\s+\S|^page #|^FULL SNAPSHOT/.test(l))
+    .join('\n        ')
+    .slice(0, 900);
+
+  check(
+    'G29a',
+    'a removal from a positional family retires the whole prior generation, not just the tail ref',
+    at >= 0 &&
+      goneRefs.includes(heldRef) &&
+      restatedRefs.length >= 5 &&
+      fresh.length === restatedRefs.length,
+    `held ref for the 4th row's Take before the removal: ${heldRef}; ` +
+      `replace block: ${at >= 0 ? 'present' : 'ABSENT'}; ` +
+      `gone: [${goneRefs.join(' ')}] (contains ${heldRef}: ${goneRefs.includes(heldRef)}); ` +
+      `Take rows restated: ${restatedRefs.length} (need >= 5), of which fresh: ${fresh.length}\n        ` +
+      `pre-click Take refs: [${takeRefs.join(' ')}]; restated: [${restatedRefs.join(' ')}]\n        ${opLines}`,
+  );
+
+  if (at < 0) {
+    check(
+      'G29b',
+      'a ref held across the removal refuses, and the page confirms nothing landed',
+      false,
+      'not reached: G29a found no replace block, so there is no restatement to act after.',
+    );
+    check(
+      'G29c',
+      'the refs the restatement hands over bind to the rows it says they do',
+      false,
+      'not reached: G29a found no replace block, so there is no restatement to read.',
+    );
+  } else {
+    // The stale plan, executed. Pre-fix this returns `ok click` and the page
+    // logs `took: r5` — the one-row-off landing, in the page's own words.
+    const staleReply = await call('browser_act', { action: 'click', ref: heldRef });
+    await sleep(300);
+    const afterStale = await call('browser_snapshot', { mode: 'full' });
+    const refused = new RegExp(`^error: ${heldRef} could not be acted on`).test(staleReply);
+    const tookLine = afterStale.split('\n').find((l) => l.includes('took: '));
+    check(
+      'G29b',
+      'a ref held across the removal refuses, and the page confirms nothing landed',
+      refused && !tookLine,
+      `clicked ${heldRef} (the ref read as the 4th row's Take); ` +
+        `refused: ${refused}; page logged a take: ${tookLine ? 'YES' : 'no'}\n        ` +
+        `reply: ${staleReply.split('\n')[0].slice(0, 160)}\n        ` +
+        (tookLine
+          ? `${tookLine.trim()}   <-- LANDED ONE ROW OFF: the agent read this ref as r4`
+          : '(no log line on the page — nothing landed)'),
+    );
+
+    const fourth = restatedRefs[3];
+    if (!fourth) {
+      check(
+        'G29c',
+        'the refs the restatement hands over bind to the rows it says they do',
+        false,
+        `the replace block carried ${restatedRefs.length} \`button eN "Take"\` lines; need a 4th to read.`,
+      );
+    } else {
+      await call('browser_act', { action: 'click', ref: fourth });
+      await sleep(300);
+      // The page's own record, read fresh and independently of anything the
+      // act said about itself — the rule the rest of this file follows. r1 was
+      // dismissed, so the current 4th row is r5.
+      const afterTake = await call('browser_snapshot', { mode: 'full' });
+      const tookR5 = afterTake.includes('took: r5');
+      check(
+        'G29c',
+        'the refs the restatement hands over bind to the rows it says they do',
+        tookR5,
+        `clicked ${fourth} (the 4th Take in the replace block); ` +
+          `page logged "took: r5": ${tookR5}\n        ` +
+          (afterTake.split('\n').find((l) => l.includes('took: ')) ?? '(no log line on the page)').trim(),
+      );
+    }
+  }
+}
+
+// --- G29d: the same refusal on the FULL-snapshot path -----------------------
+//
+// `observe()` runs `assignRefs` — which revives by key — BEFORE it decides
+// between a diff and a full, and the forced-full path never diffs at all
+// (tier5 §2.3). Retirement implemented inside the P1/P2 escalation would leave
+// every membership change delivered as a full snapshot silently rebinding. This
+// leg forces that delivery and asks the same question.
+
+{
+  const fullModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/retire.html?guardrun=${Date.now()}-full`,
+  });
+  await sleep(2500);
+  const initialFull = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(initialFull)) {
+    console.error(
+      'G29d could not run: retire.html did not produce a full snapshot.\n' +
+        initialFull.slice(0, 400),
+    );
+    process.exit(3);
+  }
+  applyObservation(fullModel, initialFull);
+
+  const TAKE_LINE_D = /^\s*button (e\d+) "Take"/;
+  const takeRefsD = [];
+  for (const line of initialFull.split('\n')) {
+    const m = TAKE_LINE_D.exec(line);
+    if (m) takeRefsD.push(m[1]);
+  }
+  const dismissD = [...fullModel.entries()].filter(
+    ([, e]) => e.label === 'Dismiss first ticket' && e.role === 'button',
+  );
+  if (takeRefsD.length !== 6 || dismissD.length !== 1) {
+    console.error(
+      `G29d could not run: ${takeRefsD.length} Take lines and ${dismissD.length} dismiss buttons on the re-navigated page.`,
+    );
+    process.exit(3);
+  }
+  const heldRefD = takeRefsD[3];
+
+  // The mutation, delivered as a FULL snapshot: no diff, no `replace`, no
+  // `(gone: …)` vocabulary at all (tier5 §4 residual 5).
+  const fullObs = await call('browser_act', {
+    action: 'click',
+    ref: dismissD[0][0],
+    observe: 'full',
+  });
+  await sleep(300);
+  const wasFull = /FULL SNAPSHOT #/.test(fullObs);
+
+  const staleD = await call('browser_act', { action: 'click', ref: heldRefD });
+  await sleep(300);
+  const afterD = await call('browser_snapshot', { mode: 'full' });
+  const refusedD = new RegExp(`^error: ${heldRefD} could not be acted on`).test(staleD);
+  const tookLineD = afterD.split('\n').find((l) => l.includes('took: '));
+
+  check(
+    'G29d',
+    'a membership change delivered as a FULL snapshot retires the refs too',
+    wasFull && refusedD && !tookLineD,
+    `observation after the dismiss was a full snapshot: ${wasFull}; ` +
+      `clicked ${heldRefD} (the ref read as the 4th row's Take); refused: ${refusedD}; ` +
+      `page logged a take: ${tookLineD ? 'YES' : 'no'}\n        ` +
+      `reply: ${staleD.split('\n')[0].slice(0, 160)}\n        ` +
+      (tookLineD
+        ? `${tookLineD.trim()}   <-- LANDED ONE ROW OFF on the full-snapshot path`
+        : '(no log line on the page — nothing landed)'),
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 finish();

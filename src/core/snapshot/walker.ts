@@ -325,7 +325,20 @@ function visit(
  * escalate a MEMBERSHIP CHANGE — a removal or an insertion — in a positional
  * family to one `replace` of the container, so the model receives fresh
  * label→ref lines for every survivor whose ordinal just shifted
- * (docs/design/tier4.md §1). What is still not handled, and is said out loud
+ * (docs/design/tier4.md §1).
+ *
+ * The IDENTITY half is handled too, since tier5, and it had to be: restating a
+ * family while re-emitting the SAME ref numbers left every stale plan fully
+ * executable, one row off, in silence — the removal-side defect the
+ * head-to-head cohort measured as a precision failure
+ * (docs/design/h2h-evaluation.md §2). `diff.ts`'s `retirePositionalRebinds`
+ * runs as an engine pre-pass over consecutive walks, before `assignRefs` can
+ * revive anything, and RETIRES every ref of a positional family whose
+ * membership changed; the next walk mints fresh ones, the restatement above
+ * delivers them, and a ref from a retired generation now refuses on the act
+ * path instead of landing (docs/design/tier5.md §2.3, §3.4).
+ *
+ * What is still not handled, and is said out loud
  * rather than papered over: one removal and one insertion of indistinguishable
  * rows between the same pair of walks leaves the key set, the family size and
  * every per-key property unchanged, so no layer has a signal for it (tier4

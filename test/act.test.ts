@@ -72,6 +72,16 @@ vi.mock('@core/snapshot/engine.js', () => ({
     return { text: opts?.full ? FULL : DIFF };
   }),
   keyForRef: (_id: string, ref: string) => (ref === 'e1' ? 'key-for-e1' : undefined),
+  // tier5 §3.4: the act path resolves the whole registry entry rather than the
+  // key alone, so it can tell a DEAD ref (refuse, with the current observation
+  // attached — its key is still live in the page index and would resolve onto
+  // whatever element holds that position now) from an UNKNOWN one (refuse
+  // bare). Same contract as `keyForRef` above: `e1` is the one live element on
+  // this stubbed page. Added here because the module is mocked with an explicit
+  // factory, so a new engine import the tool calls has to be declared or every
+  // act case throws — no behaviour of this file's assertions changes.
+  refEntry: (_id: string, ref: string) =>
+    ref === 'e1' ? { ref, key: 'key-for-e1', state: 'live' } : undefined,
   agentTouched: vi.fn(),
   requestSelect: vi.fn(async () => selectReply),
   markTainted: vi.fn(),

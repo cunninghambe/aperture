@@ -12,7 +12,11 @@ import { isAddressableRole } from './walker.js';
  *
  * Refs are never reused within a page session. A dead ref stays dead —
  * or gets *revived* if its key reappears, which is what makes tabbed UIs
- * behave sanely when the agent switches away and back.
+ * behave sanely when the agent switches away and back. Revival is for
+ * CONTENT-DERIVED keys; a positional family's keys are exempt on any membership
+ * change (`retireKey`, docs/design/tier5.md §2.3), because such a key encodes a
+ * POSITION rather than an identity and reviving it hands the agent's ref to
+ * whatever element occupies that position now.
  */
 export class RefRegistry {
   private byRef = new Map<string, RefEntry>();
@@ -73,6 +77,27 @@ export class RefRegistry {
     // ever reappears — otherwise the revival is invisible and every later
     // mention of the ref refers to something the model no longer holds.
     if (e.emitted) e.needsReannounce = true;
+  }
+
+  /**
+   * Sever a key's revival path. The entry stays in `byRef` — dead, resolvable,
+   * refusable — so an act on its ref fails loudly instead of resolving through
+   * the page-side index to whatever element holds the key NOW. The key's next
+   * `ensureRef` mints a fresh entry.
+   *
+   * Exists for exactly one caller: `retirePositionalRebinds` (diff.ts). For a
+   * positional key, "the key reappeared" is a claim about a POSITION, not an
+   * element, so the revival contract in this class's header does not apply —
+   * reviving it is how a stale plan lands one row off (docs/design/tier5.md §1).
+   * `needsReannounce` is deliberately not set: this entry can never be revived,
+   * so it owes no re-announcement.
+   */
+  retireKey(key: string): string | undefined {
+    const e = this.byKey.get(key);
+    if (!e) return undefined;
+    e.state = 'dead';
+    this.byKey.delete(key);
+    return e.ref;
   }
 
   markEmitted(ref: string, seq: string): void {
