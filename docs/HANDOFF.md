@@ -443,3 +443,45 @@ component in any benchmark here.
 Instrument and compare against ground truth. Do not reason from the code alone,
 do not trust a verdict without the counts behind it — and when a benchmark goes
 green, spend a day trying to make it lie to you before you believe it.
+
+---
+
+## Pause point — 2026-08-03, HEAD `0ff819e`
+
+Work stopped here deliberately, at a green gate. Everything below is either
+done and verified, or written down with its evidence.
+
+### Green at the pause
+`npx tsc --noEmit` · `npx vitest run` 501 · `npx electron-vite build` ·
+`bash bench/fidelity-all.sh` 6/6 · `node bench/guards.mjs <tok>` 39/39 allow,
+3/3 deny, 2/2 none · `node bench/task.mjs --selftest` PASS.
+
+### Tags
+`wave2-scored` · `wave3-scored` · `sweep-scored` · `tier4-landed` ·
+`h2h-scored` · `vaultfill-landed`
+
+### Owed before the vault holds a real credential
+Nothing blocking. Both review blockers are closed (`0ff819e`). The
+non-blocking remainder from `docs/design/vaultfill-review.md` items 5-12 is
+listed in the open-defects section above; the sharpest is that
+`docs/design/security.md` still contains two sentences this work made false
+("the process never receives plaintext" is now narrower than written, and the
+redaction row reads "designed, not yet implemented" when it is implemented).
+Correcting that file was outside the fixer's permitted scope and is the first
+small job for whoever resumes.
+
+### Next, in the owner's stated order
+1. Security & hardening session (Opus runs it from inside the repo; the
+   built-in review needs a git root, which this checkout is).
+2. Web Bot Auth — RFC 9421 per-agent-session signing. `docs/design/tier2.md`
+   §7 killed the 2026-09-15 deadline framing (it is hosted operators', and
+   there is no custody story for a signing key in a client-distributed
+   browser); the capability is still worth building on its own terms.
+3. The removal-side ordinal rebinding hazard (open-defects above) — it cost a
+   preregistered primary in the head-to-head and has wire-level evidence.
+
+### The rule that produced everything here
+Six things marked "working" broke the moment they were measured end to end,
+and every specification written for this project has had at least one defect
+found by its own builder. Nothing is believed because it was designed that
+way; a guard that has only ever passed is a guard of unknown value.
