@@ -5,6 +5,7 @@ import { diffSnapshots, firstDifferingCell, indexByKey } from './diff.js';
 import { renderDiff, renderFull, renderUnchanged } from './render.js';
 import { VolatilityTracker } from './volatility.js';
 import type { Observation, Snapshot, SnapshotNode } from './types.js';
+import type { FillChannelResult, FillRequest, FillTargetRequest } from '@shared/types.js';
 
 /**
  * Per-tab snapshot state, and the decision of what to hand the agent.
@@ -125,10 +126,17 @@ export function invalidate(tabId: string, documentReplaced: boolean): void {
   const st = states.get(tabId);
   if (!st) return;
   st.requireFull();
-  if (documentReplaced) st.tainted.clear();
+  if (documentReplaced) {
+    st.tainted.clear();
+    // The document that held the filled values is gone, so the needles have
+    // nothing left to match and holding plaintext in main any longer buys
+    // nothing. Same-document navigation keeps both, for the reason above.
+    clearNeedles(tabId);
+  }
 }
 
 export function forget(tabId: string): void {
+  clearNeedles(tabId);
   states.delete(tabId);
 }
 
@@ -197,7 +205,7 @@ export async function observe(
 
   // Redact before anything else touches the tree, so no downstream path —
   // diffing, rendering, form matching — can observe a sensitive value.
-  redactTainted(r.root, st.tainted);
+  redactTainted(r.root, st.tainted, needlesFor(tabId));
 
   // Assign refs across the whole tree before diffing, so both sides speak the
   // same names. This also re-attaches refs to nodes the registry already
@@ -350,13 +358,18 @@ function refKey(st: TabSnapshotState, ref: string): string | undefined {
 }
 
 /**
- * Replace the values of tainted fields with a fixed marker.
+ * Replace the values of tainted fields, and any registered needle, with a fixed
+ * marker.
  *
  * A fixed marker rather than a length-accurate mask: `••••••` of the right
  * length still leaks the length, which is real information about a secret.
+ *
+ * Needles are applied HERE as well as in `redactFreeText`, and that is the
+ * second half of the F9 fix: a value the page copied into a `<div>` has to be
+ * redacted in SNAPSHOTS, not only in `browser_read`.
  */
-function redactTainted(root: SnapshotNode, tainted: Set<string>): void {
-  if (tainted.size === 0) return;
+function redactTainted(root: SnapshotNode, tainted: Set<string>, needles: string[]): void {
+  if (tainted.size === 0 && needles.length === 0) return;
   const stack: SnapshotNode[] = [root];
   while (stack.length) {
     const n = stack.pop()!;
@@ -364,15 +377,136 @@ function redactTainted(root: SnapshotNode, tainted: Set<string>): void {
       // `value` is not enough. A node that is not an input carries its content
       // in `text` or `name`, so copying a filled value into a <div> produced an
       // unredacted line. All three are rendered, so all three are redacted.
+      //
+      // Taint is what covers a page that flips a password input to
+      // `type="text"` after the fill: the walker would then serialise the real
+      // value, and this replaces it regardless of type.
       if (n.value !== undefined && n.value !== '') n.value = REDACTED;
       if (n.text) n.text = REDACTED;
       if (n.name) n.name = REDACTED;
+    } else if (needles.length) {
+      if (n.value) n.value = scrub(n.value, needles);
+      if (n.text) n.text = scrub(n.text, needles);
+      if (n.name) n.name = scrub(n.name, needles);
+      if (n.rows) n.rows = n.rows.map((row) => row.map((cell) => scrub(cell, needles)));
     }
     for (const c of n.children) stack.push(c);
   }
 }
 
-const REDACTED = '(filled from profile)';
+/** The one marker, defined once. `tools.ts` imports it rather than repeating it. */
+export const REDACTED = '(filled, value withheld)';
+
+function scrub(s: string, needles: string[]): string {
+  let out = s;
+  for (const needle of needles) {
+    if (out.includes(needle)) out = out.split(needle).join(REDACTED);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Needles — the F9 fix
+//
+// The existing free-text redaction reads live values back out of the page and
+// uses them as search strings. It CANNOT see a password: the walker masks
+// password values before they leave the page (`walker.ts`, `valueOf`), so the
+// real value is never in the payload the redactor reads. The mechanism that
+// exists for profile secrets is structurally blind to vault secrets, which is
+// the row docs/design/security.md marks "designed, not yet implemented".
+//
+// So credential fills register their values directly, here, in main.
+//
+// Three honest statements, none of which is hedging:
+//
+//   * It puts plaintext in main-process memory for up to ten minutes. Main
+//     already holds it — the fill path receives the secret — so this extends a
+//     lifetime rather than creating an exposure class. The out-of-envelope
+//     adversary (local code execution as the same user) already wins against a
+//     same-user process, and the in-envelope adversary cannot reach main's heap
+//     at all.
+//   * It is defeated by transformation. A page that prints the password
+//     reversed, base64'd, or one character per element is not caught by
+//     substring matching and cannot be. This is a mitigation against a careless
+//     or late-compromised origin, not a boundary.
+//   * A six-digit one-time code will over-redact: an unrelated `123456` on the
+//     page becomes the marker. Over-redaction is cosmetic; under-redaction is a
+//     disclosure. Values shorter than six characters are not registered at all,
+//     and the FIELD is still tainted either way.
+// ---------------------------------------------------------------------------
+
+interface NeedleSet {
+  values: Set<string>;
+  timer: NodeJS.Timeout;
+}
+
+const needles = new Map<string, NeedleSet>();
+const NEEDLE_TTL_MS = 10 * 60 * 1000;
+
+/** Values too short to register. A four-character needle redacts the web. */
+const MIN_NEEDLE_LENGTH = 6;
+
+export function registerNeedles(tabId: string, values: string[]): void {
+  const usable = values.filter((v) => v.length >= MIN_NEEDLE_LENGTH);
+  if (!usable.length) return;
+
+  const existing = needles.get(tabId);
+  if (existing) clearTimeout(existing.timer);
+  const set = existing?.values ?? new Set<string>();
+  for (const v of usable) set.add(v);
+
+  const timer = setTimeout(() => needles.delete(tabId), NEEDLE_TTL_MS);
+  // Never a reason to hold the process open; the values die with it anyway.
+  timer.unref?.();
+  needles.set(tabId, { values: set, timer });
+}
+
+/**
+ * Remove specific needles.
+ *
+ * The undo half of the pair that closes the redaction window in both
+ * directions: register BEFORE the write, so no concurrent snapshot can read a
+ * value that is already in the DOM, and remove only in the one case where the
+ * value provably never landed — a global refusal, where the preload completes
+ * validation before the first write.
+ *
+ * Named values rather than "everything for this tab", so a refused fill cannot
+ * un-redact an earlier successful one. (Residual: if the same value were
+ * registered twice and one of those fills were later refused, this drops it for
+ * both. Reaching that needs a successful fill whose taint was then cleared,
+ * because a second `apply` on a filled form answers `ALREADY_FILLED` before it
+ * ever reaches this path.)
+ */
+export function dropNeedles(tabId: string, values: string[]): void {
+  const n = needles.get(tabId);
+  if (!n) return;
+  for (const v of values) n.values.delete(v);
+  if (n.values.size === 0) clearNeedles(tabId);
+}
+
+export function clearNeedles(tabId: string): void {
+  const n = needles.get(tabId);
+  if (!n) return;
+  clearTimeout(n.timer);
+  needles.delete(tabId);
+}
+
+/**
+ * Drop every needle in every tab. Registered as a vault lock hook by
+ * `src/main/index.ts` — a locked vault should not leave its plaintext lying in
+ * main for the rest of the ten minutes.
+ */
+export function clearAllNeedles(): void {
+  for (const n of needles.values()) clearTimeout(n.timer);
+  needles.clear();
+}
+
+function needlesFor(tabId: string): string[] {
+  const n = needles.get(tabId);
+  // Longest first, so a short needle that is a substring of a long one cannot
+  // shred the long one into unmatchable pieces before it is tried.
+  return n ? [...n.values].sort((a, b) => b.length - a.length) : [];
+}
 
 /**
  * Values currently tainted in this tab, for redacting text that did not come
@@ -381,12 +515,15 @@ const REDACTED = '(filled from profile)';
  */
 export function redactFreeText(tabId: string, s: string): string {
   const st = states.get(tabId);
-  if (!st || st.tainted.size === 0 || !st.last) return s;
+  const live = needlesFor(tabId);
+  if (!live.length && (!st || st.tainted.size === 0 || !st.last)) return s;
 
-  let out = s;
-  for (const value of collectTaintedValues(st.last.root, st.tainted)) {
-    if (value.length < 4) continue;
-    out = out.split(value).join(REDACTED);
+  let out = live.length ? scrub(s, live) : s;
+  if (st?.last && st.tainted.size) {
+    for (const value of collectTaintedValues(st.last.root, st.tainted)) {
+      if (value.length < 4) continue;
+      out = out.split(value).join(REDACTED);
+    }
   }
   return out;
 }
@@ -428,6 +565,21 @@ export async function taintedValues(
 export function markTainted(tabId: string, keys: string[]): void {
   const st = stateFor(tabId);
   for (const k of keys) st.tainted.add(k);
+}
+
+/**
+ * Undo a taint.
+ *
+ * Called on exactly one path: a fill that was refused GLOBALLY, where the
+ * preload completes validation before the first write and so is known to have
+ * written nothing. Taint goes on before the write (so no concurrent snapshot
+ * can read a value that is already in the DOM) and comes off only in the case
+ * where it provably never landed. Any partial or uncertain outcome keeps it.
+ */
+export function unmarkTainted(tabId: string, keys: string[]): void {
+  const st = states.get(tabId);
+  if (!st) return;
+  for (const k of keys) st.tainted.delete(k);
 }
 
 /** Resolve a ref to the identity key the page-side index is keyed on. */
@@ -589,25 +741,48 @@ export async function attachFiles(
   }
 }
 
-/** Send fills to the page and await the result. */
+/** What `requestFill` answers when the page never replies at all. */
+export type FillOutcome = FillChannelResult | { ok: false; reason: 'timeout' };
+
+/**
+ * Send fills to the page and await the result.
+ *
+ * ONE MECHANISM, NOT TWO. The profile path and the credential path share this
+ * function, one preload handler and one channel. Targets are kind-tagged and
+ * the checks that differ, differ by kind. Two mechanisms would drift, and the
+ * drift would be silent: the credential path would grow the origin echo and the
+ * profile path would keep the TOCTOU. This codebase has already paid for
+ * exactly that inconsistency once (`consent.ts`'s opening comment).
+ *
+ * THE TIMEOUT IS 5000ms AND THE PRELOAD REPLIES AT T+250ms. The gap is
+ * deliberate slack, not an accident: the deferred verification is a
+ * `setTimeout` inside the page's own task queue, and a page busy for 200ms
+ * would otherwise turn a landed fill into a timeout.
+ */
 export async function requestFill(
   wc: WebContents,
-  fills: { key: string; value: string }[],
+  req: { expectedOrigin: string; atomic: boolean; targets: FillTargetRequest[] },
   timeoutMs = 5000,
-): Promise<{ ok: boolean; filled: string[]; reason?: string }> {
+): Promise<FillOutcome> {
   wireOnce();
   const requestId = randomUUID();
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(requestId);
-      resolve({ ok: false, filled: [], reason: 'fill timed out' });
+      resolve({ ok: false, reason: 'timeout' });
     }, timeoutMs);
 
     pending.set(requestId, (payload) => {
       clearTimeout(timer);
-      resolve(payload as unknown as { ok: boolean; filled: string[]; reason?: string });
+      resolve(payload as unknown as FillChannelResult);
     });
 
-    wc.send('aperture:fill', { requestId, fills });
+    const message: FillRequest = {
+      requestId,
+      expectedOrigin: req.expectedOrigin,
+      atomic: req.atomic,
+      targets: req.targets,
+    };
+    wc.send('aperture:fill', message);
   });
 }

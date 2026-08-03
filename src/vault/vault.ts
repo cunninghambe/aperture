@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import sodium from 'libsodium-wrappers-sumo';
-import type { VaultEntryPublic, VaultState } from '@shared/types';
+import type { FillDenyCode, VaultEntryPublic, VaultState } from '@shared/types';
 import { parse } from 'tldts';
 import { parseOtpauth, totp } from './totp.js';
 
@@ -50,11 +50,43 @@ interface VaultFile {
   ciphertext: string;
 }
 
+/** How many seconds a one-time code must have left to be worth inserting. */
+const TOTP_FRESHNESS_FLOOR_S = 5;
+
 export class Vault {
   private key: Uint8Array | null = null;
   private records: VaultRecord[] = [];
   private lockTimer: NodeJS.Timeout | null = null;
   private ready = false;
+  /**
+   * Dev-seeded, in-memory only. `persist()` short-circuits, so `seedForDev`
+   * can never touch a human's vault file even if the guard above it is
+   * bypassed — two independent reasons for the same safety.
+   */
+  private inMemory = false;
+  /**
+   * Which TOTP counter window each entry has already had a code inserted for.
+   *
+   * Most verifiers burn a code on first use. Without this, an agent calling
+   * `apply` twice inside one 30-second window inserts the same digits, the
+   * server rejects them, the agent concludes the code was wrong and tries
+   * again — a loop that ends in a lockout. Process-local, cleared on lock,
+   * never persisted: a restart is not a replay risk worth writing
+   * plaintext-adjacent state to disk for.
+   */
+  private lastIssued = new Map<string, number>();
+  /**
+   * Things that must happen when the vault locks, however it locked.
+   *
+   * The reason this is a registry rather than a direct call: `revokeAllGrants`
+   * lives in `main/consent.ts` and needle clearing lives in
+   * `core/snapshot/engine.ts`, and importing either from here would create an
+   * import cycle. `main/index.ts` registers them, which is also the one place
+   * that can see both. Before this, `revokeAllGrants` had NO callers at all
+   * while its own doc comment said it was "called when the vault locks" —
+   * docs/design/vaultfill.md F1.
+   */
+  private lockHooks: (() => void)[] = [];
   /**
    * KDF parameters for the open vault, kept so callers never have to pass
    * them. Making a caller supply crypto parameters on every write is how you
@@ -136,8 +168,31 @@ export class Vault {
     this.key = null;
     this.kdf = null;
     this.records = [];
+    this.lastIssued.clear();
+    this.inMemory = false;
     if (this.lockTimer) clearTimeout(this.lockTimer);
     this.lockTimer = null;
+    // Every path into a lock comes through here, including the idle timer
+    // below, which is exactly why the hooks hang off this function and not off
+    // the explicit callers.
+    for (const fn of this.lockHooks) {
+      try {
+        fn();
+      } catch {
+        // A misbehaving hook must not leave the vault half-locked. The key is
+        // already zeroed above; the rest is best-effort cleanup.
+      }
+    }
+  }
+
+  /**
+   * Register something to run whenever the vault locks.
+   *
+   * Idempotence is the caller's problem; `main/index.ts` registers once at
+   * startup.
+   */
+  onLock(fn: () => void): void {
+    this.lockHooks.push(fn);
   }
 
   /** Whether a vault file exists yet, so the UI knows to offer create vs unlock. */
@@ -178,6 +233,8 @@ export class Vault {
   }
 
   private async persist(): Promise<void> {
+    // A dev-seeded vault has no file and must never acquire one.
+    if (this.inMemory) return;
     if (!this.key || !this.kdf) throw new Error('vault is locked');
     const { salt, opslimit, memlimit } = this.kdf;
     const nonce = sodium.randombytes_buf(
@@ -235,38 +292,251 @@ export class Vault {
   }
 
   /**
-   * Resolve an entry for filling.
+   * Everything about an entry a fill decision needs, and nothing secret.
    *
-   * Deliberately NOT exported and NOT reachable from IPC or MCP. The only
-   * caller is the fill path in the main process, which hands the value
-   * straight to the renderer without returning it upward.
+   * SPLIT FROM `resolveForFill`, WHICH THIS REPLACES, FOR TWO REASONS.
+   *
+   * First, it ran BEFORE the fill and stamped `lastUsed` anyway, so a refused,
+   * failed, or human-declined fill marked the record as used (F3) — and it
+   * never called `persist()`, so the stamp was lost at lock regardless (F2).
+   * Resolving is not using. `noteUsed` below is the use.
+   *
+   * Second, the checks and the secrets are wanted at different moments. This
+   * runs at pipeline step 4, BEFORE any page work at all, so a wrong-origin
+   * request never even reads the DOM: the page cannot influence the decision
+   * because the decision is taken before the page is consulted.
+   *
+   * Deliberately NOT exported to MCP or IPC. Its result carries no password,
+   * but the discipline is the point — this class's surface toward anything the
+   * agent can reach is `listPublic` and nothing else.
    */
-  resolveForFill(
+  resolveEntryFor(
     entryId: string,
     committedOrigin: string,
-  ): { username: string; password: string } | { error: FillDenyCode } {
-    if (!this.key) return { error: 'VAULT_LOCKED' };
+  ):
+    | {
+        ok: true;
+        id: string;
+        username: string;
+        hasTotp: boolean;
+        /**
+         * The entry's TOTP step in seconds, when it has a seed.
+         *
+         * Clock arithmetic, not secret material — it is in the otpauth URI a
+         * site prints beside its QR code. It exists so the consent dialog can
+         * say how long a code will be good for WITHOUT generating one, which is
+         * what lets code generation stay at step 10 where it belongs.
+         */
+        totpStep?: number;
+        /** The record's own site. NEVER put this on the wire — section 10. */
+        rpId: string;
+        /** The page's registrable domain, which the human may name. */
+        pageRpId: string;
+        /** True when the match came from a human-approved alias. */
+        viaAlias: boolean;
+      }
+    | { ok: false; error: VaultDenyCode } {
+    if (!this.key) return { ok: false, error: 'VAULT_LOCKED' };
 
     const rec = this.records.find((r) => r.id === entryId);
-    if (!rec) return { error: 'NO_MATCH' };
+    if (!rec) return { ok: false, error: 'NO_MATCH' };
 
     const rp = registrableDomain(committedOrigin);
-    if (!rp) return { error: 'ORIGIN_MISMATCH' };
+    if (!rp) return { ok: false, error: 'ORIGIN_MISMATCH' };
 
     // Origin mismatch is terminal. There is no force flag and no override,
     // because the agent is exactly the component we have assumed is
     // manipulable — giving it a way to say "do it anyway" would reduce the
     // whole design to the agent's judgement under adversarial input.
     if (rec.rpId !== rp && !rec.aliases.includes(rp)) {
-      return { error: 'ORIGIN_MISMATCH' };
+      return { ok: false, error: 'ORIGIN_MISMATCH' };
     }
 
     if (!committedOrigin.startsWith('https://') && !isLocalhost(committedOrigin)) {
-      return { error: 'INSECURE_TRANSPORT' };
+      return { ok: false, error: 'INSECURE_TRANSPORT' };
     }
 
+    const step = rec.totpSecret ? (parseOtpauth(rec.totpSecret)?.step ?? 30) : undefined;
+    return {
+      ok: true,
+      id: rec.id,
+      username: rec.username,
+      hasTotp: Boolean(rec.totpSecret),
+      ...(step === undefined ? {} : { totpStep: step }),
+      rpId: rec.rpId,
+      pageRpId: rp,
+      viaAlias: rec.rpId !== rp,
+    };
+  }
+
+  /**
+   * The secrets, resolved at the last possible moment.
+   *
+   * Called at pipeline step 10 — after the human has approved, immediately
+   * before the write. Never at plan time and never at consent time: a one-time
+   * code generated before a human reads a dialog can be several seconds into
+   * its window by the time it lands.
+   *
+   * Re-runs the full origin check rather than trusting the caller's earlier
+   * one. The caller does hold a `resolveEntryFor` result, but a secret handed
+   * out on the strength of a check made somewhere else is exactly the shape of
+   * bug this design exists to make impossible.
+   *
+   * Not registered on any MCP tool, not on any `vaultui:` channel, not
+   * reachable from the page preload. The seed never moves: `totpCode()` stays
+   * the human-only path and this returns only the derived code.
+   */
+  async secretsForFill(
+    entryId: string,
+    committedOrigin: string,
+    want: { username: boolean; password: boolean; otp: boolean },
+  ): Promise<
+    | {
+        ok: true;
+        username?: string;
+        password?: string;
+        otp?: { code: string; secondsRemaining: number; waitedMs: number };
+      }
+    | { ok: false; error: VaultDenyCode | 'TOTP_UNAVAILABLE' }
+    | { ok: false; error: 'TOTP_ALREADY_ISSUED'; secondsUntilNext: number }
+  > {
+    const resolved = this.resolveEntryFor(entryId, committedOrigin);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+
+    const rec = this.records.find((r) => r.id === entryId);
+    if (!rec) return { ok: false, error: 'NO_MATCH' };
+
+    const out: {
+      ok: true;
+      username?: string;
+      password?: string;
+      otp?: { code: string; secondsRemaining: number; waitedMs: number };
+    } = { ok: true };
+
+    if (want.username) out.username = rec.username;
+    if (want.password) out.password = rec.password;
+
+    if (want.otp) {
+      if (!rec.totpSecret) return { ok: false, error: 'TOTP_UNAVAILABLE' };
+      const parsed = parseOtpauth(rec.totpSecret);
+      if (!parsed) return { ok: false, error: 'TOTP_UNAVAILABLE' };
+      const step = parsed.step ?? 30;
+
+      let now = Date.now();
+      let counter = Math.floor(now / 1000 / step);
+      const already = this.lastIssued.get(entryId);
+      if (already === counter) {
+        const secondsUntilNext = step - Math.floor((now / 1000) % step);
+        return { ok: false, error: 'TOTP_ALREADY_ISSUED', secondsUntilNext };
+      }
+
+      let code: { code: string; secondsRemaining: number };
+      try {
+        code = totp(parsed.secret, now, {
+          digits: parsed.digits,
+          step: parsed.step,
+          algorithm: parsed.algorithm,
+        });
+      } catch {
+        return { ok: false, error: 'TOTP_UNAVAILABLE' };
+      }
+
+      // THE FRESHNESS FLOOR. A code with two seconds left is rejected by the
+      // server, and a rejected second factor costs an attempt against a lockout
+      // counter — strictly worse than a one-second delay. The wait is bounded
+      // by the floor itself: it can never exceed TOTP_FRESHNESS_FLOOR_S.
+      let waitedMs = 0;
+      if (code.secondsRemaining < TOTP_FRESHNESS_FLOOR_S) {
+        waitedMs = code.secondsRemaining * 1000 + 250;
+        await new Promise((r) => setTimeout(r, waitedMs));
+        now = Date.now();
+        counter = Math.floor(now / 1000 / step);
+        if (this.lastIssued.get(entryId) === counter) {
+          const secondsUntilNext = step - Math.floor((now / 1000) % step);
+          return { ok: false, error: 'TOTP_ALREADY_ISSUED', secondsUntilNext };
+        }
+        try {
+          code = totp(parsed.secret, now, {
+            digits: parsed.digits,
+            step: parsed.step,
+            algorithm: parsed.algorithm,
+          });
+        } catch {
+          return { ok: false, error: 'TOTP_UNAVAILABLE' };
+        }
+      }
+
+      this.lastIssued.set(entryId, counter);
+      out.otp = { ...code, waitedMs };
+    }
+
+    return out;
+  }
+
+  /**
+   * Record that an entry was actually USED — after the write, not before it.
+   *
+   * Persisting, unlike its predecessor, and best-effort: a failed disk write
+   * must not turn a successful fill into a failure the agent reports to the
+   * human. The consequence of losing it is a stale "last used" date.
+   */
+  async noteUsed(entryId: string): Promise<void> {
+    const rec = this.records.find((r) => r.id === entryId);
+    if (!rec) return;
     rec.lastUsed = new Date().toISOString();
-    return { username: rec.username, password: rec.password };
+    try {
+      await this.persist();
+    } catch {
+      // See above: metadata, not the fill.
+    }
+  }
+
+  /**
+   * A vault with known contents, for the live guards. Dev builds only.
+   *
+   * GATED TWICE, and neither gate is a comment. It throws unless the app is
+   * unpackaged AND `--seed-vault` is on the main process's own command line —
+   * which is not an MCP parameter, not an IPC channel, not an environment
+   * variable, and not anything a page or an agent can set. It refuses outright
+   * if a real vault file exists, so it can never stand in front of a human's
+   * data, and `persist()` short-circuits so it can never create one.
+   */
+  async seedForDev(): Promise<void> {
+    if (app.isPackaged) throw new Error('seedForDev is not available in a packaged build');
+    if (!process.argv.includes('--seed-vault')) {
+      throw new Error('seedForDev requires --seed-vault on the command line');
+    }
+    if (await this.exists()) {
+      throw new Error('seedForDev refuses to run beside a real vault file');
+    }
+
+    await this.init();
+    this.inMemory = true;
+    this.key = sodium.randombytes_buf(sodium.crypto_secretbox_KEYBYTES);
+    this.kdf = null;
+    this.lastIssued.clear();
+    this.records = [
+      {
+        id: sodium.to_hex(sodium.randombytes_buf(8)),
+        rpId: '127.0.0.1',
+        username: 'guard@example.com',
+        password: 'guard-pw-93a1',
+        totpSecret: 'JBSWY3DPEHPK3PXP',
+        aliases: [],
+        createdAt: new Date().toISOString(),
+        lastUsed: null,
+      },
+      {
+        id: sodium.to_hex(sodium.randombytes_buf(8)),
+        rpId: '127.0.0.2',
+        username: 'transport@example.com',
+        password: 'transport-pw-5c72',
+        aliases: [],
+        createdAt: new Date().toISOString(),
+        lastUsed: null,
+      },
+    ];
+    this.touch();
   }
 
   // -------------------------------------------------------------------------
@@ -418,13 +688,18 @@ export class Vault {
   }
 }
 
-export type FillDenyCode =
-  | 'VAULT_LOCKED'
-  | 'NO_MATCH'
-  | 'ORIGIN_MISMATCH'
-  | 'INSECURE_TRANSPORT'
-  | 'NODE_NOT_FILLABLE'
-  | 'USER_DENIED';
+/**
+ * The subset of `FillDenyCode` the vault itself can produce.
+ *
+ * `Extract` rather than a hand-written union: the wire-string table in
+ * `src/mcp/tools.ts` is keyed on the full union, so a code spelled slightly
+ * differently here would be a code with no string, and this makes that a
+ * typecheck failure instead of a runtime `undefined`.
+ */
+export type VaultDenyCode = Extract<
+  FillDenyCode,
+  'VAULT_LOCKED' | 'NO_MATCH' | 'ORIGIN_MISMATCH' | 'INSECURE_TRANSPORT'
+>;
 
 /**
  * Registrable domain (eTLD+1) — the unit of origin identity for the vault.

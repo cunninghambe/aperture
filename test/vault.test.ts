@@ -152,11 +152,17 @@ describe('origin binding', () => {
       password: 'p1',
     });
 
-    const ok = v.resolveForFill(id, 'https://github.com');
-    expect('password' in ok && ok.password).toBe('p1');
+    const ok = v.resolveEntryFor(id, 'https://github.com');
+    expect(ok.ok).toBe(true);
+    const secrets = await v.secretsForFill(id, 'https://github.com', {
+      username: true,
+      password: true,
+      otp: false,
+    });
+    expect(secrets.ok && secrets.password).toBe('p1');
 
-    const bad = v.resolveForFill(id, 'https://evil.com');
-    expect('error' in bad && bad.error).toBe('ORIGIN_MISMATCH');
+    const bad = v.resolveEntryFor(id, 'https://evil.com');
+    expect(!bad.ok && bad.error).toBe('ORIGIN_MISMATCH');
   });
 
   it('is not fooled by a lookalike subdomain', async () => {
@@ -167,8 +173,8 @@ describe('origin binding', () => {
       password: 'p',
     });
     // google.com.evil.com registers under evil.com, not google.com.
-    const bad = v.resolveForFill(id, 'https://google.com.evil.com');
-    expect('error' in bad && bad.error).toBe('ORIGIN_MISMATCH');
+    const bad = v.resolveEntryFor(id, 'https://google.com.evil.com');
+    expect(!bad.ok && bad.error).toBe('ORIGIN_MISMATCH');
   });
 
   it('matches a subdomain of the same registrable domain', async () => {
@@ -178,23 +184,196 @@ describe('origin binding', () => {
       username: 'g',
       password: 'p',
     });
-    const ok = v.resolveForFill(id, 'https://gist.github.com');
-    expect('password' in ok).toBe(true);
+    expect(v.resolveEntryFor(id, 'https://gist.github.com').ok).toBe(true);
   });
 
   it('refuses to fill over plain http', async () => {
     const v = await freshVault();
     const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
-    const r = v.resolveForFill(id, 'http://a.com');
-    expect('error' in r && r.error).toBe('INSECURE_TRANSPORT');
+    const r = v.resolveEntryFor(id, 'http://a.com');
+    expect(!r.ok && r.error).toBe('INSECURE_TRANSPORT');
   });
 
   it('refuses to fill while locked', async () => {
     const v = await freshVault();
     const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
     v.lock();
-    const r = v.resolveForFill(id, 'https://a.com');
-    expect('error' in r && r.error).toBe('VAULT_LOCKED');
+    const r = v.resolveEntryFor(id, 'https://a.com');
+    expect(!r.ok && r.error).toBe('VAULT_LOCKED');
+  });
+
+  it('refuses the secrets too, not only the metadata, on a wrong origin', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
+    // `secretsForFill` re-runs the full check rather than trusting that the
+    // caller already ran `resolveEntryFor`. A secret handed out on the strength
+    // of a check made somewhere else is exactly the bug shape this design
+    // exists to make impossible.
+    const r = await v.secretsForFill(id, 'https://evil.com', {
+      username: true,
+      password: true,
+      otp: false,
+    });
+    expect(!r.ok && r.error).toBe('ORIGIN_MISMATCH');
+  });
+});
+
+describe('resolve is not use (F2, F3)', () => {
+  beforeEach(() => rmSync(join(dir, 'vault.aperture'), { force: true }));
+
+  it('resolveEntryFor does not stamp lastUsed', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
+    expect(v.listAllPublic()[0]!.lastUsed).toBeNull();
+
+    // Resolving is a CHECK. A refused, failed or human-declined fill used to
+    // stamp the record anyway, because the stamp happened here.
+    v.resolveEntryFor(id, 'https://a.com');
+    v.resolveEntryFor(id, 'https://evil.com');
+    expect(v.listAllPublic()[0]!.lastUsed).toBeNull();
+  });
+
+  it('noteUsed stamps AND persists across lock/unlock', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
+    await v.noteUsed(id);
+    const stamped = v.listAllPublic()[0]!.lastUsed;
+    expect(stamped).not.toBeNull();
+
+    // The old code mutated the field and never called persist(), so the
+    // mutation was lost at lock and "last used" was permanently null on disk.
+    v.lock();
+    const v2 = new Vault();
+    expect(await v2.unlock(PASS)).toBe(true);
+    expect(v2.listAllPublic()[0]!.lastUsed).toBe(stamped);
+  });
+});
+
+describe('TOTP delivery', () => {
+  beforeEach(() => rmSync(join(dir, 'vault.aperture'), { force: true }));
+
+  const SEED = 'JBSWY3DPEHPK3PXP';
+
+  it('refuses a second code in the same counter window', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({
+      origin: 'https://a.com',
+      username: 'u',
+      password: 'p',
+      totpSecret: SEED,
+    });
+
+    const first = await v.secretsForFill(id, 'https://a.com', {
+      username: false, password: false, otp: true,
+    });
+    expect(first.ok).toBe(true);
+    expect(first.ok && first.otp?.code).toMatch(/^\d{6}$/);
+
+    // Most verifiers burn a code on first use. Re-inserting the same digits
+    // gets them rejected, and the agent reads that as "wrong code" and retries
+    // — a loop that ends in a lockout.
+    const second = await v.secretsForFill(id, 'https://a.com', {
+      username: false, password: false, otp: true,
+    });
+    expect(!second.ok && second.error).toBe('TOTP_ALREADY_ISSUED');
+    expect(!second.ok && 'secondsUntilNext' in second && second.secondsUntilNext)
+      .toBeGreaterThan(0);
+  });
+
+  it('waits past the step boundary when the code is nearly stale', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({
+      origin: 'https://a.com',
+      username: 'u',
+      password: 'p',
+      totpSecret: SEED,
+    });
+
+    // Two seconds left. A code with two seconds left is rejected by the server,
+    // and a rejected second factor costs an attempt against a lockout counter —
+    // strictly worse than a one-second delay.
+    const step = 30_000;
+    const nearBoundary = Math.floor(Date.now() / step) * step + (step - 2000);
+    vi.useFakeTimers({ shouldAdvanceTime: true, now: nearBoundary });
+    try {
+      const r = await v.secretsForFill(id, 'https://a.com', {
+        username: false, password: false, otp: true,
+      });
+      expect(r.ok).toBe(true);
+      expect(r.ok && r.otp!.waitedMs).toBeGreaterThan(0);
+      expect(r.ok && r.otp!.secondsRemaining).toBeGreaterThanOrEqual(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the replay record is cleared by a lock', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({
+      origin: 'https://a.com',
+      username: 'u',
+      password: 'p',
+      totpSecret: SEED,
+    });
+    await v.secretsForFill(id, 'https://a.com', {
+      username: false, password: false, otp: true,
+    });
+    v.lock();
+    expect(await v.unlock(PASS)).toBe(true);
+    const again = await v.secretsForFill(id, 'https://a.com', {
+      username: false, password: false, otp: true,
+    });
+    expect(again.ok).toBe(true);
+  });
+
+  it('says so rather than guessing when there is no seed', async () => {
+    const v = await freshVault();
+    const id = await v.addRecord({ origin: 'https://a.com', username: 'u', password: 'p' });
+    const r = await v.secretsForFill(id, 'https://a.com', {
+      username: false, password: false, otp: true,
+    });
+    expect(!r.ok && r.error).toBe('TOTP_UNAVAILABLE');
+  });
+});
+
+describe('lock hooks (F1)', () => {
+  beforeEach(() => rmSync(join(dir, 'vault.aperture'), { force: true }));
+
+  it('fire on an explicit lock', async () => {
+    const v = await freshVault();
+    let fired = 0;
+    v.onLock(() => { fired += 1; });
+    v.lock();
+    expect(fired).toBe(1);
+  });
+
+  it('fire on the IDLE auto-lock, which is the path that matters', async () => {
+    const v = await freshVault();
+    let fired = 0;
+    v.onLock(() => { fired += 1; });
+
+    // The hooks hang off `lock()` rather than off its callers precisely so the
+    // idle timer counts. A human walks away, the vault times out, and a
+    // ten-minute autofill grant used to outlive it.
+    vi.useFakeTimers();
+    try {
+      v.touch();
+      vi.advanceTimersByTime(5 * 60 * 1000 + 10);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(fired).toBe(1);
+    expect(v.state()).toBe('locked');
+  });
+
+  it('a throwing hook does not leave the vault unlocked', async () => {
+    const v = await freshVault();
+    v.onLock(() => { throw new Error('hook blew up'); });
+    let second = false;
+    v.onLock(() => { second = true; });
+    expect(() => v.lock()).not.toThrow();
+    expect(v.state()).toBe('locked');
+    expect(second).toBe(true);
   });
 });
 

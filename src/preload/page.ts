@@ -161,11 +161,15 @@ ipcRenderer.on(
       if (req.key !== undefined && req.key !== null) {
         const el = index.get(req.key);
         if (!el || !el.isConnected) return reply({ ok: false, reason: 'gone' });
-        // The walker descends into same-origin subframes, so `index` can hold
-        // an element whose owner document is not this one. Its events dispatch
-        // through ITS window, which this recorder is not on — so the counters
-        // below say nothing about it, and the main process is told to fall
-        // back rather than reading silence as loss.
+        // Whether `index` can hold an element whose owner document is not this
+        // one. The old comment here asserted that it CAN, because "the walker
+        // descends into same-origin subframes" — which is false at this HEAD:
+        // `walker.ts` contains no `contentDocument` access and maps IFRAME to a
+        // leaf role, and a preload without `nodeIntegrationInSubFrames` runs in
+        // the main frame only. So this is expected to be `true` always. It is
+        // kept as a CHECK rather than deleted, because if that configuration
+        // ever changes the honest answer is "the recorder cannot speak for that
+        // frame" and not a verdict derived from counters that never saw it.
         top = el.ownerDocument === document;
       }
       // A copy, so a reply in flight cannot be mutated by a later event.
@@ -200,60 +204,324 @@ ipcRenderer.on('aperture:walk', (_event, req: WalkRequest) => {
 });
 
 /**
- * Fill a field.
+ * Fill fields — including credentials.
  *
- * The value arrives from the main process and is written using the *native*
- * property setter captured from this isolated world's own prototype. That
- * matters: the page cannot monkeypatch `HTMLInputElement.prototype.value` to
- * intercept or redirect the write, because our world has its own builtins.
+ * WHY THE WRITE IS AIMED BY IDENTITY AND NOT BY FOCUS
  *
- * This protects the integrity of the fill. It provides no confidentiality —
- * the page owns its DOM and can read the field back afterwards. That is a
- * property of the web platform, not a gap in this code, and the vault design
- * says so explicitly rather than implying otherwise.
+ * `act.ts`'s doctrine is that everything goes through CDP, because synthesized
+ * events are untrusted and detectable. This is an owned divergence from it, the
+ * same class as `select` (docs/design/tier1.md section 2), and the reasoning is
+ * its own.
+ *
+ * CDP key events go to WHATEVER HAS FOCUS AT THE MOMENT EACH ONE IS DELIVERED,
+ * and delivery is one round trip per character at ~12ms. A 20-character
+ * password is ~40 CDP commands spanning a quarter of a second, during which the
+ * page may move focus: an autocomplete dropdown, a validation handler, a modal,
+ * a `focus()` call in a `keyup` listener. If focus moves at character 9, nine
+ * characters of the credential are in the password field and eleven are in
+ * whatever took focus — potentially a visible `input[type=text]` whose value
+ * the walker serialises into the next snapshot, i.e. straight into agent
+ * context. For an ordinary typed string that race is a usability bug; for a
+ * secret it is a disclosure, into exactly the component the whole design exists
+ * to keep blind. `Input.insertText` loses on the same argument before fidelity
+ * is even reached: it also targets the focused element.
+ *
+ * `index.get(key)` resolves ONE element and the setter is called on it. There
+ * is no intermediate state and no dependency on focus.
+ *
+ * WHAT THE SETTER BUYS. It is taken from THIS isolated world's prototype, so a
+ * page that monkeypatches its own builtins cannot intercept or redirect the
+ * write. React's value tracker is installed with `Object.defineProperty` on the
+ * MAIN world's wrapper for the node and is therefore not on the object this
+ * code touches, so the DOM value diverges from React's cached value and the
+ * dispatched `input` reads as a genuine change.
+ *
+ * WHAT IT DOES NOT BUY, SAID PLAINLY. No `keydown`, `keyup`, `beforeinput` or
+ * `compositionend`, so input masks, phone formatters and forms that gate
+ * submission on having seen typing will not see what they expect. And the
+ * events carry `isTrusted: false`, so a site that checks it will ignore the
+ * write. Both failure modes are DETECTABLE, not silent, and that is what makes
+ * them acceptable: the deferred verification below catches them and turns them
+ * into a refusal rather than a false success.
+ *
+ * This protects the integrity of the fill. It provides no confidentiality — the
+ * page owns its DOM and can read the field back afterwards. That is a property
+ * of the web platform, not a gap in this code.
+ *
+ * REASON STRINGS ON THIS CHANNEL ARE LITERALS, WITHOUT EXCEPTION. The catch
+ * block replies `write-failed` and nothing else. `browser_fill_form` used to
+ * print an interpolated `err.message` OUTSIDE the untrusted-content envelope —
+ * one of the four sites docs/design/security.md names under "Preload reason
+ * strings are NOT all literals". That one is closed here, and it costs nothing
+ * to hold from the start.
  */
+type FillKind = 'profile' | 'username' | 'password' | 'otp';
+type FillReason =
+  | 'origin-changed' | 'gone' | 'subframe' | 'not-input' | 'not-masked'
+  | 'not-editable' | 'too-small' | 'no-setter' | 'reverted' | 'write-failed';
+
+interface FillTarget {
+  key: string;
+  kind: FillKind;
+  value: string;
+}
+
+/** Below this a "field" is a hidden trap rather than something a human types in. */
+const MIN_FILL_WIDTH = 16;
+const MIN_FILL_HEIGHT = 8;
+
+/**
+ * How long to wait before asking whether the value stuck.
+ *
+ * NOT 0ms: a controlled component that snaps back does so on its next render,
+ * and a same-task read-back cannot see it. NOT 2000ms: this reply is on the
+ * critical path of a human-visible action, and a framework that has not
+ * re-rendered in 250ms has not re-rendered because of this write.
+ *
+ * The same-task read-back is kept AS WELL, because it catches the synchronous
+ * class the deferred one cannot attribute: a page whose `input` handler
+ * rewrites `el.value` in the same event turn. MEASURED (probe, Electron 43,
+ * 2026-08-03): a handler doing `p.value = p.value.slice(0,8)` produced
+ * `landed:false` and `FILL_REVERTED` with the page holding 8 characters.
+ *
+ * The spec's stated example for this check — `maxlength` truncation — is NOT
+ * one, and the same probe showed why: `maxlength` constrains USER input only
+ * and does not apply to a programmatic value assignment. A 13-character
+ * password written into a `maxlength=8` field lands whole, `landed:true`, with
+ * the page reading all 13. The check earns its place on the sanitiser class,
+ * not on that one.
+ *
+ * The 250ms number is a judgement, not a measurement: a framework that reverts
+ * at 400ms reports `landed: true`. Stated in docs/design/vaultfill.md section
+ * 17.8 rather than hidden.
+ */
+const VERIFY_DELAY_MS = 250;
+
 ipcRenderer.on(
   'aperture:fill',
   (
     _event,
-    req: { requestId: string; fills: { key: string; value: string }[] },
+    req: {
+      requestId: string;
+      expectedOrigin: string;
+      atomic: boolean;
+      targets: FillTarget[];
+    },
   ) => {
-    const filled: string[] = [];
+    const reply = (payload: unknown): void => {
+      ipcRenderer.send('aperture:fill-result', req.requestId, payload);
+    };
+
     try {
-      for (const f of req.fills) {
-        const el = index.get(f.key);
-        if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+      // THE TOCTOU FIX, and it is total rather than narrow.
+      //
+      // Main computes `expectedOrigin` before it raises the consent dialog, and
+      // the dialog is open for as long as a human takes to read it. Nothing
+      // used to re-check the committed origin in between, so a tab that
+      // navigated during that window landed the values in a document the human
+      // never approved. Main and this preload are separate tasks — but the
+      // VALIDATION AND THE WRITE BELOW ARE THE SAME TASK, and a cross-document
+      // navigation cannot commit in the middle of one. The residual window is
+      // not "as long as the human reads the dialog"; it is zero.
+      //
+      // `location` is read from the isolated world, where the page cannot
+      // redefine it.
+      if (location.origin !== req.expectedOrigin) {
+        return reply({ ok: false, reason: 'origin-changed' as FillReason });
+      }
+
+      // Validation pass. Every target, in order, BEFORE any write — collecting
+      // failures rather than stopping at the first, so a non-atomic fill can
+      // report exactly which ones it skipped and why.
+      const checked: { t: FillTarget; el: HTMLElement }[] = [];
+      const skipped: { key: string; kind: FillKind; reason: FillReason }[] = [];
+
+      const fail = (t: FillTarget, reason: FillReason): void => {
+        skipped.push({ key: t.key, kind: t.kind, reason });
+      };
+
+      for (const t of req.targets) {
+        const el = index.get(t.key);
+        // Writing into a detached node and reporting success was the old
+        // handler's first defect: `isConnected` is the difference between "the
+        // value is in the page" and "the value is in a node nobody can see".
+        if (!el || !el.isConnected) {
+          fail(t, 'gone');
+          continue;
+        }
+        // The top-frame rule, enforced rather than hoped for. A preload without
+        // `nodeIntegrationInSubFrames` runs in the main frame only and the
+        // walker does not descend into subframes, so this should be
+        // unreachable — which is exactly why it is checked rather than
+        // asserted in a comment.
+        if (el.ownerDocument !== document) {
+          fail(t, 'subframe');
           continue;
         }
 
-        const proto =
-          el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (!setter) continue;
+        const credential = t.kind !== 'profile';
+        const writable =
+          el instanceof HTMLInputElement ||
+          (!credential && el instanceof HTMLTextAreaElement);
+        if (!writable) {
+          // The old handler `continue`d silently past anything that was not an
+          // input or textarea, so a partial fill was indistinguishable from a
+          // complete one.
+          fail(t, 'not-input');
+          continue;
+        }
 
-        el.focus();
-        setter.call(el, f.value);
+        const input = el as HTMLInputElement | HTMLTextAreaElement;
+
+        if (t.kind === 'password') {
+          // A password only ever goes into a masked field. A plain-text field's
+          // value IS serialised by the walker, so a "show password" toggle left
+          // on turns the next snapshot into a disclosure.
+          if (!(input instanceof HTMLInputElement) || input.type !== 'password') {
+            fail(t, 'not-masked');
+            continue;
+          }
+        }
+        if (t.kind === 'otp') {
+          if (
+            !(input instanceof HTMLInputElement) ||
+            input.type === 'password' ||
+            input.type === 'hidden'
+          ) {
+            fail(t, 'not-input');
+            continue;
+          }
+        }
+
+        // "A human could not do it either" — the rule the `select` path already
+        // follows. A click on a disabled control is discarded by the browser; a
+        // write here is not, so nothing else stops it.
+        //
+        // `isDisabled` AND NOT `input.disabled`, and this is a deliberate
+        // strengthening of what docs/design/vaultfill.md section 6.2 asks for.
+        // The IDL `disabled` property reflects the CONTENT ATTRIBUTE only, so it
+        // is `false` for a control disabled by an ancestor `<fieldset disabled>`
+        // — the control is unusable to a human and this write would have gone
+        // straight into it. That is the identical hole the `select` path closed
+        // for exactly this reason (see the `aperture:select` handler below), and
+        // repeating it here would be repeating a bug this codebase has already
+        // paid for once. The change can only ever refuse MORE, never less.
+        // Measured by guard G25b.
+        if (isDisabled(input) || input.readOnly) {
+          fail(t, 'not-editable');
+          continue;
+        }
+
+        if (credential) {
+          const r = input.getBoundingClientRect();
+          if (r.width < MIN_FILL_WIDTH || r.height < MIN_FILL_HEIGHT) {
+            fail(t, 'too-small');
+            continue;
+          }
+        }
+
+        if (!setterFor(input)) {
+          fail(t, 'no-setter');
+          continue;
+        }
+
+        checked.push({ t, el: input });
+      }
+
+      // ATOMIC: any failure means nothing is written at all. Because validation
+      // is complete before the first write, `ok:false` here is a claim main can
+      // rely on — it is what lets the caller drop the taint it applied.
+      const firstFailure = skipped[0];
+      if (req.atomic && firstFailure) {
+        return reply({ ok: false, reason: firstFailure.reason, key: firstFailure.key });
+      }
+
+      // Write pass.
+      const written: { t: FillTarget; el: HTMLInputElement | HTMLTextAreaElement }[] = [];
+      const reverted = new Set<string>();
+      for (const { t, el } of checked) {
+        const input = el as HTMLInputElement | HTMLTextAreaElement;
+        const setter = setterFor(input)!;
+        input.focus();
+        setter.call(input, t.value);
         // React and friends listen for these; setting .value alone leaves
         // controlled components with stale state.
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        filled.push(f.key);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        // Same-task read-back: catches a synchronous sanitiser, which rewrites
+        // the value inside this same event turn and is therefore invisible to
+        // the deferred check below. (Not `maxlength` — see VERIFY_DELAY_MS.)
+        if (input.value !== t.value) reverted.add(t.key);
+        written.push({ t, el: input });
       }
-      ipcRenderer.send('aperture:fill-result', req.requestId, {
-        ok: true,
-        filled,
-      });
-    } catch (err) {
-      ipcRenderer.send('aperture:fill-result', req.requestId, {
-        ok: false,
-        reason: err instanceof Error ? err.message : String(err),
-        filled,
-      });
+
+      // THE DEFERRED VERIFICATION. The reply does not go out when the write
+      // returns; it goes out after re-reading each target and comparing against
+      // what was written. `ok` therefore means arrival, not delivery.
+      //
+      // This is the direct answer to this project's own history: six things
+      // marked "working" broke the moment they were measured end to end. A fill
+      // path that reports success from the fact that an IPC message was
+      // delivered is that failure pre-committed.
+      setTimeout(() => {
+        try {
+          const results = [
+            ...written.map(({ t, el }) => ({
+              key: t.key,
+              kind: t.kind,
+              wrote: true,
+              landed: !reverted.has(t.key) && el.isConnected && el.value === t.value,
+              ...(reverted.has(t.key) ? { skipped: 'reverted' as FillReason } : {}),
+            })),
+            ...skipped.map((s) => ({
+              key: s.key,
+              kind: s.kind,
+              wrote: false,
+              landed: false,
+              skipped: s.reason,
+            })),
+          ];
+          const active = document.activeElement;
+          let focusedKey: string | null = null;
+          for (const { t, el } of written) {
+            if (el === active) focusedKey = t.key;
+          }
+          reply({ ok: true, results, focusedKey });
+        } catch {
+          reply({ ok: false, reason: 'write-failed' as FillReason });
+        } finally {
+          // The expected values lived in this closure for 250ms and are never
+          // sent back. Dropping the references is housekeeping rather than a
+          // boundary — the page cannot reach an isolated world's closure, and it
+          // already holds the values in its own DOM regardless.
+          for (const w of written) w.t.value = '';
+          for (const t of req.targets) t.value = '';
+        }
+      }, VERIFY_DELAY_MS);
+    } catch {
+      reply({ ok: false, reason: 'write-failed' as FillReason });
     }
   },
 );
+
+/**
+ * The native value setter from THIS world's prototype.
+ *
+ * A page's `Object.defineProperty(node, 'value', …)` — which is exactly how
+ * React's value tracker is installed — lives on the main world's wrapper and is
+ * simply not on the object this file touches.
+ */
+function setterFor(
+  el: HTMLInputElement | HTMLTextAreaElement,
+): ((this: unknown, v: string) => void) | undefined {
+  const proto =
+    el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  return Object.getOwnPropertyDescriptor(proto, 'value')?.set as
+    | ((this: unknown, v: string) => void)
+    | undefined;
+}
 
 /**
  * Resolve a ref's identity key to a live rect, scrolling it into view first.

@@ -5,17 +5,21 @@ import { normalizeUrl } from '@main/tabs.js';
 import { containers } from '@privacy/containers.js';
 import { vault } from '@vault/vault.js';
 import {
+  REDACTED,
   agentTouched,
   attachFiles,
+  dropNeedles,
   markTainted,
   observe,
   keyForRef,
   redactFreeText,
+  registerNeedles,
   requestRead,
   requestSelect,
   taintedValues,
   requestFill,
   stateFor,
+  unmarkTainted,
 } from '@core/snapshot/engine.js';
 import { profiles } from '@vault/profileStore.js';
 import {
@@ -42,7 +46,17 @@ import {
   typeText,
   witnessInput,
 } from '@core/snapshot/act.js';
-import { requestFillConsent } from '@main/consent.js';
+import { declineCooldownRemainingMs, requestFillConsent } from '@main/consent.js';
+import {
+  describeTargets,
+  planCredentialFill,
+  type CredentialTarget,
+} from '@vault/fillPlan.js';
+import type {
+  FillDenyCode,
+  FillSkipReason,
+  FillTargetRequest,
+} from '@shared/types.js';
 import { attachments } from '@vault/attachments.js';
 import { capturePage, routeCapture } from '../capture/capture.js';
 import {
@@ -168,6 +182,203 @@ function readScript(): string {
     return main ? main.innerText : '';
   })()`;
 }
+
+/**
+ * One wire string per refusal, defined once, keyed on the closed union.
+ *
+ * `Record<FillDenyCode, string>` and not a switch: the mapping is TOTAL by
+ * typecheck, so a code cannot be added without a string and no refusal can ever
+ * reach an agent as `undefined`.
+ *
+ * `«…»` marks the only interpolations, and the only things ever substituted
+ * into them are `safeOrigin()` output, integers, and — for `AMBIGUOUS_FIELDS`
+ * alone — page-authored labels, which go inside an envelope.
+ *
+ * Two rules about this table, both tested in `test/vaultfill.test.ts`:
+ *
+ *  1. **`ORIGIN_MISMATCH` never names the entry's stored origin.** It names the
+ *     PAGE's. Naming the record's origin would tell a page — through the agent
+ *     — which site a guessed id belongs to. Ids are eight random bytes so
+ *     enumeration is not the threat; an id the agent already spoke aloud in the
+ *     transcript is.
+ *  2. **No refusal string is ever wrapped in an envelope**, and no page-authored
+ *     text is ever outside one. `AMBIGUOUS_FIELDS` is the single string that
+ *     carries page bytes, and it splits: Aperture's sentences outside, the
+ *     candidate list inside.
+ */
+const DENY_STRINGS: Record<FillDenyCode, string> = {
+  NO_TAB: 'error: no active tab',
+  VAULT_LOCKED:
+    'vault is locked — the human must unlock it in Aperture. Nothing was read ' +
+    'and nothing was inserted.',
+  FILL_IN_FLIGHT:
+    'refused: a fill is already in progress on this tab. Wait for it to finish.',
+  NO_MATCH:
+    'refused: no saved sign-in with that id. Call vault_entries_for_origin to ' +
+    'see what applies to this page.',
+  ORIGIN_MISMATCH:
+    'refused: that saved sign-in does not belong to «origin». This is final — ' +
+    'there is no override and no force flag, because a page that could talk ' +
+    'you into overriding it could harvest any credential in the vault. If the ' +
+    'human believes this site is the same site, they can add an alias in ' +
+    'Aperture\'s vault window.',
+  INSECURE_TRANSPORT:
+    'refused: «origin» is not a secure origin. Saved sign-ins are only filled ' +
+    'over https (or localhost).',
+  CONSENT_COOLDOWN:
+    'refused: the human declined this fill less than a minute ago. Do not ask ' +
+    'again — tell them what you were trying to do and let them decide.',
+  NO_FIELDS:
+    'refused: this page has no password field and no one-time-code field that ' +
+    'Aperture can fill. If the form is on a later step, act on the page first ' +
+    'and call again.',
+  AMBIGUOUS_FIELDS:
+    'refused: Aperture will not guess between «n» candidate fields on this ' +
+    'page, and you cannot choose one — Aperture picks the field, never you. ' +
+    'Candidates:\n«candidates»\n' +
+    'If this is a sign-up or change-password form, saved sign-ins are not ' +
+    'filled into it. If each digit of a code has its own box, Aperture cannot ' +
+    'fill it; the human must type it.',
+  ALREADY_FILLED:
+    'refused: the password field on this page already has a value. Aperture ' +
+    'will not overwrite it. Ask the human whether to clear it first.',
+  OTP_NO_SEED:
+    'refused: this page wants a one-time code and that saved sign-in has no ' +
+    'authenticator seed. The human must supply the code.',
+  TOTP_ALREADY_ISSUED:
+    'refused: a one-time code for this sign-in was already inserted in the ' +
+    'current 30-second window. Wait «n» seconds for the next code — ' +
+    're-inserting the same one will be rejected by the site and may count ' +
+    'against a lockout.',
+  TOTP_UNAVAILABLE:
+    'refused: Aperture could not produce a one-time code for that saved ' +
+    'sign-in. Nothing was inserted. The human must supply the code.',
+  FIELD_GONE:
+    'refused: the field Aperture chose is no longer on the page. Nothing was ' +
+    'inserted. Call browser_snapshot and try again.',
+  FIELD_OBSTRUCTED:
+    'refused: the password field is covered by another element — likely a ' +
+    'modal or a cookie banner. Nothing was inserted. Dismiss it first.',
+  FIELD_NOT_EDITABLE:
+    'refused: the field Aperture chose is disabled or read-only, so a human ' +
+    'could not type into it either. Nothing was inserted.',
+  PASSWORD_FIELD_NOT_MASKED:
+    'refused: the password field is showing its contents as plain text — a ' +
+    '"show password" toggle is probably on. Aperture only inserts a password ' +
+    'into a masked field, because a plain-text field\'s value appears in the ' +
+    'page snapshot. Ask the human to hide it, then call again.',
+  FIELD_IN_SUBFRAME:
+    'refused: that field is inside an embedded frame. Aperture fills saved ' +
+    'sign-ins into the top-level page only. The human must sign in themselves ' +
+    'here.',
+  FIELD_TOO_SMALL:
+    'refused: the field Aperture chose is too small to be a real input, which ' +
+    'is what a hidden trap field looks like. Nothing was inserted.',
+  ORIGIN_CHANGED:
+    'refused: the page changed while the human was deciding, so Aperture did ' +
+    'not write anything. The approval was for «origin» and the page is no ' +
+    'longer on it. Nothing was inserted. Re-read the page and start again.',
+  USER_DENIED:
+    'refused: the human declined. Nothing was inserted. Do not retry — tell ' +
+    'them what you were trying to do.',
+  CONSENT_RATE_LIMITED:
+    'refused: too many confirmation prompts in a short window. Aperture has ' +
+    'paused filling; the human must re-approve in the browser.',
+  CONSENT_NO_WINDOW:
+    'refused: Aperture has no window to show the confirmation in. Nothing was ' +
+    'inserted.',
+  FILL_REVERTED:
+    'warning: the values were inserted and the page did not keep them — a ' +
+    'script on this page cleared or rewrote «n» of «m» fields. The sign-in is ' +
+    'NOT filled. Tell the human; this site may need them to type it.',
+  FILL_UNCONFIRMED:
+    'unknown: Aperture inserted the values but the page did not confirm within ' +
+    '5s. It may or may not be filled. Do NOT call this again — call ' +
+    'browser_snapshot and look at the form.',
+  WRITE_FAILED:
+    'error: the insertion failed inside the page. Nothing was left in a known ' +
+    'state; call browser_snapshot and look at the form.',
+  SUBMIT_SKIPPED_FOCUS_LOST:
+    'filled, but not submitted: focus moved off the field before Aperture ' +
+    'could press Enter, so it did not press it anywhere else. Click the ' +
+    'sign-in button yourself.',
+  SUBMIT_UNCONFIRMED:
+    'filled; the Enter keypress was dispatched but never reached the page. ' +
+    'Aperture\'s input path to this tab is not working. Tell the human; this ' +
+    'needs the browser restarted.',
+};
+
+/**
+ * `vault_request_fill`'s schema, at module scope so its key set is assertable.
+ *
+ * FOUR KEYS, FOREVER. `test/vaultfill.test.ts` pins this exactly, so a future
+ * "just one more lever" — `only`, `overwrite`, `fieldRef`, `force`,
+ * `skipConsent` — fails CI rather than review. Every one of those is a way for
+ * a manipulated agent to aim a credential, and this is precisely the surface
+ * where levers accumulate.
+ */
+const VAULT_FILL_SCHEMA = z.object({
+  action: z.enum(['plan', 'apply']).default('plan'),
+  entryId: z.string(),
+  tabId: z.string().optional(),
+  submit: z
+    .boolean()
+    .default(false)
+    .describe('Press Enter after filling, if focus is still on the field.'),
+});
+
+export const VAULT_FILL_SCHEMA_KEYS = Object.keys(VAULT_FILL_SCHEMA.shape);
+
+/** Exported for the totality and no-record-origin tests. */
+export function denyString(
+  code: FillDenyCode,
+  vars: { origin?: string; n?: number; m?: number; candidates?: string } = {},
+): string {
+  return DENY_STRINGS[code]
+    .replace(/«origin»/g, vars.origin ?? '')
+    .replace(/«n»/g, vars.n === undefined ? '' : String(vars.n))
+    .replace(/«m»/g, vars.m === undefined ? '' : String(vars.m))
+    .replace(/«candidates»/g, vars.candidates ?? '');
+}
+
+export { DENY_STRINGS };
+
+/**
+ * The preload's fixed reason vocabulary, mapped to the agent-facing code.
+ *
+ * `not-input` maps to `FIELD_GONE` rather than `WRITE_FAILED` on purpose: it
+ * can only happen when an identity key that resolved to a textbox at plan time
+ * resolves to something that is not an input at write time, and "the field
+ * Aperture chose is no longer on the page, nothing was inserted" is both true
+ * and actionable, where WRITE_FAILED's "nothing was left in a known state"
+ * would be false — the atomic path wrote nothing.
+ */
+const REASON_TO_CODE: Record<FillSkipReason, FillDenyCode> = {
+  'origin-changed': 'ORIGIN_CHANGED',
+  gone: 'FIELD_GONE',
+  subframe: 'FIELD_IN_SUBFRAME',
+  'not-input': 'FIELD_GONE',
+  'not-masked': 'PASSWORD_FIELD_NOT_MASKED',
+  'not-editable': 'FIELD_NOT_EDITABLE',
+  'too-small': 'FIELD_TOO_SMALL',
+  'no-setter': 'WRITE_FAILED',
+  reverted: 'FILL_REVERTED',
+  'write-failed': 'WRITE_FAILED',
+};
+
+/** Human-readable, for the profile path's per-field "not filled" list (F6). */
+const SKIP_PROSE: Record<FillSkipReason, string> = {
+  'origin-changed': 'the page navigated before it could be filled',
+  gone: 'field is no longer on the page',
+  subframe: 'field is inside an embedded frame',
+  'not-input': 'field is not a text input',
+  'not-masked': 'field is not a masked password field',
+  'not-editable': 'field is disabled or read-only',
+  'too-small': 'field is too small to be a real input',
+  'no-setter': 'field has no writable value',
+  reverted: 'the page rewrote the value immediately',
+  'write-failed': 'the insertion failed inside the page',
+};
 
 /** Walk the snapshot in document order for anything a profile could fill. */
 function collectFields(root: SnapshotNode, out: FieldCandidate[] = []): FieldCandidate[] {
@@ -426,7 +637,10 @@ export function registerBrowserTools(
       const live = await taintedValues(id, wc);
       let safe = redactFreeText(id, body);
       for (const v of live) {
-        if (v.length >= 4) safe = safe.split(v).join('(filled from profile)');
+        // The marker is imported rather than repeated. It was duplicated here
+        // as a literal, which is a drift hazard and was the wrong text for a
+        // vault fill besides.
+        if (v.length >= 4) safe = safe.split(v).join(REDACTED);
       }
 
       return text(untrusted(safeOrigin(wc.getURL()), safe.slice(0, maxChars)));
@@ -510,39 +724,331 @@ export function registerBrowserTools(
     },
   );
 
+  /**
+   * One fill at a time, per tab.
+   *
+   * Two concurrent applies would both plan against the same page, both raise a
+   * dialog, and both write — and the second would see the first's value and
+   * answer ALREADY_FILLED or overwrite it. The lock is released in a `finally`,
+   * so a throw anywhere in the pipeline cannot wedge the tab.
+   */
+  const fillInFlight = new Set<string>();
+
   server.registerTool(
     'vault_request_fill',
     {
-      title: 'Fill a saved credential',
+      title: 'Fill a saved sign-in',
       description:
-        'Ask Aperture to type a saved credential into the page. The password ' +
-        'is inserted by the browser itself and is never returned to you — you ' +
-        'find out which fields were filled, not what went into them.\n\n' +
+        'Ask Aperture to put a saved sign-in into the page. The password is ' +
+        'inserted by the browser itself, is never returned to you, and there ' +
+        'is no tool anywhere in this server that returns one.\n\n' +
+        'You name the saved sign-in. You do NOT name the field: Aperture ' +
+        'chooses which field on the page receives which value, and it will ' +
+        'refuse rather than guess. A password is only ever inserted into a ' +
+        'masked password field in the top-level page.\n\n' +
+        'Calling action:"apply" raises a confirmation dialog that only the ' +
+        'human can approve. You cannot see it, cannot skip it, and no ' +
+        'parameter bypasses it — do not promise the human it will not appear. ' +
+        'Approval is per fill; there is no "remember this" for saved ' +
+        'sign-ins.\n\n' +
         'Refused if the entry does not belong to the page\'s own origin. That ' +
         'refusal is final: there is no override, because a page that could ' +
-        'talk you into overriding it could harvest any credential in the vault.',
-      inputSchema: z.object({
-        entryId: z.string(),
-        tabId: z.string().optional(),
-        submit: z
-          .boolean()
-          .default(false)
-          .describe('Submit the form in the same step. Preferred when you can.'),
-      }),
+        'talk you into overriding it could harvest any credential in the ' +
+        'vault.\n\n' +
+        'Call action:"plan" first to see what would be filled, show it to the ' +
+        'human, then call action:"apply". Refs in the plan are advisory — ' +
+        'apply re-reads the page.\n\n' +
+        ENVELOPE_POINTER,
+      inputSchema: VAULT_FILL_SCHEMA,
       annotations: { destructiveHint: false },
     },
-    async ({ tabId }) => {
+    async ({ action, entryId, tabId, submit }) => {
       const t = tabs();
+
+      // --- 1. the tab -------------------------------------------------------
       const id = tabId ?? t.active;
-      if (!id) return text('error: no active tab');
-      // The insertion path (main -> renderer, plaintext never returning
-      // upward) is specified in docs/design/security.md and is not yet wired.
-      return text(
-        'fill refused: the vault fill path is not yet wired in this build.\n' +
-          'No credential was read, and none was inserted.',
-      );
+      if (!id) return text(denyString('NO_TAB'));
+      const wc = t.webContents(id);
+
+      // --- 2. the vault -----------------------------------------------------
+      if (vault.state() !== 'unlocked') return text(denyString('VAULT_LOCKED'));
+
+      // --- 3. one at a time -------------------------------------------------
+      if (action === 'apply' && fillInFlight.has(id)) {
+        return text(denyString('FILL_IN_FLIGHT'));
+      }
+
+      // --- 4. the entry, decided BEFORE any page work -----------------------
+      //
+      // Load-bearing ordering: an origin mismatch is decided from the vault and
+      // the tab's own URL, with NO reference to page content at all. The page
+      // cannot influence the decision because the decision is taken before the
+      // page is consulted.
+      const committedUrl = wc.getURL();
+      const pageOrigin = safeOrigin(committedUrl);
+      const entry = vault.resolveEntryFor(entryId, committedUrl);
+      if (!entry.ok) return text(denyString(entry.error, { origin: pageOrigin }));
+
+      // --- 5. the decline cooldown ------------------------------------------
+      if (action === 'apply') {
+        const cooling = declineCooldownRemainingMs(pageOrigin, entryId);
+        if (cooling > 0) return text(denyString('CONSENT_COOLDOWN'));
+      }
+
+      // --- 6. the page, and which fields Aperture chooses -------------------
+      await observe(id, wc);
+      const st = stateFor(id);
+      if (!st.last) return text(denyString('NO_FIELDS'));
+
+      const plan = planCredentialFill(st.last.root, { hasTotp: entry.hasTotp });
+      if (!plan.ok) {
+        if (plan.code === 'AMBIGUOUS_FIELDS') {
+          const labels = plan.candidates ?? [];
+          return text(
+            denyString('AMBIGUOUS_FIELDS', {
+              n: labels.length,
+              // Aperture's sentences outside the envelope, the page's bytes
+              // inside it. This is the ONE refusal string that carries page
+              // text, and it splits rather than wrapping the whole thing.
+              candidates: untrusted(pageOrigin, labels.map((l) => quote(l)).join('\n')),
+            }),
+          );
+        }
+        return text(denyString(plan.code));
+      }
+
+      const targets = plan.targets;
+      const willFill = describeTargets(targets);
+
+      if (action === 'plan') {
+        // Field labels are page-authored, so they are inside. The header and
+        // the next-step instruction are Aperture's, so they are outside.
+        const body = targets
+          .map((c) => `${c.ref} ${quote(c.label)} → ${c.kind}`)
+          .join('\n');
+        return text(
+          `entry ${entry.id} · ${entry.username} · saved for ${entry.rpId}\n` +
+            `will fill: ${targets.map((c) => c.kind).join(', ')}\n` +
+            untrusted(pageOrigin, body) +
+            '\nRefs here are advisory: action:"apply" re-reads the page and ' +
+            're-chooses the fields itself. Ask the human whether to sign in, ' +
+            'then call action:"apply".',
+        );
+      }
+
+      fillInFlight.add(id);
+      try {
+        return await applyFill({
+          id,
+          wc,
+          entryId,
+          entry,
+          committedUrl,
+          pageOrigin,
+          targets,
+          willFill,
+          submit,
+        });
+      } finally {
+        fillInFlight.delete(id);
+      }
     },
   );
+
+  /**
+   * Steps 7-16 of the pipeline. Split out only so the in-flight lock above can
+   * wrap it in a `finally`; the ordering is exactly the table's.
+   */
+  async function applyFill(args: {
+    id: string;
+    wc: import('electron').WebContents;
+    entryId: string;
+    entry: {
+      id: string;
+      username: string;
+      hasTotp: boolean;
+      totpStep?: number;
+      rpId: string;
+      pageRpId: string;
+      viaAlias: boolean;
+    };
+    committedUrl: string;
+    pageOrigin: string;
+    targets: CredentialTarget[];
+    willFill: string;
+    submit: boolean;
+  }) {
+    const { id, wc, entryId, entry, committedUrl, pageOrigin, targets, willFill, submit } =
+      args;
+
+    // --- 7. every chosen target is really there, visible, and reachable -----
+    for (const target of targets) {
+      const r = await resolveRef(wc, target.key);
+      if (!r.ok) {
+        // A zero-size rect is the hidden-trap shape, which has its own code; a
+        // missing element or a timeout is the "call browser_snapshot" case.
+        return text(
+          denyString(r.reason === 'not-visible' ? 'FIELD_TOO_SMALL' : 'FIELD_GONE'),
+        );
+      }
+      if (r.obstructed) return text(denyString('FIELD_OBSTRUCTED'));
+    }
+
+    // --- 8. consent --------------------------------------------------------
+    //
+    // Credential scope: no grant is consulted and none is offered, no
+    // page-authored byte reaches the dialog, and the agent's own words are not
+    // shown to the human at all.
+    // How long a one-time code will be good for, said BEFORE one is generated.
+    // Pure clock arithmetic — `step - (now mod step)` — so the dialog can tell
+    // the human what they are approving without the code itself existing yet,
+    // which is what lets generation stay at step 10 where it belongs.
+    const wantsOtp = targets.some((c) => c.kind === 'otp');
+    const totpStep = entry.totpStep ?? 30;
+    const consent = await requestFillConsent(mainWindow(), {
+      scope: 'credential',
+      origin: pageOrigin,
+      entryId,
+      username: entry.username,
+      savedFor: entry.rpId,
+      ...(entry.viaAlias ? { aliasFor: entry.pageRpId } : {}),
+      willFill,
+      ...(wantsOtp
+        ? { totpSeconds: totpStep - Math.floor((Date.now() / 1000) % totpStep) }
+        : {}),
+    });
+
+    if (!consent.ok) {
+      return text(
+        denyString(
+          consent.reason === 'rate-limited'
+            ? 'CONSENT_RATE_LIMITED'
+            : consent.reason === 'no-window'
+              ? 'CONSENT_NO_WINDOW'
+              : 'USER_DENIED',
+        ),
+      );
+    }
+
+    // --- 9. a human just proved presence -----------------------------------
+    //
+    // Agent activity deliberately does not reset the idle countdown — an
+    // always-on agent would otherwise hold the vault open forever. A human
+    // clicking a dialog is human interaction by any honest reading, and a
+    // grant-based or dev-auto approval is not.
+    if (consent.via === 'human') vault.touch();
+
+    // --- 10. the secrets, at the last possible moment -----------------------
+    const wants = {
+      username: targets.some((c) => c.kind === 'username'),
+      password: targets.some((c) => c.kind === 'password'),
+      otp: wantsOtp,
+    };
+    const secrets = await vault.secretsForFill(entryId, committedUrl, wants);
+    if (!secrets.ok) {
+      if (secrets.error === 'TOTP_ALREADY_ISSUED') {
+        return text(
+          denyString('TOTP_ALREADY_ISSUED', { n: secrets.secondsUntilNext }),
+        );
+      }
+      return text(denyString(secrets.error, { origin: pageOrigin }));
+    }
+
+    const values: Record<string, string> = {
+      username: secrets.username ?? '',
+      password: secrets.password ?? '',
+      otp: secrets.otp?.code ?? '',
+    };
+    const fills: FillTargetRequest[] = targets.map((c) => ({
+      key: c.key,
+      kind: c.kind,
+      value: values[c.kind] ?? '',
+    }));
+
+    // --- 11. taint and needles, BEFORE the write ---------------------------
+    //
+    // So that no concurrent snapshot can read a value that is already in the
+    // DOM. The needles are the F9 fix: the walker masks password values before
+    // they leave the page, so the existing needle-from-a-fresh-walk mechanism
+    // is structurally blind to exactly the values that matter most.
+    const keys = targets.map((c) => c.key);
+    const needleValues = fills.map((f) => f.value).filter(Boolean);
+    markTainted(id, keys);
+    registerNeedles(id, needleValues);
+
+    // --- 12. the write -----------------------------------------------------
+    const res = await requestFill(wc, {
+      expectedOrigin: pageOrigin,
+      atomic: true,
+      targets: fills,
+    });
+
+    // --- 13. a GLOBAL refusal wrote nothing, so the taint comes back off ----
+    if (!res.ok) {
+      if (res.reason === 'timeout') {
+        // Not a refusal: the page never answered, so whether anything landed is
+        // genuinely unknown and the taint and needles must stay.
+        return text(denyString('FILL_UNCONFIRMED'));
+      }
+      unmarkTainted(id, keys);
+      dropNeedles(id, needleValues);
+      return text(denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin }));
+    }
+
+    const notLanded = res.results.filter((r) => !r.landed);
+    if (notLanded.length) {
+      // Taint and needles STAY: a value that was written and then rewritten may
+      // still be somewhere in the DOM, and this is the one outcome where we
+      // cannot say it is not.
+      return text(
+        denyString('FILL_REVERTED', { n: notLanded.length, m: res.results.length }),
+      );
+    }
+
+    // --- 14. now it has actually been used ---------------------------------
+    await vault.noteUsed(entryId);
+
+    // --- 15. submit --------------------------------------------------------
+    const submitKey =
+      targets.find((c) => c.kind === 'password')?.key ??
+      targets.find((c) => c.kind === 'otp')?.key ??
+      null;
+    let submitLine = '';
+    if (submit) {
+      if (!submitKey || res.focusedKey !== submitKey) {
+        // Submitting into a page whose focus we no longer understand is how a
+        // credential ends up in a search box's autosuggest request.
+        submitLine = `\n${denyString('SUBMIT_SKIPPED_FOCUS_LOST')}`;
+      } else {
+        const witness = await witnessInput(wc, null, RELEVANT_COUNTERS.key);
+        await pressKey(wc, 'Enter');
+        submitLine =
+          (await witness.settle()) === 'lost'
+            ? `\n${denyString('SUBMIT_UNCONFIRMED')}`
+            : '\nSubmitted the form.';
+      }
+    }
+
+    // --- 16. the report ----------------------------------------------------
+    //
+    // Aperture speaking, outside any envelope. The username is vault-stored and
+    // human-authored, so printing it is safe, and it is the one thing the agent
+    // genuinely needs in order to tell the human what happened.
+    const what = willFill === 'two-factor code' ? 'a two-factor code' : willFill;
+    const waited = secrets.otp?.waitedMs
+      ? `\nWaited ${Math.round(secrets.otp.waitedMs / 1000)}s for a fresh one-time code.`
+      : '';
+    return text(
+      `filled ${what} for ${entry.username} on ${pageOrigin}\n` +
+        'Aperture chose the fields; the values are not shown to you and there ' +
+        'is no tool here that returns them. Those fields now read as ' +
+        `${REDACTED} in snapshots and page text for as long as this page is ` +
+        'loaded.\n' +
+        'Call browser_snapshot to see the form.' +
+        waited +
+        submitLine,
+    );
+  }
 
   server.registerTool(
     'browser_act',
@@ -1022,9 +1528,22 @@ export function registerBrowserTools(
       // agent's judgement — and the agent is the component we assume a hostile
       // page can steer. This dialog is a native OS modal the agent cannot
       // render, see, click, or skip via any parameter.
-      const origin = safeOrigin(t.info(id)?.url ?? '');
+      // THE ORIGIN THE HUMAN IS ABOUT TO APPROVE, captured once and carried
+      // through the dialog unchanged.
+      //
+      // This closes a real TOCTOU (F4): the origin was computed here, the
+      // human's dialog was awaited, and the write was then issued against a
+      // freshly fetched WebContents with nothing in between re-checking the
+      // committed origin. The dialog is open for as long as a human takes to
+      // read it; the tab can navigate in that window, and the values landed in
+      // a document the human never approved. `expectedOrigin` is echoed to the
+      // preload, which compares it against `location.origin` in the SAME TASK
+      // as the write — so the residual window is zero rather than "however long
+      // a human reads for".
+      const pageOrigin = safeOrigin(t.info(id)?.url ?? '');
       const consent = await requestFillConsent(mainWindow(), {
-        origin,
+        scope: 'profile',
+        origin: pageOrigin,
         fields: toFill.filter((e) => !e.sensitive).map((e) => e.field),
         sensitiveFields: toFill.filter((e) => e.sensitive).map((e) => e.field),
       });
@@ -1038,10 +1557,12 @@ export function registerBrowserTools(
         );
       }
 
-      const fills = toFill.map((e) => ({
+      const fills: FillTargetRequest[] = toFill.map((e) => ({
         key: e.key,
+        kind: 'profile',
         value: profile.values[e.field] ?? '',
       }));
+      const fieldOf = new Map(toFill.map((e) => [e.key, e.field]));
 
       // Mark sensitive targets BEFORE the fill, so there is no window in which
       // a concurrent snapshot could read the value back out of the DOM.
@@ -1050,17 +1571,51 @@ export function registerBrowserTools(
         toFill.filter((e) => e.sensitive).map((e) => e.key),
       );
 
-      const res = await requestFill(t.webContents(id), fills);
+      // NOT atomic: a profile fill of seven fields where one is disabled should
+      // still fill the other six and say which one it skipped. A credential
+      // fill is the opposite and says so at its own call site.
+      const res = await requestFill(t.webContents(id), {
+        expectedOrigin: pageOrigin,
+        atomic: false,
+        targets: fills,
+      });
 
-      // Report field names, never values — the sensitive ones must not come
-      // back through the agent on the return path either.
-      const names = toFill.map((e) => e.field).join(', ');
+      if (!res.ok) {
+        return text(
+          res.reason === 'timeout'
+            ? 'fill unconfirmed: the page did not answer within 5s. Call ' +
+                'browser_snapshot and look at the form.'
+            : `fill refused: ${denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin })}`,
+        );
+      }
+
+      // The result line reports what LANDED, per field.
+      //
+      // The old one printed a count from one list and names from another:
+      // "filled 2 fields: givenName, familyName, email" — ask for three, fill
+      // two, and the agent cannot tell which one is missing (F6). Now the
+      // mechanism knows exactly which targets landed, so it says so, and the
+      // skip reasons come from the preload's FIXED vocabulary rather than an
+      // interpolated `err.message`.
+      const landed = res.results.filter((r) => r.landed);
+      const missed = res.results.filter((r) => !r.landed);
+      const nameOf = (key: string): string => fieldOf.get(key) ?? key;
+      const missedLine = missed.length
+        ? '\nnot filled: ' +
+          missed
+            .map(
+              (r) =>
+                `${nameOf(r.key)} (${r.skipped ? SKIP_PROSE[r.skipped] : 'the page did not keep the value'})`,
+            )
+            .join(', ')
+        : '';
+
       return text(
-        res.ok
-          ? `filled ${res.filled.length} fields: ${names}\n` +
-              'Call browser_snapshot to confirm, and check anything marked ' +
-              'SKIP in the plan.'
-          : `fill failed: ${res.reason ?? 'unknown'}`,
+        `filled ${landed.length} of ${res.results.length} fields: ` +
+          `${landed.map((r) => nameOf(r.key)).join(', ') || '(none)'}` +
+          missedLine +
+          '\nCall browser_snapshot to confirm, and check anything marked ' +
+          'SKIP in the plan.',
       );
     },
   );

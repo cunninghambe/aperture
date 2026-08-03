@@ -133,16 +133,110 @@ export interface VaultEntryPublic {
 
 export type VaultState = 'absent' | 'locked' | 'unlocked';
 
-/** Outcome of an agent-requested fill. Never carries the secret. */
-export interface FillResult {
-  ok: boolean;
-  /** Why it was refused, if it was. */
-  reason?:
-    | 'locked'
-    | 'no-match'
-    | 'origin-mismatch'
-    | 'user-denied'
-    | 'no-field'
-    | 'timeout';
-  filledFields?: ('username' | 'password' | 'totp')[];
+// ---------------------------------------------------------------------------
+// The fill path
+// ---------------------------------------------------------------------------
+
+/**
+ * Every way a fill can be refused or fall short.
+ *
+ * The union is total and closed on purpose: `src/mcp/tools.ts` maps it to a
+ * `Record<FillDenyCode, string>`, so a code added here without a wire string
+ * fails the typecheck rather than reaching an agent as `undefined`. See
+ * docs/design/vaultfill.md section 10 for the strings and for the two rules
+ * they hold to.
+ *
+ * Nothing here can carry a secret. That is not a convention — none of these is
+ * a string the caller supplies, and the only values ever interpolated into
+ * their prose are `safeOrigin()` output, integers, and (for `AMBIGUOUS_FIELDS`
+ * alone) page-authored labels inside an envelope.
+ */
+export type FillDenyCode =
+  | 'NO_TAB'
+  | 'VAULT_LOCKED'
+  | 'FILL_IN_FLIGHT'
+  | 'NO_MATCH'
+  | 'ORIGIN_MISMATCH'
+  | 'INSECURE_TRANSPORT'
+  | 'CONSENT_COOLDOWN'
+  | 'NO_FIELDS'
+  | 'AMBIGUOUS_FIELDS'
+  | 'ALREADY_FILLED'
+  | 'OTP_NO_SEED'
+  | 'TOTP_ALREADY_ISSUED'
+  | 'TOTP_UNAVAILABLE'
+  | 'FIELD_GONE'
+  | 'FIELD_OBSTRUCTED'
+  | 'FIELD_NOT_EDITABLE'
+  | 'PASSWORD_FIELD_NOT_MASKED'
+  | 'FIELD_IN_SUBFRAME'
+  | 'FIELD_TOO_SMALL'
+  | 'ORIGIN_CHANGED'
+  | 'USER_DENIED'
+  | 'CONSENT_RATE_LIMITED'
+  | 'CONSENT_NO_WINDOW'
+  | 'FILL_REVERTED'
+  | 'FILL_UNCONFIRMED'
+  | 'WRITE_FAILED'
+  | 'SUBMIT_SKIPPED_FOCUS_LOST'
+  | 'SUBMIT_UNCONFIRMED';
+
+/** What a fill target is FOR. The checks that differ, differ by this. */
+export type CredentialTargetKind = 'username' | 'password' | 'otp';
+export type FillTargetKind = 'profile' | CredentialTargetKind;
+
+/**
+ * The preload's fixed reason vocabulary for the `aperture:fill` channel.
+ *
+ * These are literals. Nothing on that channel ever interpolates `err.message`,
+ * which closes one of the four sites docs/design/security.md names under
+ * "Preload reason strings are NOT all literals". Being a closed union here is
+ * what makes that testable rather than merely intended.
+ */
+export type FillSkipReason =
+  | 'origin-changed'
+  | 'gone'
+  | 'subframe'
+  | 'not-input'
+  | 'not-masked'
+  | 'not-editable'
+  | 'too-small'
+  | 'no-setter'
+  | 'reverted'
+  | 'write-failed';
+
+/** One target's outcome. `landed` is a boolean about a value, never a value. */
+export interface FillTargetResult {
+  key: string;
+  kind: FillTargetKind;
+  wrote: boolean;
+  landed: boolean;
+  skipped?: FillSkipReason;
+}
+
+/**
+ * What the page replies on `aperture:fill`.
+ *
+ * Carries booleans and keys. There is no field here that can hold a secret,
+ * which is the same enforcement `VaultEntryPublic` provides on the other side.
+ */
+export type FillChannelResult =
+  | { ok: true; results: FillTargetResult[]; focusedKey: string | null }
+  | { ok: false; reason: FillSkipReason; key?: string };
+
+/** One field the fill path is about to write into. */
+export interface FillTargetRequest {
+  key: string;
+  kind: FillTargetKind;
+  value: string;
+}
+
+/** Main -> preload on `aperture:fill`. */
+export interface FillRequest {
+  requestId: string;
+  /** Exact serialization to compare against `location.origin` in the page. */
+  expectedOrigin: string;
+  /** True for credentials: any failed validation means nothing is written. */
+  atomic: boolean;
+  targets: FillTargetRequest[];
 }

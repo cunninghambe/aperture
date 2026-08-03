@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Guard sign-up</title>
+  </head>
+  <body>
+    <h1>Create an account</h1>
+
+    <!--
+      Two password fields, which is what a sign-up or change-password form looks
+      like. docs/design/vaultfill.md section 5.3 rules this an AMBIGUOUS_FIELDS
+      refusal rather than a fill: putting a SAVED password into "new password"
+      is wrong in a way the human does not notice until the next sign-in fails.
+
+      The witness reports booleans only, for the same reasons login.html does.
+    -->
+
+    <p id="vaultlog">vault-log: (not rendered)</p>
+
+    <form id="join">
+      <p>
+        <label for="u">Email</label>
+        <input id="u" name="username" type="email" autocomplete="username" />
+      </p>
+      <p>
+        <label for="p1">Password</label>
+        <input id="p1" name="new-password" type="password" autocomplete="new-password" />
+      </p>
+      <p>
+        <label for="p2">Confirm password</label>
+        <input id="p2" name="confirm-password" type="password" autocomplete="new-password" />
+      </p>
+      <p><button type="submit" id="go">Create account</button></p>
+    </form>
+
+    <script>
+      (() => {
+        const u = document.getElementById('u');
+        const p1 = document.getElementById('p1');
+        const p2 = document.getElementById('p2');
+        const log = document.getElementById('vaultlog');
+        let submits = 0;
+
+        document.getElementById('join').addEventListener('submit', (e) => {
+          e.preventDefault();
+          submits += 1;
+          render();
+        });
+
+        function render() {
+          log.textContent =
+            'vault-log: ' +
+            [
+              'any-password-set:' + Boolean(p1.value !== '' || p2.value !== ''),
+              'user-set:' + Boolean(u.value !== ''),
+              'submits:' + submits,
+            ].join(' ');
+        }
+
+        for (const el of [u, p1, p2]) {
+          el.addEventListener('input', render);
+          el.addEventListener('change', render);
+        }
+        render();
+      })();
+    </script>
+  </body>
+</html>

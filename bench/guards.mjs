@@ -13,33 +13,75 @@
  * change-event log is. Three of the seven checks below failed against the
  * build this file was written for.
  *
- * Usage: node bench/guards.mjs <token> [fixtureBase]
+ * Usage: node bench/guards.mjs <token> [fixtureBase] [--phase=allow|deny|none]
  * Exit: 0 all guards hold · 1 a guard failed · 3 the probe could not run
+ *
+ * PHASES. G16-G28 exercise the credential fill path, whose consent gate is a
+ * native dialog no script can click. `--e2e-consent` (main-process argv, dev
+ * builds only — docs/design/vaultfill.md section 13) is the only way past it,
+ * and its setting is a property of the LAUNCH, not of a call. So the credential
+ * guards are split by which launch they need:
+ *
+ *   --phase=allow (default) — Aperture launched `--seed-vault --e2e-consent=allow
+ *                             --e2e-consent-delay-ms=1500`. Runs G1-G15 and
+ *                             G16-G27a.
+ *   --phase=deny            — Aperture launched `--seed-vault --e2e-consent=deny`.
+ *                             Runs G27b only.
+ *   --phase=none            — Aperture launched `--seed-vault` and NOTHING else.
+ *                             Runs G28 only: proves the flag's presence is
+ *                             observable, so a green `allow` run cannot be a run
+ *                             that quietly auto-approved.
  */
 
+import { createHmac } from 'node:crypto';
 import { applyObservation, parseElementLine } from './lib/streamModel.mjs';
 
-const TOKEN = process.argv[2];
-const BASE = process.argv[3] ?? 'http://127.0.0.1:8899';
+const ARGS = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const FLAGS = process.argv.slice(2).filter((a) => a.startsWith('--'));
+const TOKEN = ARGS[0];
+const BASE = ARGS[1] ?? 'http://127.0.0.1:8899';
+const PHASE = (FLAGS.find((f) => f.startsWith('--phase=')) ?? '--phase=allow').slice(8);
 if (!TOKEN) {
-  console.error('usage: node bench/guards.mjs <token> [fixtureBase]');
+  console.error('usage: node bench/guards.mjs <token> [fixtureBase] [--phase=allow|deny|none]');
+  process.exit(3);
+}
+if (!['allow', 'deny', 'none'].includes(PHASE)) {
+  console.error(`unknown phase "${PHASE}" — expected allow, deny or none`);
   process.exit(3);
 }
 
+/**
+ * Returned by `call` when the request was abandoned rather than answered.
+ * A sentinel object, not a string, so no page-authored or harness text can
+ * ever be mistaken for it.
+ */
+const TIMEOUT_SENTINEL = Symbol('timeout');
+
 let id = 0;
-async function call(name, args = {}) {
-  const res = await fetch('http://127.0.0.1:8817/mcp', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: ++id, method: 'tools/call',
-      params: { name, arguments: args },
-    }),
-  });
+async function call(name, args = {}, timeoutMs = 0) {
+  const ctl = timeoutMs ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch('http://127.0.0.1:8817/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: ++id, method: 'tools/call',
+        params: { name, arguments: args },
+      }),
+      ...(ctl ? { signal: ctl.signal } : {}),
+    });
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (ctl?.signal.aborted) return TIMEOUT_SENTINEL;
+    throw err;
+  }
+  if (timer) clearTimeout(timer);
   const body = await res.text();
   const line = body.split('\n').find((l) => l.trim().startsWith('{') || l.startsWith('data: {'));
   if (!line) return '';
@@ -74,6 +116,199 @@ async function witness() {
   const t = await call('browser_read', {});
   const m = /events: (.*)/.exec(t);
   return m ? m[1].trim() : '(no witness line)';
+}
+
+function finish() {
+  const failed = checks.filter((c) => !c.ok);
+  console.log(`\n${checks.length - failed.length}/${checks.length} guards hold`);
+  console.log(`\nRESULT: ${failed.length ? 'RED — ' + failed.map((f) => f.id).join(', ') : 'GREEN'}`);
+  process.exit(failed.length ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------------
+// The credential fill path (G16-G28). Shared helpers.
+//
+// EVERY assertion below is against login.html / signup.html's OWN witness line,
+// never against Aperture's report of itself. Aperture saying "refused" is not
+// evidence that nothing was written; `pw-match:false` on the page is.
+// ---------------------------------------------------------------------------
+
+const BASE_2 = BASE.replace('127.0.0.1', '127.0.0.2');
+const BASE_LOCALHOST = BASE.replace('127.0.0.1', 'localhost');
+
+/** Seeded by `--seed-vault`. Known here so the guard can assert ABSENCE. */
+const SEEDED_PW = 'guard-pw-93a1';
+const SEEDED_TOTP_SEED = 'JBSWY3DPEHPK3PXP';
+
+/** The one-time code, computed here, so G19 can look for it and not find it. */
+function totpAt(counter) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0;
+  const bytes = [];
+  for (const ch of SEEDED_TOTP_SEED.toUpperCase().replace(/[\s=-]/g, '')) {
+    const i = alphabet.indexOf(ch);
+    if (i < 0) continue;
+    value = (value << 5) | i;
+    bits += 5;
+    if (bits >= 8) { bytes.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  const buf = Buffer.alloc(8);
+  buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  buf.writeUInt32BE(counter >>> 0, 4);
+  const h = createHmac('sha1', Buffer.from(bytes)).update(buf).digest();
+  const off = h[h.length - 1] & 0x0f;
+  const bin = ((h[off] & 0x7f) << 24) | ((h[off + 1] & 0xff) << 16) |
+    ((h[off + 2] & 0xff) << 8) | (h[off + 3] & 0xff);
+  return String(bin % 1000000).padStart(6, '0');
+}
+
+/** login.html / signup.html's booleans-only witness line. */
+async function vwitness() {
+  const t = await call('browser_read', {});
+  const m = /vault-log: (.*)/.exec(t);
+  return m ? m[1].trim() : '(no vault-log line)';
+}
+
+/** True when the page's own record says nothing at all was written into it. */
+function nothingWritten(w) {
+  return /pw-match:false/.test(w) && /user-match:false/.test(w) &&
+    /visible-decoy-set:false/.test(w);
+}
+
+async function goFixture(base, file, query = '') {
+  const sep = query ? '&' : '';
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${base}/${file}?guardrun=${Date.now()}${sep}${query}`,
+  });
+  await sleep(1200);
+}
+
+/**
+ * Start login.html's armed change, immediately before the `apply` that must
+ * race it. See the fixture's own comment for why the clock starts from a click
+ * rather than from page load.
+ */
+async function armPageChange() {
+  const m = new Map();
+  applyObservation(m, await call('browser_snapshot', { mode: 'full' }));
+  const hits = [...m.entries()].filter(
+    ([, e]) => e.label === 'Arm page change' && e.role === 'button',
+  );
+  if (hits.length !== 1) {
+    console.error(`could not arm: "Arm page change" resolves to ${hits.length} buttons`);
+    process.exit(3);
+  }
+  await call('browser_act', { action: 'click', ref: hits[0][0] });
+}
+
+/** The entry Aperture is willing to name on the page currently open. */
+async function entryHere() {
+  const t = await call('vault_entries_for_origin', {});
+  const m = /^([0-9a-f]{8,})\s/m.exec(t);
+  return m ? m[1] : null;
+}
+
+/**
+ * The seeded entry, or a placeholder plus a recorded FAILURE.
+ *
+ * NOT `process.exit(3)`, and the reason is the RED record. Against a build
+ * where `--seed-vault` does not exist yet — which is exactly the build section
+ * 15.3 part 1 says to run these against — an exit here would collapse thirteen
+ * guards into one "could not run" line and prove nothing about whether they
+ * execute. Recording a failed guard and carrying on with a placeholder id runs
+ * the whole apparatus and shows each guard failing on its own terms. A broken
+ * seed on a shipped build therefore reads as thirteen loud REDs, never as a
+ * vacuous green.
+ */
+async function seededEntry(where) {
+  const e = await entryHere();
+  check(
+    'G16-seed',
+    'the dev-seeded vault is reachable, so the credential guards test something',
+    Boolean(e),
+    e ? `entry ${e} nameable on ${where}` :
+      `NO entry nameable on ${where}. Every credential guard below therefore ` +
+      'fails on apparatus, not on discrimination.',
+  );
+  return e ?? '(no-seeded-entry)';
+}
+
+/**
+ * Distinctive fragments of the fixed wire strings in vaultfill.md section 10.
+ * The codes themselves are never on the wire — the agent gets prose — so the
+ * guard matches the prose, which is the actual contract.
+ */
+const SAYS = {
+  NO_MATCH: 'no saved sign-in with that id',
+  INSECURE_TRANSPORT: 'is not a secure origin',
+  ORIGIN_MISMATCH: 'does not belong to',
+  AMBIGUOUS_FIELDS: 'will not guess between',
+  FIELD_GONE: 'no longer on the page',
+  FIELD_OBSTRUCTED: 'covered by another element',
+  FIELD_NOT_EDITABLE: 'disabled or read-only',
+  PASSWORD_FIELD_NOT_MASKED: 'showing its contents as plain text',
+  ORIGIN_CHANGED: 'changed while the human was deciding',
+  USER_DENIED: 'the human declined. Nothing was inserted',
+  CONSENT_COOLDOWN: 'declined this fill less than a minute ago',
+  TOTP_ALREADY_ISSUED: 'already inserted in the current 30-second window',
+  FILL_REVERTED: 'the page did not keep them',
+  FILLED: 'value withheld',
+};
+
+if (PHASE !== 'allow') {
+  console.log(`# Live guard probe — phase ${PHASE}\n`);
+
+  await goFixture(BASE, 'login.html');
+  const entry = await seededEntry(BASE);
+
+  if (PHASE === 'deny') {
+    const before = await vwitness();
+    const denied = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    const afterDeny = await vwitness();
+    check(
+      'G27b-i',
+      'with --e2e-consent=deny the fill is refused and the page is untouched',
+      denied.includes(SAYS.USER_DENIED) && nothingWritten(afterDeny),
+      `reply: ${denied.split('\n')[0].slice(0, 140)}\n        ` +
+        `witness before: ${before}\n        witness after:  ${afterDeny}`,
+    );
+
+    const retry = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    const afterRetry = await vwitness();
+    check(
+      'G27b-ii',
+      'an immediate retry is refused by the 60s cooldown, WITHOUT a second consent call',
+      // The code itself is the proof of ordering: the cooldown is pipeline
+      // step 5 and consent is step 8, so a CONSENT_COOLDOWN answer cannot have
+      // gone through the dialog. Had it reached consent, `--e2e-consent=deny`
+      // would have answered USER_DENIED again.
+      retry.includes(SAYS.CONSENT_COOLDOWN) && !retry.includes(SAYS.USER_DENIED) &&
+        nothingWritten(afterRetry),
+      `reply: ${retry.split('\n')[0].slice(0, 160)}\n        witness: ${afterRetry}`,
+    );
+  }
+
+  if (PHASE === 'none') {
+    const before = await vwitness();
+    // No --e2e-consent flag: a real native dialog is raised and nothing can
+    // click it. The call must NOT complete on its own.
+    const out = await call(
+      'vault_request_fill',
+      { action: 'apply', entryId: entry },
+      8000,
+    );
+    const after = await vwitness();
+    check(
+      'G28',
+      'with no --e2e-consent flag an apply does not complete on its own',
+      out === TIMEOUT_SENTINEL && nothingWritten(after),
+      `reply after 8s: ${out === TIMEOUT_SENTINEL ? '(none — still waiting on the dialog)' : out.split('\n')[0].slice(0, 160)}\n        ` +
+        `witness before: ${before}\n        witness after:  ${after}`,
+    );
+  }
+
+  finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -609,9 +844,315 @@ const beta = refFor('Beta action', 'button');
   }
 }
 
+// --- G16-G27a: the credential fill path -------------------------------------
+//
+// Requires Aperture launched with
+//   --seed-vault --e2e-consent=allow --e2e-consent-delay-ms=1500
+// and test/fixtures served on BOTH 127.0.0.1:8899 and 127.0.0.2:8899.
+//
+// The 1500ms consent delay is not padding. Three of these guards (G20, G21,
+// G22) need the page to move WHILE the consent dialog is open, because that is
+// the only window in which the preload's own re-checks — origin echo,
+// isConnected, type==='password' — are the thing being measured. The fixture
+// arms those changes at 800ms, comfortably inside it.
+
+{
+  await goFixture(BASE, 'login.html');
+  const entry = await seededEntry(BASE);
+
+  // --- G16a: an unknown id is refused before any page work ------------------
+  {
+    const bogus = '00000000deadbeef';
+    const out = await call('vault_request_fill', { action: 'apply', entryId: bogus });
+    const w = await vwitness();
+    check(
+      'G16a',
+      'an id no saved sign-in has is refused, with no dialog and nothing written',
+      out.includes(SAYS.NO_MATCH) && nothingWritten(w),
+      `reply: ${out.split('\n')[0].slice(0, 140)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G16b: a loopback address isLocalhost() does not exempt ---------------
+  //
+  // 127.0.0.2 is loopback, is not `localhost`, and is not `127.0.0.1`. The
+  // vault's transport check exempts exactly the last two, so an entry saved
+  // for 127.0.0.2 is refused over http. The second listener and the second
+  // seeded record exist for this one line.
+  {
+    await goFixture(BASE_2, 'login.html');
+    const other = (await entryHere()) ?? '(no-seeded-entry)';
+    const out = await call('vault_request_fill', { action: 'apply', entryId: other });
+    const w = await vwitness();
+    check(
+      'G16b',
+      'a loopback address that is not localhost is refused INSECURE_TRANSPORT, before any page work',
+      out.includes(SAYS.INSECURE_TRANSPORT) && nothingWritten(w),
+      `reply: ${out.split('\n')[0].slice(0, 160)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G17: origin binding is terminal, and unnameability is what backs it --
+  {
+    await goFixture(BASE_LOCALHOST, 'login.html');
+    const listed = await call('vault_entries_for_origin', {});
+    check(
+      'G17b',
+      'vault_entries_for_origin on localhost lists nothing — the entry is unnameable there',
+      /no saved logins for this site/.test(listed),
+      `reply: ${listed.split('\n')[0].slice(0, 140)}`,
+    );
+
+    // The id had to be learned on 127.0.0.1, which is exactly G17b's point:
+    // an agent that had only ever seen this page could not have produced it.
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    const w = await vwitness();
+    check(
+      'G17a',
+      'an entry saved for 127.0.0.1 is refused on localhost, names neither the stored origin nor an override',
+      out.includes(SAYS.ORIGIN_MISMATCH) &&
+        !out.includes('127.0.0.1') &&
+        /no override/.test(out) && !/\bforce\s*[:=]/.test(out) &&
+        nothingWritten(w),
+      `reply: ${out.split('\n').join(' ').slice(0, 240)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G18a: the password reached the masked field, and only it ------------
+  {
+    await goFixture(BASE, 'login.html');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const w = await vwitness();
+    check(
+      'G18a',
+      'the password lands in the masked field and nowhere else (no focus-following spill)',
+      out.includes(SAYS.FILLED) && /pw-match:true/.test(w) &&
+        /user-match:true/.test(w) && /visible-decoy-set:false/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 140)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G19: the value cannot be read back, including out of free text ------
+  {
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    // The page copies the value it legitimately holds into visible text. This
+    // is the whole exfiltration shape: `browser_read` reads innerText, which
+    // bypasses the snapshot tree entirely.
+    const model19 = new Map();
+    applyObservation(model19, snap);
+    const echoHits = [...model19.entries()].filter(
+      ([, e]) => e.label === 'Echo password to page' && e.role === 'button',
+    );
+    if (echoHits.length !== 1) {
+      check('G19', 'a filled credential cannot be read back, even once the page echoes it into text',
+        false, `"Echo password to page" resolves to ${echoHits.length} buttons`);
+    } else {
+      await call('browser_act', { action: 'click', ref: echoHits[0][0] });
+      await sleep(300);
+      const after = await call('browser_snapshot', { mode: 'full' });
+      const read = await call('browser_read', {});
+      const clean = !after.includes(SEEDED_PW) && !read.includes(SEEDED_PW);
+      check(
+        'G19',
+        'a filled credential cannot be read back, even once the page echoes it into visible text',
+        clean && /value withheld/.test(read),
+        `snapshot carries the password: ${after.includes(SEEDED_PW)}; ` +
+          `browser_read carries it: ${read.includes(SEEDED_PW)}; ` +
+          `marker present in read: ${/value withheld/.test(read)}`,
+      );
+    }
+  }
+
+  // --- G18b: a page that snaps the value back is not a success -------------
+  {
+    await goFixture(BASE, 'login.html', 'mode=snapback');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const w = await vwitness();
+    check(
+      'G18b',
+      'a controlled field that reverts the write produces FILL_REVERTED, not a success line',
+      out.includes(SAYS.FILL_REVERTED) && !out.includes(SAYS.FILLED) &&
+        /pw-match:false/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G20: the origin changed while the human was deciding ----------------
+  {
+    await goFixture(BASE, 'login.html', 'nav=800');
+    await armPageChange();
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const wAfter = await vwitness();
+    check(
+      'G20',
+      'a cross-origin navigation during the consent dialog aborts the write',
+      out.includes(SAYS.ORIGIN_CHANGED) && nothingWritten(wAfter),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        ` +
+        `witness on the document that arrived: ${wAfter}`,
+    );
+  }
+
+  // --- G21: the chosen field left the page during the dialog ---------------
+  {
+    await goFixture(BASE, 'login.html', 'remove=800');
+    await armPageChange();
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const w = await vwitness();
+    check(
+      'G21',
+      'a password field removed during the consent dialog produces FIELD_GONE and no partial fill',
+      out.includes(SAYS.FIELD_GONE) && /pw-present:false/.test(w) &&
+        /user-match:false/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G22: "show password" turned on during the dialog --------------------
+  //
+  // The toggle is armed at 800ms rather than set on load, and the reason is the
+  // one that makes this guard mean anything. A field that is already
+  // `type=text` at PLAN time is not a password candidate at all (section 5.2,
+  // "nothing else, ever"), so a pre-toggled page answers NO_FIELDS and the
+  // preload's masked check is never reached. Armed mid-dialog, this measures
+  // exactly that check — which is what sabotage S2 removes.
+  {
+    await goFixture(BASE, 'login.html', 'showpw=800');
+    await armPageChange();
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(400);
+    const w = await vwitness();
+    check(
+      'G22',
+      'a password field unmasked during the consent dialog is refused, and nothing is written',
+      out.includes(SAYS.PASSWORD_FIELD_NOT_MASKED) && /pw-match:false/.test(w) &&
+        /user-match:false/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G23: a sign-up form is a refusal, not a guess -----------------------
+  {
+    await goFixture(BASE, 'signup.html');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(300);
+    const w = await vwitness();
+    check(
+      'G23',
+      'password + confirm is AMBIGUOUS_FIELDS — no dialog, nothing written',
+      out.includes(SAYS.AMBIGUOUS_FIELDS) && /any-password-set:false/.test(w) &&
+        /user-set:false/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G24: an overlay over the form ---------------------------------------
+  {
+    await goFixture(BASE, 'login.html', 'mode=overlay');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(300);
+    const w = await vwitness();
+    check(
+      'G24',
+      'a password field behind an aria-modal overlay is refused, and nothing is written',
+      out.includes(SAYS.FIELD_OBSTRUCTED) && nothingWritten(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G25: readonly means a human could not type there either -------------
+  {
+    await goFixture(BASE, 'login.html', 'mode=readonly');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(300);
+    const w = await vwitness();
+    check(
+      'G25',
+      'a readonly password field is refused, and the username is not written either (atomic)',
+      out.includes(SAYS.FIELD_NOT_EDITABLE) && nothingWritten(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G25b: disabled by an ANCESTOR is still disabled ---------------------
+  //
+  // Not in the spec's guard table. It is here because implementing section
+  // 6.2's `!el.disabled` literally reproduces a bug this codebase has already
+  // paid for once: the IDL `disabled` property reflects the content attribute
+  // only, so it is `false` for a control inside `<fieldset disabled>` — which
+  // the `select` path fixed with `isDisabled` and the fill path never got.
+  // Without the strengthening this guard is RED: the password lands in a field
+  // no human could type into.
+  {
+    await goFixture(BASE, 'login.html', 'mode=fieldset');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(300);
+    const w = await vwitness();
+    check(
+      'G25b',
+      'a password field disabled by an ancestor <fieldset disabled> is refused too',
+      out.includes(SAYS.FIELD_NOT_EDITABLE) && nothingWritten(w),
+      `reply: ${out.split('\n')[0].slice(0, 180)}\n        witness: ${w}`,
+    );
+  }
+
+  // --- G26: the one-time code, checked against the page's own arithmetic ---
+  {
+    await goFixture(BASE, 'login.html', 'mode=otp');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(500);
+    const w = await vwitness();
+    check(
+      'G26a',
+      'the inserted one-time code matches the one the fixture derived independently from the seed',
+      out.includes(SAYS.FILLED) && /otp-valid:true/.test(w),
+      `reply: ${out.split('\n')[0].slice(0, 160)}\n        witness: ${w}`,
+    );
+
+    // The code must not be readable back either — same class as G19, and the
+    // needle is six characters, so this is the case section 11.2 calls out.
+    const readOtp = await call('browser_read', {});
+    const now = Math.floor(Date.now() / 1000 / 30);
+    const codes = [totpAt(now), totpAt(now - 1)];
+    check(
+      'G26a-blind',
+      'the inserted one-time code does not come back through browser_read',
+      !codes.some((c) => readOtp.includes(c)),
+      `codes checked: 2 windows; present in read: ${codes.filter((c) => readOtp.includes(c)).length}`,
+    );
+
+    const second = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(300);
+    const w2 = await vwitness();
+    check(
+      'G26b',
+      'a second fill inside the same 30s window is refused, and the field is unchanged',
+      second.includes(SAYS.TOTP_ALREADY_ISSUED) && /otp-valid:true/.test(w2),
+      `reply: ${second.split('\n')[0].slice(0, 200)}\n        witness: ${w2}`,
+    );
+  }
+
+  // --- G27a: submit means exactly one submission, carrying the values ------
+  {
+    await goFixture(BASE, 'login.html');
+    const out = await call('vault_request_fill', {
+      action: 'apply', entryId: entry, submit: true,
+    });
+    await sleep(700);
+    const w = await vwitness();
+    check(
+      'G27a',
+      'submit:true produces exactly one submission, and the submitted form carries the values',
+      /submits:1/.test(w) && /submitted-values-match:true/.test(w) &&
+        out.includes(SAYS.FILLED),
+      `reply: ${out.split('\n').slice(0, 2).join(' ').slice(0, 200)}\n        witness: ${w}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 
-const failed = checks.filter((c) => !c.ok);
-console.log(`\n${checks.length - failed.length}/${checks.length} guards hold`);
-console.log(`\nRESULT: ${failed.length ? 'RED — ' + failed.map((f) => f.id).join(', ') : 'GREEN'}`);
-process.exit(failed.length ? 1 : 0);
+finish();

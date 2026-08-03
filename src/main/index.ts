@@ -8,7 +8,9 @@ import { installBlocker } from '@privacy/blocker';
 import { containers } from '@privacy/containers';
 import { startMcpServer } from '@mcp/server';
 import { profiles } from '@vault/profileStore';
-import { invalidate } from '@core/snapshot/engine';
+import { vault } from '@vault/vault';
+import { revokeAllGrants } from './consent.js';
+import { clearAllNeedles, invalidate } from '@core/snapshot/engine';
 import { flushTelemetry, initTelemetry, report } from '../telemetry/reporter.js';
 import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
 
@@ -127,6 +129,25 @@ async function createWindow(): Promise<void> {
 
 applyCommandLineSwitches();
 
+/**
+ * What must stop being true the moment the vault locks.
+ *
+ * Registered here rather than inside `Vault` because `revokeAllGrants` lives in
+ * `main/consent.ts` and `clearAllNeedles` in `core/snapshot/engine.ts`, and
+ * importing either from the vault would create an import cycle. This is the one
+ * module that already sees all three.
+ *
+ * Registering on `onLock` rather than at each explicit `lock()` call site is
+ * what makes the IDLE auto-lock count too, which is the path that actually
+ * matters: a human walks away, the vault times out, and a ten-minute autofill
+ * grant used to outlive it because `revokeAllGrants` had no callers at all
+ * (docs/design/vaultfill.md F1).
+ */
+vault.onLock(() => {
+  revokeAllGrants();
+  clearAllNeedles();
+});
+
 app.whenReady().then(async () => {
   // Blocking must be installed on the default container's session before the
   // first request goes out.
@@ -165,6 +186,27 @@ app.whenReady().then(async () => {
       true,
     );
     console.log('[aperture] seeded demo profile');
+  }
+
+  // Dev-only: a vault with known contents, so the live credential guards
+  // (bench/guards.mjs G16-G28) have something to fill. In-memory only — key
+  // material generated fresh, `persist()` short-circuited, nothing written to
+  // disk — and `seedForDev` refuses outright if a real vault file exists, so it
+  // can never stand in front of a human's data. Gated on `!app.isPackaged` AND
+  // this flag, both checked inside `seedForDev` itself; this is main-process
+  // argv and is not reachable from MCP, IPC, an env var, or a page.
+  if (process.argv.includes('--seed-vault')) {
+    try {
+      await vault.seedForDev();
+      console.log(
+        '[aperture] ############ --seed-vault: IN-MEMORY DEV VAULT SEEDED. ' +
+          'DEV BUILD ONLY. ############',
+      );
+    } catch (err) {
+      console.error(
+        `[aperture] --seed-vault refused: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   app.on('activate', () => {

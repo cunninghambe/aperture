@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Guard sign-in</title>
+    <style>
+      #overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        z-index: 99;
+        padding: 2rem;
+      }
+      #echo {
+        min-height: 1.2em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Guard sign-in</h1>
+
+    <!--
+      THE FIXTURE IS THE WITNESS, AND IT REPORTS BOOLEANS ONLY.
+
+      Every guard in bench/guards.mjs G16-G28 is checked against THIS page's own
+      record of what happened to it, never against Aperture's report of itself.
+      That rule is the whole reason bench/guards.mjs exists.
+
+      Nothing here ever prints a secret. Two independent reasons, and both
+      matter:
+
+        1. A fixture that printed the password would be redacted by the very
+           needle mechanism G19 exists to test, so the guard would be reading
+           its own mitigation and would pass whether or not the fill worked.
+        2. The expected password and the TOTP seed are embedded in this page's
+           SCRIPT, which browser_read strips and the walker never serialises.
+           They stay there; only booleans reach the log line.
+
+      The one-time code is computed HERE, from the seed, with this page's own
+      WebCrypto. `otp-valid:true` therefore means "the digits Aperture inserted
+      are the digits this page independently derived" — not "Aperture agreed
+      with Aperture".
+    -->
+
+    <p id="vaultlog">vault-log: (not rendered)</p>
+    <div id="echo"></div>
+
+    <form id="signin">
+      <p>
+        <label for="u">Email or username</label>
+        <input id="u" name="username" type="text" autocomplete="username" />
+      </p>
+      <p id="pwrow">
+        <label for="p">Password</label>
+        <input id="p" name="password" type="password" autocomplete="current-password" />
+      </p>
+      <p id="otprow">
+        <label for="o">Verification code</label>
+        <input id="o" name="otp" type="text" autocomplete="one-time-code" inputmode="numeric" />
+      </p>
+      <!--
+        The visible decoy. A plain text input the walker DOES serialise the
+        value of, sitting immediately after the password field so that any
+        focus-following keystroke path which loses focus mid-word deposits the
+        tail of the secret here. `visible-decoy-set:false` is the assertion that
+        the write was aimed by element identity and not by focus
+        (docs/design/vaultfill.md section 3.1).
+
+        Its label must match no username, OTP or profile pattern, or the plan
+        would legitimately target it and the guard would measure nothing.
+      -->
+      <p>
+        <label for="d">Search this site</label>
+        <input id="d" name="decoy" type="text" />
+      </p>
+      <p><button type="submit" id="go">Sign in</button></p>
+    </form>
+
+    <p>
+      <button type="button" id="echobtn">Echo password to page</button>
+      <button type="button" id="showbtn">Show password</button>
+      <button type="button" id="rmbtn">Remove password field</button>
+      <button type="button" id="armbtn">Arm page change</button>
+    </p>
+
+    <script>
+      (() => {
+        const q = new URLSearchParams(location.search);
+        const mode = q.get('mode') || 'default';
+
+        // Known to this page only. Never rendered, never logged.
+        const EXPECT_USER = 'guard@example.com';
+        const EXPECT_PW = 'guard-pw-93a1';
+        const TOTP_SEED = 'JBSWY3DPEHPK3PXP';
+
+        const form = document.getElementById('signin');
+        const u = document.getElementById('u');
+        const p = document.getElementById('p');
+        const o = document.getElementById('o');
+        const d = document.getElementById('d');
+        const pwrow = document.getElementById('pwrow');
+        const otprow = document.getElementById('otprow');
+        const log = document.getElementById('vaultlog');
+        const echo = document.getElementById('echo');
+
+        // Page shapes. Each guard loads the shape it needs; nothing here is
+        // toggled by Aperture, so a mis-shaped page is a visible setup error
+        // rather than a silent pass.
+        if (mode !== 'otp') otprow.remove();
+        if (mode === 'otp') pwrow.remove();
+        if (mode === 'readonly') p.readOnly = true;
+        if (mode === 'fieldset') {
+          // Disabled by an ANCESTOR, which is the case `input.disabled` cannot
+          // see: the IDL property reflects the content attribute only, so it
+          // reads `false` here while the control is unusable to a human.
+          const fs = document.createElement('fieldset');
+          fs.disabled = true;
+          pwrow.parentNode.insertBefore(fs, pwrow);
+          fs.appendChild(pwrow);
+        }
+        if (mode === 'overlay') {
+          const ov = document.createElement('div');
+          ov.id = 'overlay';
+          ov.setAttribute('role', 'dialog');
+          ov.setAttribute('aria-modal', 'true');
+          ov.textContent = 'We use cookies.';
+          document.body.appendChild(ov);
+        }
+
+        // The snap-back field: a controlled component that rejects the write on
+        // its next turn of the loop. `setTimeout(0)` rather than a synchronous
+        // clear on purpose — a synchronous revert is caught by the same-task
+        // read-back, and G18b is about the DEFERRED T+250ms check.
+        if (mode === 'snapback') {
+          p.addEventListener('input', () => {
+            setTimeout(() => {
+              p.value = '';
+              render();
+            }, 60);
+          });
+        }
+
+        let submits = 0;
+        let submittedMatch = false;
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          submits += 1;
+          const fd = new FormData(form);
+          submittedMatch =
+            fd.get('password') === EXPECT_PW && fd.get('username') === EXPECT_USER;
+          render();
+        });
+
+        document.getElementById('echobtn').addEventListener('click', () => {
+          // The exfiltration shape G19 is about: the page copies the value it
+          // legitimately holds into visible text, where a snapshot or a
+          // browser_read would otherwise carry it straight into agent context.
+          echo.textContent = 'copy ' + (p ? p.value : '') + (o ? ' ' + o.value : '');
+          render();
+        });
+        document.getElementById('showbtn').addEventListener('click', () => {
+          if (p) p.type = 'text';
+          render();
+        });
+        document.getElementById('rmbtn').addEventListener('click', () => {
+          if (pwrow.isConnected) pwrow.remove();
+          render();
+        });
+
+        // --- the independent one-time-code witness ---------------------------
+
+        const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        function b32(s) {
+          let bits = 0;
+          let val = 0;
+          const out = [];
+          for (const c of s.toUpperCase().replace(/[\s=-]/g, '')) {
+            const i = B32.indexOf(c);
+            if (i < 0) continue;
+            val = (val << 5) | i;
+            bits += 5;
+            if (bits >= 8) {
+              out.push((val >>> (bits - 8)) & 255);
+              bits -= 8;
+            }
+          }
+          return new Uint8Array(out);
+        }
+
+        async function codeFor(counter) {
+          const key = await crypto.subtle.importKey(
+            'raw',
+            b32(TOTP_SEED),
+            { name: 'HMAC', hash: 'SHA-1' },
+            false,
+            ['sign'],
+          );
+          const buf = new ArrayBuffer(8);
+          const dv = new DataView(buf);
+          dv.setUint32(0, Math.floor(counter / 0x100000000));
+          dv.setUint32(4, counter >>> 0);
+          const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, buf));
+          const off = sig[sig.length - 1] & 0x0f;
+          const bin =
+            ((sig[off] & 0x7f) << 24) |
+            ((sig[off + 1] & 0xff) << 16) |
+            ((sig[off + 2] & 0xff) << 8) |
+            (sig[off + 3] & 0xff);
+          return String(bin % 1000000).padStart(6, '0');
+        }
+
+        let otpValid = false;
+        async function checkOtp() {
+          if (!o || !o.isConnected || !o.value) {
+            otpValid = false;
+            return;
+          }
+          const now = Math.floor(Date.now() / 1000 / 30);
+          // Current window OR the one before it, which is what a real verifier
+          // accepts and what keeps this from flaking on a step boundary
+          // crossed between generation and this check. Either way the digits
+          // are derived here, from the seed, with no help from Aperture.
+          const [a, b] = await Promise.all([codeFor(now), codeFor(now - 1)]);
+          otpValid = o.value === a || o.value === b;
+        }
+
+        // --- the log line ----------------------------------------------------
+
+        function line() {
+          return (
+            'vault-log: ' +
+            [
+              'pw-match:' + Boolean(p && p.isConnected && p.value === EXPECT_PW),
+              'user-match:' + Boolean(u && u.value === EXPECT_USER),
+              'visible-decoy-set:' + Boolean(d && d.value !== ''),
+              'otp-valid:' + otpValid,
+              'submits:' + submits,
+              'submitted-values-match:' + submittedMatch,
+              'echoed:' + (echo.textContent.trim() !== ''),
+              'pw-masked:' + Boolean(p && p.isConnected && p.type === 'password'),
+              'pw-present:' + Boolean(p && p.isConnected),
+            ].join(' ')
+          );
+        }
+
+        let rendering = false;
+        function render() {
+          log.textContent = line();
+          if (rendering) return;
+          rendering = true;
+          checkOtp()
+            .catch(() => {
+              otpValid = false;
+            })
+            .then(() => {
+              rendering = false;
+              log.textContent = line();
+            });
+        }
+
+        // Rendered on every event the fill path itself dispatches, so the log
+        // is current the moment the write lands. No polling: a page that
+        // rewrote itself on a timer would be a live region, and the diff
+        // engine's volatility tracker would start suppressing it.
+        for (const el of [u, p, o, d]) {
+          if (!el) continue;
+          el.addEventListener('input', render);
+          el.addEventListener('change', render);
+        }
+
+        // --- the page moving WHILE the human looks at the consent dialog -----
+        //
+        // Three guards (G20, G21, G22) need a change that lands strictly INSIDE
+        // the window between Aperture resolving the chosen fields (pipeline
+        // step 7) and the preload receiving the write (step 12). That window is
+        // the consent dialog, held open by --e2e-consent-delay-ms.
+        //
+        // The URL parameter says WHAT changes and after how long. The ARM
+        // BUTTON says when the clock starts, and the button is the reason this
+        // is not a race: timing the change from page LOAD would have to beat
+        // the navigation settle, the snapshot, the plan and the resolve, none
+        // of which have a fixed duration. Timed from a click the guard issues
+        // immediately before `apply`, the only variable left is the pipeline's
+        // own first few hundred milliseconds.
+        //
+        // A change that arrives too EARLY is not a silent pass, which is what
+        // makes this safe to get slightly wrong: the plan then refuses with
+        // NO_FIELDS (or step 4 refuses ORIGIN_MISMATCH), and the guard fails
+        // loudly on a code it did not expect.
+        const at = (name) => {
+          const v = Number(q.get(name));
+          return Number.isFinite(v) && v > 0 ? v : null;
+        };
+        const armButton = document.getElementById('armbtn');
+        armButton.addEventListener('click', () => {
+          const navAt = at('nav');
+          if (navAt) {
+            setTimeout(() => {
+              // A DIFFERENT ORIGIN, same server: 127.0.0.1 and localhost are
+              // distinct origins and distinct registrable domains, so this is a
+              // real cross-origin commit and not a same-document trick.
+              location.href =
+                'http://localhost:8899/login.html?arrived=1&t=' + Date.now();
+            }, navAt);
+          }
+          const rmAt = at('remove');
+          if (rmAt) setTimeout(() => { pwrow.remove(); render(); }, rmAt);
+          const showAt = at('showpw');
+          if (showAt) setTimeout(() => { if (p) p.type = 'text'; render(); }, showAt);
+        });
+
+        render();
+      })();
+    </script>
+  </body>
+</html>

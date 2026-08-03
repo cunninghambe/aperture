@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isAllowedScheme, normalizeUrl } from '../src/main/tabs.js';
 import { quote } from '../src/core/snapshot/render.js';
 import { registrableDomain } from '../src/vault/vault.js';
@@ -393,5 +393,80 @@ describe('review — identical siblings must follow their row, not their slot', 
     const bare = keyFor('button', 'add to cart');
     expect(isPositionalKey(`${bare}|#3`)).toBe(true);
     expect(isPositionalKey(bare)).toBe(false);
+  });
+});
+
+/**
+ * The dev-only affordances the live guards need, and the proof they cannot
+ * ship live.
+ *
+ * `--seed-vault` and `--e2e-consent` are the only two ways past a native
+ * dialog no script can click and into a vault with known contents. Both are
+ * main-process argv — not an MCP parameter, not an IPC channel, not an
+ * environment variable, and not anything a page or an agent can set — and both
+ * are gated a SECOND time on the build being unpackaged. This asserts the
+ * second gate, because the first one is only as good as the person who
+ * remembered to add it.
+ *
+ * Guard G28 is the other half: with no `--e2e-consent` flag at all, a live
+ * apply does not complete on its own. The flag's presence is therefore
+ * observable, so a green guard run cannot be a run that quietly auto-approved.
+ */
+describe('dev-only affordances are inert in a packaged build', () => {
+  const load = async (isPackaged: boolean) => {
+    vi.resetModules();
+    vi.doMock('electron', () => ({
+      app: { isPackaged, getPath: () => process.cwd() },
+      dialog: { showMessageBox: async () => ({ response: 0 }) },
+      BrowserWindow: class {},
+      BaseWindow: class {},
+    }));
+    return {
+      consent: await import('../src/main/consent.js'),
+      vault: await import('../src/vault/vault.js'),
+    };
+  };
+
+  const credentialReq = {
+    scope: 'credential' as const,
+    origin: 'https://packaged.example.com',
+    entryId: 'packaged-1',
+    username: 'u@example.com',
+    savedFor: 'example.com',
+    willFill: 'username and password',
+  };
+
+  afterEach(() => {
+    process.argv = process.argv.filter((a) => !a.startsWith('--e2e-consent'));
+    process.argv = process.argv.filter((a) => a !== '--seed-vault');
+    vi.doUnmock('electron');
+    vi.resetModules();
+  });
+
+  it('--e2e-consent does not decide anything when app.isPackaged', async () => {
+    process.argv.push('--e2e-consent=allow');
+    const { consent } = await load(true);
+    // The real dialog ran (the mock answers Cancel), so the flag bought
+    // nothing at all. An auto-allow would have returned ok.
+    const res = await consent.requestFillConsent(
+      {} as unknown as import('electron').BaseWindow,
+      credentialReq,
+    );
+    expect(res).toEqual({ ok: false, reason: 'denied' });
+  });
+
+  it('--seed-vault throws when app.isPackaged, so no vault is ever seeded', async () => {
+    process.argv.push('--seed-vault');
+    const { vault } = await load(true);
+    const v = new vault.Vault();
+    await expect(v.seedForDev()).rejects.toThrow(/packaged/);
+    expect(v.state()).toBe('locked');
+  });
+
+  it('--seed-vault throws in a dev build when the flag itself is absent', async () => {
+    const { vault } = await load(false);
+    const v = new vault.Vault();
+    await expect(v.seedForDev()).rejects.toThrow(/--seed-vault/);
+    expect(v.state()).toBe('locked');
   });
 });
