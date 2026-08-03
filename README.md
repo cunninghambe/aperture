@@ -3,13 +3,15 @@
 An AI-native, privacy-first browser. The primary user is an agent; the human is
 the one who stays in charge.
 
-> **Status: v0.2, early but real.** The browser runs, the MCP server works, and
-> Claude Code can drive it end to end — snapshot, diff, autofill, capture. The
-> vault has a working UI, tested crypto, and PSL-backed origin binding. 187
-> tests pass, including regression tests for every finding of the security
-> review. See
-> [Honest status](#honest-status) for what is *not* done — nothing below is
-> claimed as working unless it is marked working.
+> **Status: early but real.** The browser runs, the MCP server works, and Claude
+> Code can drive it end to end — snapshot, act, diff, autofill, capture. The
+> diff engine has been measured against a real competitor over a scored,
+> preregistered head-to-head, and it **won the cost primary and lost the
+> precision primary**. The vault has a working UI, tested crypto, and PSL-backed
+> origin binding; its MCP fill path deliberately refuses rather than pretending.
+> See [What has been measured](#what-has-been-measured) for the numbers and
+> their scope, and [Honest status](#honest-status) for what is *not* done —
+> nothing below is claimed as working unless it is marked working.
 
 ---
 
@@ -29,43 +31,17 @@ all the token cost in agentic browsing actually goes.
 ## The core idea: diffs, not re-dumps
 
 Every browser-MCP today (playwright-mcp, browser-use, chrome-devtools-mcp)
-re-serializes the entire page after every single action. A real page is
-15–20k tokens as a naive accessibility-tree dump. A 20-action task therefore
-burns 200k+ tokens re-reading a page that mostly did not change.
+re-serializes the entire page after every single action. Aperture treats the
+loop as **act → observe delta**: `browser_act` returns what changed, against a
+page state the model already holds.
 
-Aperture treats the loop as **act → observe delta**. `browser_act` returns what
-changed, against a page state the model already holds.
+For scale, from `npm run bench:live` on four real sites: an Aperture full
+snapshot of Hacker News is 9,519 tokens (233 refs), a GitHub repo page 5,269
+(100), a Wikipedia article 6,197 (209), an MDN reference 7,102 (163). An
+observation that reports *nothing changed* costs ~112–115 tokens on any of
+them. That gap is the whole design.
 
-`npm run bench` measures both modes over the same 20-action sequence on the same
-page. Observation cost, in tokens:
-
-| list items | full snapshot | re-dump mode | diff mode | ratio |
-|---|---|---|---|---|
-| 5 | 236 | 4,956 | 756 | **6.6×** |
-| 24 | 937 | 19,677 | 2,158 | **9.1×** |
-| 60 | 2,276 | 47,796 | 4,836 | **9.9×** |
-| 150 | 5,698 | 119,658 | 11,680 | **10.2×** |
-
-> **An earlier version of this README claimed ~50×.** That number was a design
-> target I had never measured, and the first benchmark contradicted it. The
-> real figure is roughly **7–10×**, rising with page size. Still a large win —
-> and an order of magnitude smaller than what I had written down.
->
-> Even this is a synthetic page, not a head-to-head run against playwright-mcp
-> on real sites. Read it as a floor on the mechanism's value, not as a
-> competitive result.
->
-> The number that matters more is one nobody has published: **task success
-> rate on diffs versus full re-dumps.** A model reconstructing page state from
-> a base snapshot plus twelve deltas is doing bookkeeping that a re-dump does
-> for it. If completion rates drop, the token saving is negative and this whole
-> design is wrong. The fallback thresholds (30% change, 12 diffs) are currently
-> reasoned guesses, not tuned values.
->
-> `npm run bench` measures the token half on a local fixture. The success-rate
-> half needs a task suite and is the single largest open gap in the project.
-
-Making that safe rather than merely small is the actual engineering:
+Making the gap safe rather than merely small is the actual engineering:
 
 - **Stable refs.** `e42` names a *logical element*, not a DOM node, so it
   survives a React re-render that replaced every node. Identity is
@@ -74,42 +50,197 @@ Making that safe rather than merely small is the actual engineering:
   hash suffixes) are rejected, because keying on them would make every ref
   unstable.
 - **Keyed reconciliation, not tree-edit-distance.** Identity keys turn matching
-  into a hash lookup, so diffing is O(n) with a longest-increasing-subsequence
+  into a hash lookup, so diffing is O(n), with a longest-increasing-subsequence
   pass so "one row jumped to the top" is one op, not twenty.
 - **Explicit resets.** Diffs name the state they apply to (`diff from #7.3`). On
   navigation, on >30% change, or after 12 diffs, the engine emits a full
   snapshot headed `FULL SNAPSHOT — replaces all prior state`, which tells a
-  model whose context was compacted to discard its mental model.
+  model whose context was compacted to discard its mental model. The fallback
+  thresholds are reasoned choices, not tuned values — nothing has measured them
+  against alternatives.
+- **Explicit retirement.** A `replace` op carries a `gone:` list naming every
+  ref it destroyed, and a `- gone:` op reports deaths that have no addressable
+  root to hang off. Restating a subtree without saying what died is how an
+  agent ends up believing in elements that no longer exist.
 - **Noise suppression.** A clock is recognized by shape and suppressed — even
   mid-task, when every observation follows an action (this specifically did
   not work until it was benchmarked: in an act-observe loop the statistical
   demotion path can never fire, and the shape path was gated behind it).
   Anything changing repeatedly on its own is demoted; the element the agent
-  acts on or reads is promoted straight back. Measured end-to-end by
-  `bench:fidelity widgets`, which requires a ticking clock to be suppressed
-  during a click sequence. Without this, one ticking timestamp defeats the
-  entire diff argument.
-- **Positional fallback, acknowledged as fragile.** Elements distinguishable only by position (ten identical "Add to cart" buttons) get a document-order ordinal appended to their key. That makes those refs positional, and reordering is exactly what breaks positional identity — a real limitation, and the honest trade against the alternative, which was one ref for ten buttons and a silent click on the wrong product.
-- **Ref discipline.** Only actionable elements get refs. Measured against
-  playwright-mcp on the same pages: 100 refs vs 446 on a GitHub repo page, 209 vs
-  611 on a Wikipedia article. That makes each snapshot **~1.9× smaller** — the
-  README previously claimed 4.5×, which was a third-party number for a
-  different tool. See [bench/RESULTS.md](bench/RESULTS.md).
+  acts on or reads is promoted straight back. Without this, one ticking
+  timestamp defeats the entire diff argument.
+- **Positional fallback — the known weak point, and it has now cost us a
+  benchmark.** Elements distinguishable only by position (ten identical "Add to
+  cart" buttons, a queue of identical rows) get a document-order ordinal
+  appended to their key. Reordering is exactly what breaks positional identity.
+  In the head-to-head this was measured in the field: under row removal those
+  ordinals re-key to positions, a plan captured before the removal executes one
+  row off, and the click *lands*. See
+  [Precision](#correctness-and-the-primary-we-lost) — it is the one
+  preregistered primary Aperture failed, and it is being fixed.
+- **Ref discipline.** Only actionable elements get refs. On the four real sites
+  above, Aperture's full snapshots are **1.25×–2.77× smaller than
+  `@playwright/mcp`'s of the same URLs, averaging ~1.9×**. That is a
+  per-snapshot byte comparison and nothing more — per-observation is not
+  per-dollar, which the campaigns below spent three waves learning.
 
-## Small tool surface, deliberately
+## What has been measured
 
-Every registered MCP tool costs roughly 1,000 tokens of schema before it does
-anything. playwright-mcp (~50 tools) and chrome-devtools-mcp (51) levy a ~50k
-token tax on every session. Aperture ships **13**, kept down by putting related
-operations behind an `action` discriminator rather than splitting them into a
-tool each:
+Four scored campaigns with preregistered rules, plus the engine's own
+fidelity benches. Every claim here is quoted at the scope its verdict grants.
+The measurement detail, the corrections, and the failed analyses live in
+[`bench/RESULTS.md`](bench/RESULTS.md) and the adjudications in
+`docs/design/{wave3,sweep,h2h}-evaluation.md`.
+
+### Cost, against the real incumbent
+
+On a 13-task benchmark against **Playwright MCP 0.0.78**, both products sealed
+to an identical three-tool surface, driven by claude-sonnet-5 (385 episodes;
+design preregistered in `docs/design/headtohead.md`, adjudicated in
+`docs/design/h2h-evaluation.md`):
+
+- On **realistic-weight pages** — the preregistered neutral fixtures, 5.5–6k
+  Aperture tokens and ~22k tokens in Playwright's dialect — end-to-end agent
+  cost was **0.31× Playwright MCP's [0.27, 0.36]**, with the saving
+  attributable to observation bytes.
+- On the **small adversarial home fixtures Aperture was 1.30× DEARER
+  [1.04, 1.59]**, paid in generation-side tokens (6.3k vs 3.1k output tokens
+  per episode at equal turns) — the bookkeeping tax, billed where earlier waves
+  predicted it. On small *neutral* pages the difference is null
+  (0.957× [0.90, 1.02]).
+
+Where the crossover sits, from a page-size sweep on one task at the same engine
+stamp (54 episodes, full-snapshot weights 1,116–38,081 chars): **the diff arm is
+never significantly dearer at any measured size, and is significantly cheaper
+from ≈10k chars (≈2.5k tokens) up** — 19% / 39% / 43% cheaper per episode at
+the top three rungs, growing monotonically with page weight. At the two
+smallest rungs the intervals include zero, so the sweep neither confirms nor
+refutes the +4–6% small-page premium that the earlier waves measured; it caps
+any such premium at +20% of episode cost. One task, one model, synthetic inert
+padding.
+
+### Correctness, and the primary we lost
+
+- **Reliability (head-to-head primary): the −10pp non-inferiority bound
+  HOLDS** — +7.3pp [−3.8, +18.2] for Aperture-diff over sealed Playwright,
+  pooled over all 13 tasks. **The delta is carried entirely by one task**
+  (`catalog-order`, where sealed Playwright scored 0/10 and every other arm
+  100%); excluding it, the delta is −2.0pp [−13.1, +9.1], which straddles the
+  bound — inconclusive at this sample size. On the disclosed-adversarial home
+  set alone the incumbent led on success, 82% vs 76%.
+- **Precision (head-to-head primary): the +0.2/run wrong-element bound
+  FAILS.** +0.173 [0.018, 0.345] pooled; +0.380 [0.060, 0.740] on the home set,
+  where all of it lives. **The cause is our engine, not the diff mechanism**
+  (diff − re-dump −0.10 [−0.36, +0.15]; re-dump − sealed +0.27 [0.08, 0.49]):
+  on re-rendering identical-row lists Aperture's persistent ordinal refs re-key
+  to positions under row removal, so a stale plan lands one row off, silently,
+  where Playwright's per-snapshot refs error out (75 refused dead-ref acts, 9×
+  Aperture's). This is a correctness hazard, not a cost — the wrong actions
+  mutate real state. The fix cycle is owed and a fresh cohort must measure it
+  before this sentence can be retired.
+- **Diff bookkeeping penalty (wave 3, our own suite): none found at the stated
+  size.** On a 3-task positional-identity suite with claude-sonnet-5, no
+  diff-bookkeeping penalty larger than 10pp in task success or +0.4
+  wrong-element actions per run was found (n=105/arm). The smallest true drop
+  this run could distinguish from that bound is ~23.5pp; anything subtler is
+  invisible to it. Point estimates favour diffs, but every interval includes
+  zero — direction, not a finding.
+- **Sealing the incumbent cost it capability, and that matters more than our
+  win.** Stock Playwright MCP with its full default surface (code-execution,
+  network-inspection and screenshot tools disabled) outscored its own sealed
+  configuration **89% to 74%**. The sealed comparison understates the
+  incumbent, **the stock numbers are the deployment-relevant ones**, and stock
+  Playwright remains the stronger choice where its full surface is acceptable.
+
+**Scope, and it is narrow.** One model (claude-sonnet-5). Our fixtures —
+synthetic, static, logged-out, no anti-bot, no iframes, no auth. MCP mode only:
+Playwright's own recommended CLI/skills mode, which its README concedes is the
+token-efficient path, is unmeasured, and if that mode wins the economics then
+MCP-vs-MCP was the wrong fight. **Every Playwright episode ran branded Chrome
+150.0.7871.187, not the pinned chromium build the spec named** — that build
+cannot spawn on this machine, so the pinned browser never ran (Aperture ran its
+own Electron-bundled Chromium, as always). Sealed Playwright ran with codegen
+off, which makes key/scroll/type-without-submit return zero bytes — its shipped
+conduct, disclosed in the shared tool description. Sonnet has trained on
+Playwright's dialect and never on Aperture's; that asymmetry is unclaimable in
+either direction. The suite's own report exits non-zero on this store (a
+tripwire fired on `catalog-order`; the investigation is complete and ruled a
+genuine product difference), so the verdict was computed out of band in the
+adjudication. The full fourteen-item disclosure block is in
+[`bench/RESULTS.md`](bench/RESULTS.md).
+
+### The mechanism, on our own bench
+
+- **Diff fidelity: five scenarios GREEN** (`npm run bench:fidelity`) — typing
+  with a mid-run resync, full DOM teardowns, clicks and state flips through a
+  shadow root with a ticking clock suppressed, mass ref death and revival
+  through the size-cap resync, and native `<select>`s plus a custom ARIA
+  combobox. Vacuity guards mean a run that measured nothing exits without
+  printing a verdict at all.
+  **What a green licenses:** the diff stream is complete and unambiguous *for a
+  mechanical rule-following reader* — if a real agent's model drifts, the fault
+  is its bookkeeping, not missing information in the stream. It does **not**
+  prove an LLM does that bookkeeping correctly, and it does not check
+  containment or position: a stream that reordered the world would still pass.
+- **Refusals and retractions: 11/11** (`npm run bench:guards`), judged against
+  the fixture's own change-event log rather than Aperture's own report, because
+  an `error:` reply is not evidence that nothing was written. The same probe
+  scored 1/11 on the build immediately before the fixes.
+- **Ref stability across a re-snapshot: 100%** on the four real sites, including
+  one whose content changes underneath. Through a *full re-render* refs survive
+  when the element has a distinguishing name and **fail when siblings are
+  identical** — the positional hazard above, measured in the lab before the
+  head-to-head measured it in the field.
+- **The synthetic token model** (`npm run bench`) puts observation cost at
+  6.6×–10.2× lower in diff mode over a 20-action sequence, rising with page
+  size. It is a model of one fixture family, not a measurement of anything an
+  agent did, and the campaigns above supersede it for any deployment claim.
+
+An earlier version of this file claimed ~50×, then ~40×, from design targets
+nobody had measured. Both were wrong, in the same way: neither accounted for
+fixed per-response overhead, and neither counted the turns an agent spends
+deciding. The envelope overhead has since been cut from 420 to 104 chars — 79
+tokens per response, reconciled to the byte — and the honest headline is the
+one above, which is smaller than the first draft and better evidenced.
+
+### What none of this settles
+
+- **Live websites.** Every scored fixture is synthetic. No anti-bot, no A/B
+  drift, no iframes, no auth.
+- **Other models.** One model throughout. A model that reads 22k-token dumps
+  reliably, or one that cannot read 6k, moves every headline number.
+- **The truncation regime** — an agent on a page bigger than its budget. That is
+  the *default* product experience, and the sweep priced the enabler world
+  instead.
+- **Hard tasks on big pages.** The one unmeasured quadrant of the cost picture,
+  and the one place the sweep's flat voluntary-observation residue could
+  plausibly break.
+- **Long horizons.** Everything is ≤16 actions with budgets that always fit.
+- **Structure, containment, position, iframes** — outside what the fidelity
+  bench calls faithful.
+
+## Small tool surface, deliberately — with a measured counterweight
+
+Every registered MCP tool costs schema tokens before it does anything, and
+playwright-mcp (~50 tools) and chrome-devtools-mcp (51) levy that tax on every
+session. Aperture ships **14**, kept down by putting related operations behind
+an `action` discriminator rather than splitting them into a tool each:
 
 ```
 browser_tabs      browser_navigate   browser_snapshot   browser_read
-browser_fill_form browser_profile    browser_attach     browser_capture
-browser_container browser_theme      browser_console
+browser_act       browser_fill_form  browser_profile    browser_attach
+browser_capture   browser_container  browser_theme      browser_console
 vault_entries_for_origin             vault_request_fill
 ```
+
+`browser_act` covers click, type, clear, hover, scroll, key and select.
+
+**The counterweight, because it was measured against us:** in the head-to-head,
+giving the incumbent *more* tools made it better, not worse — stock Playwright
+beat its own three-tool sealed configuration by 15 points, and the dividend was
+concentrated exactly where a scoping affordance was missing. A small surface is
+a real token saving and a real capability cost, and this project has now paid
+the second half.
 
 Note what is absent: there is no `vault_reveal`, no `vault_unlock`, no
 `vault_export`, and no tool that reads the filesystem. Those capabilities do not
@@ -188,7 +319,7 @@ reach layer 2; owning the browser is the only way to get it.
 ## Privacy
 
 - **Identity containers** — isolated cookie jar, cache, and storage per
-  container, with a persistent per-container fingerprint. Containers cannot be
+  container, with a per-container fingerprint seed. Containers cannot be
   merged and sites cannot be moved between them from the agent surface: a page
   that could talk the agent into merging two containers defeats the isolation in
   one move, so that stays a human decision.
@@ -196,7 +327,8 @@ reach layer 2; owning the browser is the only way to get it.
   makes you *more* identifiable — real browsers are boringly stable, so a
   machine whose fingerprint changes every load is wearing a sign. One seed per
   container, every surface derived from it, frozen while the container holds
-  state.
+  state. (The seed exists and is stable; the per-surface derivation is not yet
+  applied — see [Honest status](#honest-status).)
 - **Tracker blocking** via Ghostery's compiled engine (EasyList/EasyPrivacy
   scale), because an agent makes far more requests per minute than a human and
   per-request matching cost is on the hot path.
@@ -230,7 +362,12 @@ reduces the design to the agent's judgment under adversarial input.
 Crypto: Argon2id (moderate limits, calibrated) → XChaCha20-Poly1305. The
 192-bit nonce means random nonces are safe without counter state.
 
-**Taint redaction is best-effort, not a guarantee.** Mirrored values are caught by exact substring match, so a reformatted date (fill `1990-01-05`, page echoes `January 5, 1990`), a case change, or a value split across text nodes all defeat it — and it over-redacts, turning every "Anna" on the page into a marker if that is your first name. It raises the cost of an accidental echo; it is not a boundary. The boundaries are origin binding and the process split.
+**Taint redaction is best-effort, not a guarantee.** Mirrored values are caught
+by exact substring match, so a reformatted date (fill `1990-01-05`, page echoes
+`January 5, 1990`), a case change, or a value split across text nodes all defeat
+it — and it over-redacts, turning every "Anna" on the page into a marker if that
+is your first name. It raises the cost of an accidental echo; it is not a
+boundary. The boundaries are origin binding and the process split.
 
 **What this does not claim:** a page can read back its own DOM, so a password
 delivered to an origin is a password that origin has. A password manager's real
@@ -249,7 +386,8 @@ structural rather than policy:
    lists only the browser tab.
 2. **It is excluded from capture.** `setContentProtection(true)` maps to
    `WDA_EXCLUDEFROMCAPTURE` on Windows, so screenshots and screen shares see a
-   blank region — including the agent's own capture tool.
+   blank region — including the agent's own capture tool. *This is asserted by
+   the code and not yet verified by a probe on the deployment OS; it is queued.*
 3. **Its IPC is separate and sender-checked.** The `vaultui:` channels verify
    the caller is the vault window on every call, so knowing a channel name is
    not enough to use it.
@@ -328,9 +466,9 @@ broken — three separate ways:
   frame: real frames are `file:///C:/Users/name/…` with forward slashes, while
   the stripper matched `os.homedir()`'s backslash form.
 
-All three are fixed and now have tests, including one asserting that scrubbed
-output still satisfies the wire contract. The lesson is worth keeping: a test
-that shares the code's assumptions validates the assumption, not the behaviour.
+All three are fixed and now covered, including an assertion that scrubbed output
+still satisfies the wire contract. The lesson is worth keeping: a test that
+shares the code's assumptions validates the assumption, not the behaviour.
 
 ## Capture → Notion
 
@@ -367,9 +505,12 @@ rather than by the nonce staying secret. What the envelope *means* is stated in
 the tool descriptions, not repeated in every response: clients re-send tool
 descriptions on every request, so that explanation survives context compaction.
 Harness speech never appears inside an envelope, and page bytes never appear
-outside one. The snapshot format reinforces it — all page-authored
-text is quoted and control/bidi characters are stripped, so a page cannot emit
-text that parses as snapshot structure or forge a `FULL SNAPSHOT` header.
+outside one — including `browser_tabs`' list of page-authored tab titles and
+`browser_fill_form`'s page-authored field labels, both of which reached the
+agent bare until an audit caught them. The snapshot format reinforces it: all
+page-authored text is quoted and control/bidi characters are stripped, so a page
+cannot emit text that parses as snapshot structure or forge a `FULL SNAPSHOT`
+header.
 
 ## About CAPTCHAs — read this before expecting Camoufox behavior
 
@@ -398,11 +539,23 @@ And an LLM agent has a signature no browser fork can hide: **bursts of perfect
 action separated by multi-second silences while the model thinks.**
 
 The strategically correct answer in late 2026 is the opposite of hiding.
-**Web Bot Auth** (RFC 9421 HTTP message signatures; W3C spec finalized May 2026)
-lets an agent cryptographically identify itself and be *allowed*. Cloudflare
-begins splitting AI traffic into Search/Agent/Training on 2026-09-15, blocking
-unidentified agents by default on ad-monetized pages. Aperture should implement
-Web Bot Auth — it is on the roadmap and anti-detect is not.
+**Web Bot Auth** (RFC 9421 HTTP message signatures) lets an agent
+cryptographically identify itself and be *allowed*. From 2026-09-15 Cloudflare
+blocks Agent-class traffic by default on ad-monetized pages for newly onboarded
+domains, with bot operators enrolling as *signed agents* through its dashboard.
+
+**That date is not Aperture's deadline, and chasing it would be a mistake.**
+Enrollment as deployed assumes a hosted agent whose requests egress from
+operator infrastructure holding the operator's private key. Aperture is a local
+personal browser: a project-level key would ship inside every install, i.e. be
+public, i.e. be worthless — anyone could sign as "Aperture", and the first
+abuser burns the key's reputation for everyone. There is no sound custody story
+for a registered project key in a client-distributed browser today. So the plan
+is the *capability*, not the registration: per-install Ed25519 signing, offered
+per agent session, off by default, signing only requests attributable to the
+agent and never the human's own browsing — because marking the human's traffic
+with a bot signature inverts the product's privacy premise. See
+`docs/design/tier2.md` §7.
 
 Aperture is built for **your** browsing: your accounts, your sessions, your
 automation. It is not a mass-evasion tool and will not be pointed in that
@@ -413,29 +566,35 @@ direction.
 | Area | State |
 |---|---|
 | Electron shell, tab model (`WebContentsView`), browser UI | **Working** — launches and browses |
-| MCP server over Streamable HTTP, 13 tools | **Working** — verified against a live browser |
+| MCP server over Streamable HTTP, 14 tools | **Working** — verified against a live browser |
 | Bearer auth + DNS-rebinding guards | **Working** — verified (401 / 403) |
-| Untrusted-content envelope | **Working** — verified |
-| Snapshot engine end-to-end (walker → refs → diff → render) | **Working** — verified on a real form |
+| Untrusted-content envelope | **Working** — verified in both directions by `bench:live` on every site: page bytes always inside, Aperture's own `ok …` always outside |
+| Snapshot engine end-to-end (walker → refs → diff → render) | **Working** — verified on real sites and five fidelity fixtures |
+| `browser_act` (click/type/clear/hover/scroll/key/select) | **Working** — trusted CDP input for pointer/keyboard, isolated-world setter for `select`; returns a diff |
+| Input witness (act acknowledged ⇒ input actually reached the page) | **Working** — covers targeted acts plus scroll and key; `unknown` never fails an act, and a page that self-navigates mid-settle is invisible to it |
+| Diff fidelity — typing, re-renders, clicks/state flips, shadow DOM, both resync fallbacks, native + ARIA selects | **GREEN** across five scenarios (`npm run bench:fidelity`), with vacuity guards so an empty run cannot score |
+| Refusals and retractions (disabled, obstructed, blank-query, bounded error text, option-list retraction) | **GREEN** — 11/11 (`npm run bench:guards`), judged against the page's own event log |
+| Ref stability across a re-snapshot | **Measured: 100%** on four real sites |
+| Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** |
+| Positional refs under row *removal* | **Measured, and it lost a preregistered primary** — stale plans land one row off. Open engine defect; see `docs/HANDOFF.md` |
+| Positional refs under row *insertion* | **Fixed** — a positional family that gains a member escalates to a full `replace` |
+| Cost vs Playwright MCP | **Measured** — 0.31× on realistic-weight pages, 1.30× dearer on small ones; see above for scope |
+| Task success on diffs vs full re-dumps | **Measured** — no penalty larger than 10pp found on our positional-identity suite; ceiling-free but with a ~23.5pp resolution floor |
+| Page-size cost crossover | **Measured** — diffs never significantly dearer, significantly cheaper from ≈10k chars up; lower edge unresolved |
 | Autofill: profile matching, plan/apply, sensitive-field redaction | **Working** — verified end-to-end |
+| Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
 | Dark mode (per-tab force-dark + per-site policy) | **Working** — CDP override verified on Electron 43 |
+| Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
+| Vault MCP fill path | **Refuses deliberately** — crypto, origin binding (bundled PSL) and API shape done; the insertion path is not wired and says so |
+| 2FA (TOTP) | **Working** — verified against the test vectors in RFC 6238 |
+| Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** |
+| Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
 | Attachments (CV upload via `DOM.setFileInputFiles`) | Built; library is human-curated. Multi-upload forms need the ref→node bridge |
 | Tracker blocking | Wired; not yet measured |
-| Identity containers | Sessions and partitions working; per-container fingerprint not applied |
-| Vault | Crypto, origin binding (bundled PSL) and API shape done; **MCP fill path deliberately refuses** rather than pretending |
-| Password manager UI | **Working** — content-protected window, entry CRUD, reveal with auto-hide, generator, identity + attachment + Notion editors |
-| Capture → Notion | **Working**; disk fallback verified. The Notion API path is **unverified** — see caveat below |
-| 2FA (TOTP) | **Working** — verified against the test vectors in RFC 6238 |
-| Crash reporting to uh-oh | **Working** — verified end-to-end against a live server, payload audited for leaks. Off by default |
-| Autofill consent gate | **Working** — native OS dialog the agent cannot render, see, click, or bypass |
-| Token benchmark | **Working** — synthetic (`npm run bench`) plus real-site head-to-head vs playwright-mcp, see [bench/RESULTS.md](bench/RESULTS.md) |
-| Layout-table handling | **Fixed** — the benchmark found HN collapsing to 1 usable ref |
-| `browser_act` (click/type/hover/scroll/key) | **Working** — trusted CDP input, returns a diff, verified on a real form |
-| Ref survival through a full re-render | **Measured**: survives for named elements; **FAILS for identical siblings** (positional keys can mis-target). See [bench/RESULTS.md](bench/RESULTS.md) |
-| Diff fidelity — typing, clicks, state flips, full re-renders, both resync fallbacks, shadow DOM | **GREEN** across four scenarios (`npm run bench:fidelity`), with vacuity guards so an empty run cannot score. See `bench/RESULTS.md` for what a green does and does not license |
-| `browser_read` ref scoping | **Working** — verified live (was accepted and silently ignored) |
-| Diff fidelity: containment/position; model-side budget truncation; iframes | **Not measured by any benchmark** |
-| Task-success benchmark | **Not started** — the largest open gap; nothing above measures whether agents *succeed* on diffs |
+| Identity containers | Sessions, partitions and a stable per-container seed working; per-surface fingerprint derivation not applied |
+| `inert` / `pointer-events: none` / small modal dialogs | **Known gap** — only `:disabled` and the covering-overlay hit-test are enforced |
+| Structure/containment/position fidelity, iframes, model-side budget truncation | **Not measured by any benchmark** |
+| Live-web behaviour | **Not measured** — every scored fixture is synthetic |
 | Extensions | Not started — see below |
 
 **A bug worth recording, because testing caught it and the design predicted it.**
@@ -450,16 +609,23 @@ about a secret.
 
 **Known risks, stated rather than buried:**
 
+- **The removal-side positional-ref hazard is live.** On a re-rendering list of
+  identical rows, removing one silently re-binds the refs below it. An agent
+  acting on a ref it captured before the removal acts on the wrong row, and the
+  action succeeds. This is measured, reproducible, and the top open defect.
 - Electron has no `declarativeNetRequest` and no `chrome.action`, so modern MV3
   content blockers and extension toolbar UI do not work out of the box. The
   community shim (`electron-chrome-extensions`) is ~13 months stale, GPL-3, and
   untested against Electron 43. Aperture uses Ghostery for blocking instead and
   treats Chrome-extension compatibility as an open question, not a promise.
-- Several Electron API behaviors the design depends on need verification before
-  being relied on — chiefly whether overriding the UA keeps `Sec-CH-UA` client
-  hints coherent (if it does not, spoofing the UA is *worse* than not), and
-  whether Electron's WebAuthn support can host a platform authenticator.
-  `docs/design/security.md` carries the full verification queue.
+- Several Electron API behaviors the design depends on still need verification —
+  chiefly whether Electron's WebAuthn support can host a platform authenticator
+  (if not, passkeys become a Chromium-patch project and the vault roadmap stays
+  password-primary), and whether `setContentProtection` actually excludes the
+  vault window from capture on Windows 11. `docs/design/security.md` and
+  `docs/design/tier2.md` §6 carry the ranked queue. One item already resolved
+  unfavourably: overriding the UA does **not** keep `Sec-CH-UA` client hints
+  coherent, which cost a claim this file used to make.
 
 ## Getting started
 
@@ -479,6 +645,10 @@ npm test         # full suite — snapshot engine, security, vault, bench reader
 npm run typecheck
 ```
 
+Benchmarks, and what each one answers, are in
+[`docs/HANDOFF.md`](docs/HANDOFF.md); the results and their adjudications are in
+[`bench/RESULTS.md`](bench/RESULTS.md).
+
 ## Layout
 
 ```
@@ -490,5 +660,6 @@ src/
   mcp/        MCP server + tool surface
   privacy/    containers, tracker blocking
   vault/      agent-blind password vault
-docs/design/  snapshot.md · security.md
+bench/        tokens · live · fidelity · guards · task · size · headtohead
+docs/design/  snapshot.md · security.md · the tier specs · the adjudications
 ```
