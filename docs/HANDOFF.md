@@ -485,3 +485,36 @@ Six things marked "working" broke the moment they were measured end to end,
 and every specification written for this project has had at least one defect
 found by its own builder. Nothing is believed because it was designed that
 way; a guard that has only ever passed is a guard of unknown value.
+
+---
+
+## Amendment — tier5 landed, and its tripwire fired (2026-08-03, HEAD `1d13e0b`)
+
+`1d13e0b` adds the positional-rebind fix — the cause of the reduced accuracy
+measured in the head-to-head. Free battery green: 512 tests, fidelity 6/6,
+guards 43/43 + 3/3 + 2/2, selftest PASS. Measurement was deliberately deferred
+by the owner, so nothing is proven about whether it works in an agent's hands.
+
+### FIRST JOB ON RESUME — an independent ruling, not the coordinator's
+
+`docs/design/tier5.md` §9.1.1 preregistered a stop-ship tripwire on the
+economics stratum. **It fired.** `journal-comment` (neutral-large) went +96%
+observation chars, because that fixture's star-group *wrappers* are unnamed
+`generic` nodes, content-identical — a positional family the spec's stratum
+argument assumed could not form (it reasoned from "no identical interactive
+siblings" to "no family can form"; the wrappers are not interactive).
+
+Three candidate rulings are set out in `bench/RESULTS.md`'s "Pending
+re-measurement" section: accept it (the pre-fix cheapness was positional
+revival smuggling addressability across a re-visit — the same defect class
+tier5 fixes), narrow the pre-pass so non-ADDRESSABLE nodes are not retired if
+that preserves the precision fix, or revert per §9's conditions. **Whoever
+rules should not be whoever built it.**
+
+Until that ruling and the owed h2h cohort, **no economics claim in RESULTS.md
+or README describes shipped `master`**. The precision claim is unchanged and
+still failing; tier5 is an attempted fix, not evidence of one.
+
+Superseded by this change: tier4 §1.7's byte-identity pin. G1's `queue-resync`
+snapshot moved 2067 → 2074, fully explained — cross-fixture positional revival
+is now severed, so seven refs mint as 3-char `eNN` instead of 2-char `eN`.
