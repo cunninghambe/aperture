@@ -1230,3 +1230,131 @@ the $60 rule without `--force-budget`); recomputations must filter
 `runId 2026-08-02T05:39:27.192Z`. Actual spend $9.88 vs $88.52
 projected — the linear-in-page-size projection is ~9× pessimistic
 because cost is dominated by the per-episode floor, not page weight.
+
+
+---
+
+# Head-to-head vs Playwright MCP — 385 episodes, Sonnet 5 (2026-08-02)
+
+`@playwright/mcp@0.0.78` pinned · 4 arms · 11 tasks (5 home + 6 neutral) ·
+$104.53 · cohort v4, frozen identity, 0 harness faults · adjudication:
+`docs/design/h2h-evaluation.md`. Scored out of band (report exits 7 until the
+SHIM-SUSPECT ack path exists; the flag is ruled a genuine product difference).
+
+**Head-to-head vs Playwright MCP 0.0.78 — scored 2026-08-02, adjudicated
+in docs/design/h2h-evaluation.md (385 episodes, $104.53, cohort
+`dfa962c3f89b4d53`, claude-sonnet-5).** The shipped report exits 7
+(SHIM-SUSPECT: catalog-order); the tripwire's investigation is complete
+and ruled (fair product difference, not a shim or task artifact —
+h2h-evaluation §1), and this verdict is computed out of band with the
+suite's own stats code, the wave-2/-3 precedent.
+
+**Reliability (primary): the −10pp non-inferiority bound HOLDS.**
+aperture-diff − pw-sealed, pooled over all 13 tasks: +7.3pp
+[−3.8, +18.2]. Sensitivity, mandatory beside any citation: the delta is
+carried entirely by catalog-order (pw-sealed 0/10, all other arms
+100%); excluding that one task it is −2.0pp [−13.1, +9.1], which
+straddles the bound — inconclusive at this n. On the disclosed-
+adversarial home set alone the incumbent led on success (82% vs 76%,
+CI includes zero).
+
+**Precision (primary): the +0.2/run wrong-element bound FAILS.**
++0.173 [0.018, 0.345] pooled; +0.380 [0.060, 0.740] on the home set,
+where all of it lives. Attribution: 27 landed wrong-row clicks (diff)
+vs 8 (pw-sealed); zero `identity_mismatch` anywhere — a detector
+limitation on identical-label rows, not an absence of the hazard: the
+wire shows Aperture's ordinal refs re-keying to positions under row
+removal, so stale plans execute one row off where Playwright's
+per-snapshot refs error out (75 refused dead-ref acts, 9× Aperture's).
+Engine/dialect, not the diff mechanism (diff − redump −0.10 [−0.36,
++0.15]; redump − sealed +0.27 [0.08, 0.49]). A correctness hazard on
+re-rendering same-label lists; fix cycle owed (tier3 §3.1's removal
+side). Full sentence: h2h-evaluation §2.3.
+
+**Economics (primary): the realistic-page claim is licensed.** On
+preregistered neutral fixtures at real-page snapshot weight
+(5.5–6k Aperture tokens; ~22k tokens in pw's dialect), end-to-end
+episode cost was **0.313× Playwright MCP's [0.271, 0.364]** (0.333×
+[0.275, 0.410] excluding catalog-order; ≈0.21× per successful
+episode). On small pages the inversion persists: home 1.295×
+[1.043, 1.594] DEARER — paid in generation-side tokens (6.3k vs 3.1k
+output tokens/ep at equal turns), the wave-3 mechanism confirmed with
+real token splits; neutral-small null (0.957× [0.901, 1.023]).
+
+**H10 (mechanism): printed NOT CONFIRMED at 46.7% observation-byte
+share; the true explanation, which this section must lead with:
+observation bytes ARE the mechanism where the claim lives** (80.6%
+pooled excluding catalog-order; 65.6% within neutral-large, where the
+turn term runs *against* Aperture). The pooled turn excess that
+depressed the share is one task's failure loop — pw-sealed re-dumping
+and flailing on a 22k-token page — i.e. behaviour downstream of
+observation size, not an independent turn advantage. Aperture holds no
+general turn advantage on this store.
+
+**Affordance (mandatory §7.4 sentence):** "Sealing Playwright MCP to
+three tools cost it measurable capability; the sealed comparison
+understates the incumbent, and the stock numbers are the
+deployment-relevant ones." pw-stock 89.1% vs pw-sealed 73.6%
+(Δ +15.5pp, greater than the headline CI half-width), the dividend
+concentrated in catalog-order (100% vs 0% — `browser_find` converts
+the 22k-token page every run) and the hard queue tasks. Non-ref
+targeting in pw-stock: 0.00/episode — the selector escape was never
+used. Any pw-stock claim carries "with code-execution,
+network-inspection and screenshot tools disabled" (§3.4,
+preregistered).
+
+**Scope, all mandatory:** one model (claude-sonnet-5, with the SDK's
+haiku-4-5 auxiliary present identically in all four arms — H7 clean);
+our fixtures (7 disclosed-adversarial + 6 preregistered-neutral;
+synthetic, not live web); MCP mode only (Playwright's recommended CLI
+mode unmeasured); `--pw-observation inline` (0.0.78 writes action
+snapshots to files and links them — the harness inlined the bytes,
+charging the competitor for the response its design document
+describes; `asshipped` is a different, unrun experiment); pw arms ran
+branded Chrome 150.0.7871.187 under `--pw-browser chrome` because the
+pinned chromium-1232 cannot spawn on this machine (probed:
+`spawn UNKNOWN`) — the spec's pinned chromium never ran, and Aperture
+ran its own Electron-bundled Chromium as always; sealed pw arms ran
+`--codegen none` (zero-byte replies for key/scroll/type-without-submit
+are its shipped conduct, C5-disclosed in the shared tool description);
+Aperture arms received `budgetTokens: 20000` injected on neutral-large
+(H6) while the sealed schema's `budgetTokens` is advertised-but-refused
+on pw arms (C3, disclosed in the arm definition); SDK
+`MAX_MCP_OUTPUT_TOKENS=50000` pinned in all arms (C1), delivered-bytes
+witness fired zero times (C2b); account-prefs is a case-sensitive
+predicate defect scored as failure in every arm (h2h-evaluation §0.4)
+— kept in the pool, excluded from cost claims (H11), not a capability
+finding. Wall-clock reported, never verdicted: pw-sealed's ~40s/ep of
+browser-side time on home (vs Aperture's ~1.1s, per-proxy `upstreamMs`)
+is a real, attributable felt-latency gap the §2 boilerplate
+("dominated by API queueing noise") understates. Guard-layer record and
+what the benchmark cannot settle: h2h-evaluation §6–§7. Programme
+lineage: four archived cohorts ($77.38 — kill shot; pilot with the
+pw-stock zero-tool registration fault; the unset-MCP-cap contamination
+cohort; the C2c-severed cohort) precede this clean one (0 harness
+faults, 0 contaminated).
+
+### README-ready paragraph
+
+On a 13-task benchmark against Playwright MCP 0.0.78 (both products
+sealed to an identical 3-tool surface; claude-sonnet-5; design
+preregistered in docs/design/headtohead.md, adjudicated in
+docs/design/h2h-evaluation.md): on realistic-weight pages Aperture's
+diff observation cut end-to-end agent cost to **0.31× [0.27, 0.36]** of
+Playwright MCP's, with the saving attributable to observation bytes,
+and task success within the preregistered −10pp bound (+7.3pp [−3.8,
++18.2] — carried by one task where the sealed incumbent scored 0%;
+excluding it, parity is unresolved at this n). Aperture **lost the
+precision primary** (+0.17 [0.02, 0.35] wrong-element actions/run vs a
++0.2 bound): on re-rendering identical-row lists its persistent refs
+let stale plans land one row off where Playwright's per-snapshot refs
+error out — a correctness hazard we are fixing, not a cost. On small
+pages Aperture was 1.30× dearer [1.04, 1.59]; unsealed, Playwright MCP
+with its full default surface (code-execution, network-inspection and
+screenshot tools disabled) outscored its own sealed configuration
+89% to 74%, so the sealed comparison understates the incumbent and
+stock Playwright remains the stronger choice where its full surface is
+acceptable. One model, our fixtures, MCP mode only; Playwright's CLI
+mode and live websites are unmeasured.
+
+---
