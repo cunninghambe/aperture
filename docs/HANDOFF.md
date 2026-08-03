@@ -518,3 +518,34 @@ still failing; tier5 is an attempted fix, not evidence of one.
 Superseded by this change: tier4 §1.7's byte-identity pin. G1's `queue-resync`
 snapshot moved 2067 → 2074, fully explained — cross-fixture positional revival
 is now severed, so seven refs mint as 3-char `eNN` instead of 2-char `eN`.
+
+---
+
+## Backlog — added 2026-08-03, queued for Thursday (2026-08-06)
+
+Owner-requested, not started, no design work done. Listed in the order given.
+
+1. **Screenshot + autocrop.** The capture path exists (`browser_capture`, the
+   Notion default from the original build). What is new is autocrop — trimming
+   the shot to the meaningful region rather than the whole viewport. Open
+   questions for whoever specs it: crop to what (the acted element, the
+   changed region, detected content bounds)? Does the agent choose, or does
+   Aperture? Does a crop ever hide something the human needed to see — the
+   consent dialog case argues for care here.
+
+2. **Dark mode — some text is unreadable.** A real defect in shipped UI, not a
+   feature request. Native dark mode came from the `nightfall` work
+   (`cunninghambe/nightfall`); the failure is contrast on some text. Needs the
+   actual offending surfaces identified first (browser chrome? vault UI?
+   page-side `Emulation.setAutoDarkModeOverride` output?) — the fix differs
+   completely between our own UI and Chromium's auto-darkening of arbitrary
+   pages.
+
+3. **Voice instructions for agent response.** Spoken input driving the agent.
+   Undesigned. Note the security doctrine applies unchanged: voice is a
+   channel to the agent, and the agent remains the manipulable component —
+   consent for anything sensitive still has to live in the native dialog a
+   voice command cannot click.
+
+None of these blocks the resume items above (the tier5 tripwire ruling, the
+security session, Web Bot Auth, the owed h2h cohort).
