@@ -8,6 +8,13 @@ import {
   retirePositionalRebinds,
 } from './diff.js';
 import { renderDiff, renderFull, renderUnchanged } from './render.js';
+import {
+  REDACTED,
+  canonicalNeedle,
+  collectTaintedValues,
+  redactObserved,
+  scrub,
+} from './redact.js';
 import { VolatilityTracker } from './volatility.js';
 import type { Observation, RefEntry, Snapshot, SnapshotNode } from './types.js';
 import type { FillChannelResult, FillRequest, FillTargetRequest } from '@shared/types.js';
@@ -133,15 +140,39 @@ export function invalidate(tabId: string, documentReplaced: boolean): void {
   st.requireFull();
   if (documentReplaced) {
     st.tainted.clear();
-    // The document that held the filled values is gone, so the needles have
-    // nothing left to match and holding plaintext in main any longer buys
-    // nothing. Same-document navigation keeps both, for the reason above.
-    clearNeedles(tabId);
+    // NEEDLES ARE NO LONGER DROPPED HERE — 2026-08-05, and this is a security
+    // fix rather than an omission.
+    //
+    // The old line was `clearNeedles(tabId)`, justified as "the document that
+    // held the filled values is gone, so the needles have nothing left to
+    // match". That reasoning is false in the one case that matters: the
+    // navigation is how the value ARRIVES somewhere the agent reads. A filled
+    // page that does `location.href = '/carry.html#' + value` replaces its own
+    // document, this line dropped every needle, and the very next snapshot
+    // rendered the password in clear on the header line, in the tree, in
+    // `browser_read`, and in `browser_tabs list` — one assignment, one tab, no
+    // popup (measured; the seventh sink, `docs/design/sink-closure-review.md`
+    // §9 hunt). The mechanism that dropped the needles was the mechanism that
+    // delivered the secret, which is the same shape as the `Snapshot.title`
+    // finding one review earlier.
+    //
+    // Taint still clears, and correctly: taint names DOM FIELDS Aperture wrote
+    // into, and those are genuinely gone with the document. Needles name a
+    // VALUE, the value belongs to an origin, and the origin outlives the
+    // document. Their lifetime is now the TTL and the vault lock, and
+    // `docs/design/security.md` states that rather than implying an early drop
+    // that a hostile page controls the timing of.
   }
 }
 
+/**
+ * Drop a tab's snapshot state.
+ *
+ * Deliberately does NOT touch needles any more: they are keyed by origin, and
+ * another open tab on that origin may still be able to deliver the value into
+ * agent context. (Still has no caller — a known-open item, unchanged.)
+ */
 export function forget(tabId: string): void {
-  clearNeedles(tabId);
   states.delete(tabId);
 }
 
@@ -208,9 +239,20 @@ export async function observe(
   const r = payload.result;
   const forced = st.consumeForceFull() || opts.full === true;
 
-  // Redact before anything else touches the tree, so no downstream path —
-  // diffing, rendering, form matching — can observe a sensitive value.
-  redactTainted(r.root, st.tainted, needlesFor(tabId));
+  // Redact before anything else touches the observation, so no downstream path
+  // — diffing, rendering, form matching, the `navigated` comparison — can
+  // observe a sensitive value.
+  //
+  // `r` and not `r.root`: the walker's result carries `url` and `title`
+  // alongside the tree, and those two are page-controlled strings the renderer
+  // emits on the header line of every full snapshot. They were outside the
+  // redaction until 2026-08-05 because the function took a `SnapshotNode`
+  // (docs/design/security-review-2026-08.md F1). Redacting the whole result
+  // HERE — above the `navigated` hoist and above the Snapshot construction —
+  // is what makes the forced full snapshot render the scrubbed strings, and
+  // keeps `r.url` and `st.last.url` in the same alphabet so a URL carrying a
+  // needle does not read as a fresh navigation on every observation.
+  redactObserved(r, st.tainted, needlesFor(tabId));
 
   // Positional families whose membership changed since the last walk lose
   // their refs BEFORE revival can rebind them — every delivery path, full or
@@ -370,80 +412,11 @@ function refKey(st: TabSnapshotState, ref: string): string | undefined {
   return st.registry.resolve(ref)?.key;
 }
 
-/**
- * Replace the values of tainted fields, and any registered needle, with a fixed
- * marker.
- *
- * A fixed marker rather than a length-accurate mask: `••••••` of the right
- * length still leaks the length, which is real information about a secret.
- *
- * Needles are applied HERE as well as in `redactFreeText`, and that is the
- * second half of the F9 fix: a value the page copied into a `<div>` has to be
- * redacted in SNAPSHOTS, not only in `browser_read`.
- */
-function redactTainted(root: SnapshotNode, tainted: Set<string>, needles: string[]): void {
-  if (tainted.size === 0 && needles.length === 0) return;
-  const stack: SnapshotNode[] = [root];
-  while (stack.length) {
-    const n = stack.pop()!;
-    if (tainted.has(n.key)) {
-      // `value` is not enough. A node that is not an input carries its content
-      // in `text` or `name`, so copying a filled value into a <div> produced an
-      // unredacted line. All three are rendered, so all three are redacted.
-      //
-      // Taint is what covers a page that flips a password input to
-      // `type="text"` after the fill: the walker would then serialise the real
-      // value, and this replaces it regardless of type.
-      if (n.value !== undefined && n.value !== '') n.value = REDACTED;
-      if (n.text) n.text = REDACTED;
-      if (n.name) n.name = REDACTED;
-    } else if (needles.length) {
-      if (n.value) n.value = scrub(n.value, needles);
-      if (n.text) n.text = scrub(n.text, needles);
-      if (n.name) n.name = scrub(n.name, needles);
-      if (n.rows) n.rows = n.rows.map((row) => row.map((cell) => scrub(cell, needles)));
-      // `href` is the FIFTH serialised, page-controlled field, and it was the
-      // one this function forgot. An independent review measured it: after a
-      // successful fill, a page that writes `a.href = '/leak?pw=' + value`
-      // produced `link e7 "Continue to checkout" /leak?pw=<the password>` on
-      // the very next full snapshot, and in the diff too (`render.ts` emits it
-      // in both). This codebase has now had two findings on this one field —
-      // "a link's href could change under a stable label" was the first — so
-      // the rule is worth stating rather than re-deriving: EVERY string on
-      // SnapshotNode that the renderer can emit is a redaction sink.
-      //
-      // Its own marker, because an href is rendered UNQUOTED and every reader
-      // of that line — `render.ts`'s format and the bench stream reader alike —
-      // takes it as one whitespace-free token, which is exactly why
-      // `walker.ts`'s `sanitizeHref` strips whitespace on the way in. Putting
-      // spaces back here would undo that.
-      //
-      // Only the needle branch, deliberately: the tainted branch is about
-      // FIELDS Aperture wrote into, and an <input> has no href. Guarded by G19b
-      // (and by G19, whose whole-snapshot check covers this line too).
-      if (n.href) n.href = scrub(n.href, needles, REDACTED_HREF);
-    }
-    for (const c of n.children) stack.push(c);
-  }
-}
-
-/** The one marker, defined once. `tools.ts` imports it rather than repeating it. */
-export const REDACTED = '(filled, value withheld)';
-
-/**
- * The same words, with no whitespace, for the one field that is rendered
- * unquoted. See the `href` branch of `redactTainted` for why a space here
- * would break the line format rather than merely look odd.
- */
-export const REDACTED_HREF = '(filled,value-withheld)';
-
-function scrub(s: string, needles: string[], marker = REDACTED): string {
-  let out = s;
-  for (const needle of needles) {
-    if (out.includes(needle)) out = out.split(needle).join(marker);
-  }
-  return out;
-}
+// The redaction itself — the marker constants, the tree walk, and the two
+// header strings — lives in `./redact.js`. It is a pure leaf so the suite can
+// execute it: this module imports `electron`, and no unit test in this repo can
+// import a module that does (docs/design/g29-red-record.md, Appendix A).
+export { REDACTED, REDACTED_HREF } from './redact.js';
 
 // ---------------------------------------------------------------------------
 // Needles — the F9 fix
@@ -480,25 +453,100 @@ interface NeedleSet {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * NEEDLE SCOPE — keyed by ORIGIN, not by tab (2026-08-05).
+ *
+ * This map was keyed by `tabId` and the scope was wrong in both directions.
+ *
+ * TOO NARROW, measured twice. A fill happens in a tab, so keying by tab reads
+ * as the natural choice — but the value belongs to an ORIGIN, and the tab that
+ * CARRIES it need not be the tab that was filled. `src/main/tabs.ts` wires
+ * every page's window-open handler to create AND ACTIVATE a new tab, so one
+ * line of page script (`window.open('/carry.html#' + value)`) produced a tab
+ * with no needles of its own, and the agent's very next unqualified
+ * `browser_snapshot` returned the whole tree in clear
+ * (`docs/design/sink-closure-review.md` F-A). The same page could also just
+ * navigate ITSELF there — see `invalidate`.
+ *
+ * TOO WIDE, in the one place it had been widened. `browser_tabs list` was
+ * scrubbed against the union of EVERY tab's needles, which closed the listing
+ * and disclosed a real cost: an unrelated tab whose title genuinely contained
+ * another origin's secret got the marker. Origin scope closes the listing for
+ * the same reason — a carrier is same-origin — while redacting strictly less.
+ *
+ * So the rule is now one rule instead of two, and it is the rule the value
+ * itself implies: **a needle is scoped to the origin it was filled into, and a
+ * tab is scrubbed against every origin whose content it can be showing.**
+ * `everyNeedle` and `redactAcrossTabs` are gone; there is nothing left for
+ * them to do.
+ *
+ * WHAT A TAB'S SCOPE IS is not this module's business — it needs the tab list,
+ * and this module must not import one. `OriginScope` is injected once by
+ * `src/main/index.ts` and answers it: the origin the tab is on now, plus the
+ * origin of the page that OPENED it, captured at creation. The second half is
+ * what covers a carrier on a foreign origin — the only carrier shape origin
+ * keying would otherwise miss, and the one the old cross-tab union did cover.
+ */
+export interface OriginScope {
+  /** Every origin whose filled values this tab's content could be carrying. */
+  forTab(tabId: string): string[];
+}
+
+/** Fails closed to "no origins", so an unwired scope over-redacts nothing and
+ *  under-redacts everything — which is why `index.ts` wires it before the MCP
+ *  server can accept a call. */
+let originScope: OriginScope = { forTab: () => [] };
+
+export function setOriginScope(scope: OriginScope): void {
+  originScope = scope;
+}
+
 const needles = new Map<string, NeedleSet>();
 const NEEDLE_TTL_MS = 10 * 60 * 1000;
 
 /** Values too short to register. A four-character needle redacts the web. */
 const MIN_NEEDLE_LENGTH = 6;
 
-export function registerNeedles(tabId: string, values: string[]): void {
-  const usable = values.filter((v) => v.length >= MIN_NEEDLE_LENGTH);
+/**
+ * The forms of one filled value that have to be searched for.
+ *
+ * The raw value, plus its whitespace-canonical form when that differs. The
+ * walker collapses every run of whitespace before the redactor ever sees a
+ * string (`walker.ts`, `truncate`), so a password containing a tab or two
+ * consecutive spaces could not match its own copy on the page: the text was
+ * normalised and the needle was not. Same alphabet rule as the invisible
+ * code points, coming from the other side.
+ */
+function needleForms(v: string): string[] {
+  const canon = canonicalNeedle(v);
+  return canon !== v ? [v, canon] : [v];
+}
+
+/**
+ * Register a filled value against the ORIGIN it was written into.
+ *
+ * The origin is passed in rather than derived from the tab, because the caller
+ * has the one that matters: the committed origin the human approved and the
+ * preload compared against `location.origin` in the same task as the write.
+ * Deriving it here from the tab's live URL would be a second source of truth
+ * for the fact the whole fill path is organised around.
+ */
+export function registerNeedles(origin: string, values: string[]): void {
+  if (!origin) return;
+  const usable = values
+    .filter((v) => v.length >= MIN_NEEDLE_LENGTH)
+    .flatMap(needleForms);
   if (!usable.length) return;
 
-  const existing = needles.get(tabId);
+  const existing = needles.get(origin);
   if (existing) clearTimeout(existing.timer);
   const set = existing?.values ?? new Set<string>();
   for (const v of usable) set.add(v);
 
-  const timer = setTimeout(() => needles.delete(tabId), NEEDLE_TTL_MS);
+  const timer = setTimeout(() => needles.delete(origin), NEEDLE_TTL_MS);
   // Never a reason to hold the process open; the values die with it anyway.
   timer.unref?.();
-  needles.set(tabId, { values: set, timer });
+  needles.set(origin, { values: set, timer });
 }
 
 /**
@@ -517,18 +565,18 @@ export function registerNeedles(tabId: string, values: string[]): void {
  * because a second `apply` on a filled form answers `ALREADY_FILLED` before it
  * ever reaches this path.)
  */
-export function dropNeedles(tabId: string, values: string[]): void {
-  const n = needles.get(tabId);
+export function dropNeedles(origin: string, values: string[]): void {
+  const n = needles.get(origin);
   if (!n) return;
-  for (const v of values) n.values.delete(v);
-  if (n.values.size === 0) clearNeedles(tabId);
+  for (const v of values.flatMap(needleForms)) n.values.delete(v);
+  if (n.values.size === 0) clearNeedles(origin);
 }
 
-export function clearNeedles(tabId: string): void {
-  const n = needles.get(tabId);
+function clearNeedles(origin: string): void {
+  const n = needles.get(origin);
   if (!n) return;
   clearTimeout(n.timer);
-  needles.delete(tabId);
+  needles.delete(origin);
 }
 
 /**
@@ -541,46 +589,47 @@ export function clearAllNeedles(): void {
   needles.clear();
 }
 
+/**
+ * Every needle that could appear in this tab's content.
+ *
+ * The union is over the tab's ORIGIN SCOPE — see `OriginScope` above — and not
+ * over every tab in the browser. Deliberately not exported: a caller can scrub
+ * a string, and cannot obtain the plaintext by asking politely.
+ */
 function needlesFor(tabId: string): string[] {
-  const n = needles.get(tabId);
+  const all = new Set<string>();
+  for (const origin of originScope.forTab(tabId)) {
+    const n = needles.get(origin);
+    if (n) for (const v of n.values) all.add(v);
+  }
   // Longest first, so a short needle that is a substring of a long one cannot
   // shred the long one into unmatchable pieces before it is tried.
-  return n ? [...n.values].sort((a, b) => b.length - a.length) : [];
+  return [...all].sort((a, b) => b.length - a.length);
 }
 
 /**
  * Values currently tainted in this tab, for redacting text that did not come
  * through the snapshot tree — `browser_read`, in particular, which reads
  * `innerText` directly and would otherwise bypass redaction entirely.
+ *
+ * `marker` exists for the URL-shaped callers: an href and a tab's URL are
+ * rendered UNQUOTED and read as a single whitespace-free token, so they take
+ * `REDACTED_HREF`. Passing the marker rather than having a second function is
+ * what keeps `browser_tabs`'s two fields on one code path.
  */
-export function redactFreeText(tabId: string, s: string): string {
+export function redactFreeText(tabId: string, s: string, marker = REDACTED): string {
   const st = states.get(tabId);
   const live = needlesFor(tabId);
   if (!live.length && (!st || st.tainted.size === 0 || !st.last)) return s;
 
-  let out = live.length ? scrub(s, live) : s;
+  let out = live.length ? scrub(s, live, marker) : s;
   if (st?.last && st.tainted.size) {
     for (const value of collectTaintedValues(st.last.root, st.tainted)) {
       if (value.length < 4) continue;
-      out = out.split(value).join(REDACTED);
+      out = out.split(value).join(marker);
     }
   }
   return out;
-}
-
-function collectTaintedValues(root: SnapshotNode, tainted: Set<string>): string[] {
-  const vals: string[] = [];
-  const stack: SnapshotNode[] = [root];
-  while (stack.length) {
-    const n = stack.pop()!;
-    if (tainted.has(n.key)) {
-      for (const v of [n.value, n.text, n.name]) {
-        if (v && v !== REDACTED) vals.push(v);
-      }
-    }
-    for (const c of n.children) stack.push(c);
-  }
-  return vals;
 }
 
 /**

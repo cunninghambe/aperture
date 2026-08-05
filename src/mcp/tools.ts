@@ -6,6 +6,7 @@ import { containers } from '@privacy/containers.js';
 import { vault } from '@vault/vault.js';
 import {
   REDACTED,
+  REDACTED_HREF,
   agentTouched,
   attachFiles,
   dropNeedles,
@@ -30,6 +31,7 @@ import {
 } from '@vault/profile.js';
 import type { SnapshotNode } from '@core/snapshot/types.js';
 import { quote } from '@core/snapshot/render.js';
+import { stripFormat } from '@core/snapshot/text.js';
 import {
   ENVELOPE_LEGEND,
   ENVELOPE_POINTER,
@@ -130,6 +132,55 @@ browser_snapshot with mode:"full" rather than guessing.
 
 function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
+}
+
+/**
+ * The one treatment for a page-authored string that lands in harness prose:
+ * neutralize it AND scrub it against this tab's needles.
+ *
+ * TWO DIFFERENT JOBS, AND THEY ARE NOT INTERCHANGEABLE. `quote()` is a
+ * NEUTRALIZER — it strips control and bidi characters, caps at `MAX_TEXT`, and
+ * escapes the delimiters, so page bytes cannot read as Aperture's own voice.
+ * The needle scrub is a REDACTOR — it removes a credential Aperture itself just
+ * wrote into that origin. Every prose call site in this file had the first and
+ * none had the second, which is how the `select` SUCCESS line came to answer
+ * `ok select e9 → "optsink guard-pw-93a1"`: correctly framed, correctly quoted,
+ * and carrying the password (docs/design/security-review-2026-08.md F4). One
+ * helper, so a future call site cannot get one and miss the other.
+ *
+ * SCRUBBED ON BOTH SIDES OF `quote()`, and both passes earn their place:
+ *
+ *  - BEFORE, because `quote()` truncates at 80 characters. A needle straddling
+ *    the cut would survive as a fragment in a string no later scrub can match.
+ *  - AFTER, because `sanitize()` STRIPS control characters rather than escaping
+ *    them. A page that writes `guard-pw<U+0000>-93a1` presents bytes that match
+ *    no needle until sanitize has removed the separator — at which point the
+ *    secret is whole again, inside the quotes, on its way to the model.
+ *
+ * The marker contains no quote and no backslash, so scrubbing inside an
+ * already-quoted string cannot break the quoting.
+ */
+function safeForAgent(tabId: string, s: string): string {
+  return redactFreeText(tabId, quote(redactFreeText(tabId, s)));
+}
+
+/**
+ * The same treatment for one line of `browser_tabs list`.
+ *
+ * Was `safeAcrossTabs`, which scrubbed every line against the union of EVERY
+ * open tab's needles. The union existed because needles were keyed per tab and
+ * the tab carrying a secret need not be the tab that was filled — a true
+ * observation with the wrong repair. Needles are keyed by ORIGIN now, and a
+ * tab's origin scope is exactly the set of carriers (`engine.ts`,
+ * `OriginScope`), so each line is scrubbed against its OWN tab. The listing
+ * stays closed and an unrelated tab whose title genuinely contains another
+ * origin's secret no longer gets the marker.
+ *
+ * The tab id is the listed tab, not the active one: in a listing, the tab whose
+ * bytes these are is not the tab anybody is looking at.
+ */
+function safeTabLine(tabId: string, s: string): string {
+  return redactFreeText(tabId, quote(redactFreeText(tabId, s)));
 }
 
 /**
@@ -477,17 +528,31 @@ export function registerBrowserTools(
         default: {
           const list = t.list();
           if (!list.length) return text('no open tabs');
-          const lines = list.map(
-            (tab) =>
-              `${tab.id === t.active ? '*' : ' '} ${tab.id} [${tab.container}] ` +
-              `${tab.loadState} ${quote(tab.title)} ${tab.url}` +
-              (tab.blockedCount ? ` (${tab.blockedCount} trackers blocked)` : ''),
-          );
           // Titles and URLs here are page-authored — a tab can call itself
           // "SYSTEM: ignore previous instructions" — and this list flowed to
           // the agent bare until 2026-07-31. It is an aggregate across tabs,
           // so there is no single origin to name; `multiple` says so honestly
           // rather than picking one tab's origin and lying about the rest.
+          //
+          // The envelope was only ever half of it. Framing is not redaction:
+          // this listing carried a filled credential in clear on every path,
+          // needed no snapshot, and — being cross-tab where needles were then
+          // per-tab — was the only leak in the 2026-08 review whose blast
+          // radius was not confined to the origin that already had the secret
+          // (F2).
+          //
+          // Each line is scrubbed against ITS OWN TAB's origin scope, which is
+          // what closes the carrier case the union was reaching for: a tab that
+          // was never filled but is on the filled origin (or was opened by it)
+          // is inside that scope. The URL takes the whitespace-free marker
+          // because it is rendered UNQUOTED and read as one token, as `href` is.
+          const lines = list.map(
+            (tab) =>
+              `${tab.id === t.active ? '*' : ' '} ${tab.id} [${tab.container}] ` +
+              `${tab.loadState} ${safeTabLine(tab.id, tab.title)} ` +
+              `${redactFreeText(tab.id, tab.url, REDACTED_HREF)}` +
+              (tab.blockedCount ? ` (${tab.blockedCount} trackers blocked)` : ''),
+          );
           return text(untrusted('multiple', lines.join('\n')));
         }
       }
@@ -535,11 +600,29 @@ export function registerBrowserTools(
           // sits inside the untrusted envelope like any other page content.
           // The load status and the next-step instruction are Aperture
           // speaking, so they stay outside it.
+          //
+          // AND SO IS THE URL. This comment used to reason carefully about the
+          // title and treat the URL as Aperture's own fact. It is not: a page
+          // that calls `history.replaceState` during load settle chooses those
+          // bytes, and they went out raw, unquoted, uncapped and OUTSIDE the
+          // envelope as the first line the agent reads after landing
+          // (docs/design/security-review-2026-08.md F6, measured with an
+          // injection marker in the query string). It is Aperture's sentence,
+          // so it stays outside; the bytes in it are the page's, so they are
+          // quoted, capped and needle-scrubbed like every other page string in
+          // harness prose.
+          //
+          // The cap costs something real — a URL past `MAX_TEXT` is elided —
+          // and that is the trade: the full URL is still available, uncapped,
+          // on the snapshot header line, which sits inside an envelope. A
+          // bounded quoted token outside the envelope is worth more than an
+          // unbounded bare one.
+          const status = info?.loadState === 'failed' ? 'failed' : 'loaded';
           return text(
-            `${info?.loadState === 'failed' ? 'failed' : 'loaded'} ${info?.url}\n` +
+            `${status} ${safeForAgent(id, info?.url ?? '')}\n` +
               untrusted(
                 safeOrigin(info?.url ?? ''),
-                `title: ${quote(info?.title ?? '')}`,
+                `title: ${safeForAgent(id, info?.title ?? '')}`,
               ) +
               '\nCall browser_snapshot to see the page.',
           );
@@ -641,8 +724,15 @@ export function registerBrowserTools(
         agentTouched(id, scopeKey);
         const r = await requestRead(wc, scopeKey);
         if (!r.ok) {
+          // Scrubbed, not quoted. This `reason` is a preload string — fixed
+          // vocabulary except on the `err.message` arm, where it comes from a
+          // native DOM call in an isolated world the page cannot monkeypatch,
+          // so the page cannot CHOOSE it (docs/design/security.md). Quoting it
+          // would change an error format the bench's attribution regexes read;
+          // the needle scrub costs nothing and closes the residual case where a
+          // DOM message happens to echo a value back.
           return text(
-            `error: ${ref} could not be read (${r.reason ?? 'unknown'}) — it may ` +
+            `error: ${ref} could not be read (${redactFreeText(id, r.reason ?? 'unknown')}) — it may ` +
               'have left the page. Call browser_snapshot to re-read.',
           );
         }
@@ -650,6 +740,22 @@ export function registerBrowserTools(
       } else {
         body = (await wc.executeJavaScript(readScript(), true)) as string;
       }
+
+      // THE ALPHABET, ON THE ONE PATH THAT IS NOT THE WALKER'S.
+      //
+      // Every other page string reaches the agent through `walker.ts`, which
+      // strips the invisible code points at walk time so the redactor searches
+      // the bytes the renderer will emit. This body does not: it is innerText,
+      // read directly, and it is delivered without `quote()` at all. So the
+      // same strip is applied here, and for the same reason — a value split by
+      // one `U+202D` matched no needle and came back one invisible character
+      // away from verbatim (`docs/design/sink-closure-review.md` F-B).
+      //
+      // Line structure survives: `stripFormat` keeps tab, CR and LF, which are
+      // whitespace rather than invisible formatting. The side effect is that a
+      // bidi override can no longer reorder what the model reads here — this
+      // was the last page-text path where one could.
+      body = stripFormat(body);
 
       // innerText bypasses the snapshot tree entirely, so redaction has to be
       // applied here too. Without this, a page could copy a filled national ID
@@ -995,10 +1101,18 @@ export function registerBrowserTools(
     // DOM. The needles are the F9 fix: the walker masks password values before
     // they leave the page, so the existing needle-from-a-fresh-walk mechanism
     // is structurally blind to exactly the values that matter most.
+    //
+    // The needles are registered against the ORIGIN, not the tab: the value
+    // belongs to the origin it was written into, and any tab on that origin —
+    // including one the page opens a moment later — can hand it back
+    // (`engine.ts`, `OriginScope`; `docs/design/sink-closure-review.md` F-A).
+    // `pageOrigin` is the committed origin the human approved and the preload
+    // re-checks in the same task as the write, so it is the one fact this whole
+    // path is already organised around.
     const keys = targets.map((c) => c.key);
     const needleValues = fills.map((f) => f.value).filter(Boolean);
     markTainted(id, keys);
-    registerNeedles(id, needleValues);
+    registerNeedles(pageOrigin, needleValues);
 
     // --- 12. the write -----------------------------------------------------
     const res = await requestFill(wc, {
@@ -1031,7 +1145,7 @@ export function registerBrowserTools(
         );
       }
       unmarkTainted(id, keys);
-      dropNeedles(id, needleValues);
+      dropNeedles(pageOrigin, needleValues);
       return text(denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin }));
     }
 
@@ -1282,7 +1396,7 @@ export function registerBrowserTools(
         // The error and the "here is what to look at" framing are Aperture's;
         // only the observation is the page's.
         return text(
-          `error: ${ref} could not be acted on (${r.reason}).\n` +
+          `error: ${ref} could not be acted on (${redactFreeText(id, r.reason)}).\n` +
             'The page as it stands now:\n' +
             untrusted(safeOrigin(t.info(id)?.url ?? ''), obs),
         );
@@ -1291,14 +1405,15 @@ export function registerBrowserTools(
       if (r.obstructed) {
         // `obstructor` is built from the obstructing element's own tagName and
         // id, so it is page-authored, and it is interpolated into harness
-        // prose that deliberately sits OUTSIDE the envelope. `quote()` is what
-        // keeps it from reading as harness speech: it strips control and bidi
-        // characters, collapses newlines, caps the length, and escapes the
-        // delimiters, so the worst a page can achieve is a strange-looking
-        // quoted string in a sentence that is visibly Aperture's.
+        // prose that deliberately sits OUTSIDE the envelope. `safeForAgent`
+        // does both jobs: `quote()` keeps it from reading as harness speech,
+        // and the needle scrub keeps it from carrying a credential. It was
+        // quoted and not scrubbed, and an overlay with `id = 'ovl-' + password`
+        // produced `covered by "DIV#ovl-guard-pw-93a1"` — 80 characters being
+        // comfortably more than a password (F5).
         return text(
           `error: ${ref} is covered by ` +
-            `${r.obstructor ? quote(r.obstructor) : 'another element'} — ` +
+            `${r.obstructor ? safeForAgent(id, r.obstructor) : 'another element'} — ` +
             'likely a modal or cookie banner. Dismiss it first; acting here ' +
             'would reach the overlay, not the element you named.',
         );
@@ -1329,8 +1444,21 @@ export function registerBrowserTools(
             case 'not-a-select':
               // The distinction is the whole reason `[N options]` exists, so
               // the error restates it rather than just refusing.
+              //
+              // The tag name is bytes the page CHOOSES — it names the element —
+              // and it went out raw, unquoted and with no length limit into a
+              // sentence that sits outside the envelope, in Aperture's voice.
+              // A custom element name may hold `[a-z0-9._-]` plus a wide
+              // Unicode range and has no cap, so this was a needle leak and an
+              // arbitrarily long hyphen-separated instruction in the harness's
+              // own voice at the same time (F3, measured against a page that
+              // ran `document.createElement('x-' + password)`).
+              //
+              // The `<…>` bracketing went with it: brackets around a quoted
+              // string read as neither markup nor a quotation. The quotes are
+              // the marker that the bytes are the page's.
               return text(
-                `error: ${ref} is a <${(sel.tag ?? 'element').toLowerCase()}>, not a ` +
+                `error: ${ref} is a ${safeForAgent(id, (sel.tag ?? 'element').toLowerCase())} element, not a ` +
                   'native <select>, and only native selects take action:"select". ' +
                   'If it is a custom dropdown, drive it with click: click it to ' +
                   'open, then click the option you want. Native selects are the ' +
@@ -1341,6 +1469,15 @@ export function registerBrowserTools(
               // envelope; the instruction about what to do next is Aperture's
               // and stays outside it.
               //
+              // Already `quote()`d — `selectOption.ts`'s `describe()` does it,
+              // so these are neutralized before they arrive. What they were
+              // not is REDACTED: the envelope frames page bytes, it does not
+              // remove a credential from them, and an option labelled with the
+              // filled password came back inside it verbatim. The scrub is
+              // applied to the joined, already-sanitized list, which is also
+              // the right side of `sanitize()` for a needle broken up by
+              // control characters.
+              //
               // The count is the TRUE number of matches; the list is capped.
               // Reporting the capped length instead would tell an agent facing
               // 800 matches that it has seen the whole problem.
@@ -1350,7 +1487,7 @@ export function registerBrowserTools(
               return text(
                 `error: ${quote(wanted)} matches ${total} options ` +
                   `on ${ref} and Aperture will not guess between them. Name one exactly:\n` +
-                  untrusted(origin, shown.join('\n')) +
+                  untrusted(origin, redactFreeText(id, shown.join('\n'))) +
                   more +
                   '\nCall browser_read with this ref for the full list.',
               );
@@ -1359,13 +1496,15 @@ export function registerBrowserTools(
               return text(
                 `error: no option on ${ref} is called ${quote(wanted)} ` +
                   `(${sel.total ?? 0} options). Nearest by name:\n` +
-                  untrusted(origin, (sel.suggestions ?? []).join('\n')) +
+                  untrusted(origin, redactFreeText(id, (sel.suggestions ?? []).join('\n'))) +
                   '\nCall browser_read with this ref for the full list. Option ' +
                   'names are matched exactly, not approximately.',
               );
             case 'disabled':
+              // The label is raw here — `matchOption` returns the option's own
+              // text, unquoted — and this sentence sits outside the envelope.
               return text(
-                `error: option ${quote(sel.label ?? wanted)} on ${ref} is disabled, ` +
+                `error: option ${safeForAgent(id, sel.label ?? wanted)} on ${ref} is disabled, ` +
                   'so a human could not choose it either.',
               );
             case 'select-disabled':
@@ -1391,7 +1530,12 @@ export function registerBrowserTools(
             case 'empty':
               return text(`error: ${ref} has no options to choose from.`);
             default:
-              return text(`error: select on ${ref} failed (${sel.reason}).`);
+              // The catch-all arm, and the one that carries `err.message` from
+              // the preload's select handler — a fourth `err.message` site that
+              // appeared after `security.md`'s audit was written. Scrubbed for
+              // the same reason as `browser_read`'s, and not quoted for the
+              // same reason either.
+              return text(`error: select on ${ref} failed (${redactFreeText(id, sel.reason)}).`);
           }
         }
 
@@ -1407,14 +1551,22 @@ export function registerBrowserTools(
         const multiNote = sel.multiple
           ? `\n(${ref} is a multi-select. This REPLACED its previous selection` +
             (sel.previous.length
-              ? ` of ${sel.previous.length}: ${sel.previous.map((p) => quote(p)).join(', ')}`
+              ? ` of ${sel.previous.length}: ${sel.previous.map((p) => safeForAgent(id, p)).join(', ')}`
               : '') +
             '. Adding to a selection is not supported.)'
           : '';
         // The chosen label is page-authored and sits in harness prose, so it is
         // quoted — same treatment as the obstruction error's `obstructor`.
+        //
+        // AND SCRUBBED. This is the line the 2026-08 review singled out,
+        // because it is the one that was already framed correctly and leaked
+        // anyway: `ok select e9 → "optsink guard-pw-93a1"`, on the SUCCESS
+        // path, quoted exactly as intended. `quote()` is a neutralizer, not a
+        // redactor, and nothing on this path had ever consulted the needles.
+        // An error path leaking is a bug; a success path leaking is the
+        // ordinary case.
         return text(
-          `ok select ${ref} → ${quote(sel.label)}${multiNote}\n` +
+          `ok select ${ref} → ${safeForAgent(id, sel.label)}${multiNote}\n` +
             untrusted(origin, obs),
         );
       }
@@ -1426,7 +1578,15 @@ export function registerBrowserTools(
       if (action === 'type') {
         if (textArg === undefined) return text('error: text required for type');
         if (!r.editable) {
-          return text(`error: ${ref} is a ${r.tag.toLowerCase()}, not an editable field`);
+          // NOT IN THE 2026-08 REVIEW, and the same sink as F3 one branch over:
+          // `resolveRef` replies with `tag: el.tagName` (`page.ts`), and this
+          // is the second call site that interpolated it raw, unquoted and
+          // uncapped into prose outside the envelope. Found while fixing F3;
+          // the review's own §10 predicted more of these existed.
+          return text(
+            `error: ${ref} is a ${safeForAgent(id, r.tag.toLowerCase())} element, ` +
+              'not an editable field',
+          );
         }
       }
 
@@ -1748,7 +1908,13 @@ export function registerBrowserTools(
       return text(
         res.ok
           ? `attached "${meta?.filename}" to the upload field`
-          : `attach failed: ${res.reason ?? 'unknown'}`,
+          : // A fourth `reason` arm nobody had counted. It is page-INFLUENCED
+            // (the upload field the CDP call was aimed at is the page's), it is
+            // raw, uncapped and OUTSIDE the envelope, and it was the one
+            // failure string on this path with no treatment at all
+            // (docs/design/sink-closure-review.md §1, "two more err.message
+            // sites"). `safeForAgent` is the single treatment for exactly this.
+            `attach failed: ${safeForAgent(id, res.reason ?? 'unknown')}`,
       );
     },
   );
@@ -1834,8 +2000,18 @@ export function registerBrowserTools(
         // Destination comes from the active tab only, so opening a Notion tab
         // cannot redirect captures to an attacker-named page.
         openUrls: [t.info(t.active ?? '')?.url ?? ''],
-        title: title ?? info?.title,
-        sourceUrl: info?.url,
+        // THE CAPTION AND THE SOURCE URL LEAVE THE MACHINE.
+        //
+        // Both are page-written (`document.title`, `history.replaceState`) and
+        // both are forwarded to Notion as the caption of the uploaded image. The
+        // image never enters agent context, so this is not an agent-context
+        // leak — it is a disclosure to a third party of a credential Aperture
+        // itself wrote into the page moments earlier, which is worse in every
+        // way that matters and was outside every scrub
+        // (docs/design/sink-closure-review.md §1, `browser_capture` row).
+        // Scrubbed, not quoted: nothing here is being framed for a model.
+        title: redactFreeText(id, title ?? info?.title ?? ''),
+        sourceUrl: redactFreeText(id, info?.url ?? '', REDACTED_HREF),
         diskOnly,
       });
 
@@ -1863,6 +2039,15 @@ export function registerBrowserTools(
       }),
       annotations: { readOnlyHint: true },
     },
+    // THE RULING THIS STUB OWES, RECORDED BEFORE IT IS WIRED.
+    //
+    // Console text is 100% page-chosen — `console.log(password)` is one line —
+    // so the day this returns anything real it is a redaction sink and a
+    // page-bytes-outside-the-envelope site at once. It carried no ruling
+    // anywhere, which is how `Snapshot.title` happened
+    // (docs/design/sink-closure-review.md §1). The ruling: whatever wires this
+    // returns page text through `untrusted()` and every message through
+    // `safeForAgent`, or it does not ship.
     async () => text('console capture not yet wired'),
   );
 }

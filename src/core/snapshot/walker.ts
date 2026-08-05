@@ -24,6 +24,11 @@
 
 import type { Rect, Role, SnapshotNode, StateBits } from './types.js';
 import { State } from './types.js';
+// The leaf that owns the neutralizer's alphabet. Importing it here rather than
+// re-spelling the code-point set is the whole point: two copies of a strip is
+// how one of them goes stale, and this one going stale is a plaintext leak
+// (see `truncate` below).
+import { stripFormat } from './text.js';
 
 const MAX_NAME = 80;
 const MAX_DEPTH = 60;
@@ -126,7 +131,15 @@ export function walk(ctx: WalkContext): WalkResult {
   return {
     root,
     url: doc.location?.href ?? '',
-    title: doc.title ?? '',
+    // `renderFull` prints this through `quote()` on the header line of every
+    // full snapshot, so it is subject to the same alphabet rule as any name —
+    // see `truncate`. Not `truncate` itself: the header is the one line where a
+    // long title is worth its characters, and `quote()` caps it there anyway.
+    //
+    // (`browser_tabs` and `browser_navigate` print `wc.getTitle()`, not this
+    // string. Those paths go through `safeForAgent`, which already scrubs on
+    // BOTH sides of `quote()` for precisely this reason.)
+    title: stripFormat((doc.title ?? '').replace(/\s+/g, ' ').trim()),
     viewport: {
       top: win.scrollY,
       height: win.innerHeight,
@@ -694,7 +707,10 @@ function directText(el: HTMLElement): string | undefined {
   for (const n of Array.from(el.childNodes)) {
     if (n.nodeType === 3) out += n.nodeValue ?? '';
   }
-  const t = out.replace(/\s+/g, ' ').trim();
+  // Same alphabet rule as `truncate` — see its comment. `text` is rendered
+  // through `quote()` in `renderLine`, so it has to arrive stripped or the
+  // renderer removes a separator the redactor was never able to see.
+  const t = stripFormat(out.replace(/\s+/g, ' ').trim());
   return t || undefined;
 }
 
@@ -745,7 +761,10 @@ function valueOf(el: HTMLElement): string | undefined {
     if (el.multiple) {
       return truncate(Array.from(el.selectedOptions).map((o) => o.text).join(', '));
     }
-    return el.selectedOptions[0]?.text ?? '';
+    // `truncate` and not the bare label: this is a `value`, so it is rendered
+    // through `quote()` like every other one, and it has to arrive in the
+    // renderer's alphabet for the needle scrub to see what the model will.
+    return truncate(el.selectedOptions[0]?.text ?? '');
   }
   return undefined;
 }
@@ -822,7 +841,28 @@ function norm(s: string): string {
   return s.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 40);
 }
 
+/**
+ * The one normaliser every page-authored name, value and cell goes through.
+ *
+ * THE ALPHABET RULE (2026-08-05). `stripFormat` was added here, and it is a
+ * security fix rather than a tidy-up. `redactObserved` runs on the raw walk
+ * result; `render.ts` then puts every name, value, text and table cell through
+ * `quote()` → `sanitize()`, which DELETES the invisible code points instead of
+ * escaping them. So a page that split the value it holds with one `U+202D`
+ * matched no needle when the scrub ran, and was whole again in the text the
+ * model received — measured on `Snapshot.title`, `SnapshotNode.value`, `.name`
+ * and `.rows` at once (`docs/design/sink-closure-review.md` F-B).
+ *
+ * `href` was the one field that HELD under that probe, because `sanitizeHref`
+ * already stripped at walk time. This makes every other field do what href
+ * does: the redactor and the renderer read the same bytes, by construction, in
+ * one place — rather than by two treatments kept in step by review.
+ *
+ * Order matters. Whitespace is collapsed FIRST and the invisibles removed
+ * SECOND, so `a<U+202D>b` cannot become `a b`; it becomes `ab`, which is
+ * exactly what `sanitize` would have rendered.
+ */
 function truncate(s: string): string {
-  const t = s.replace(/\s+/g, ' ').trim();
+  const t = stripFormat(s.replace(/\s+/g, ' ').trim());
   return t.length > MAX_NAME ? `${t.slice(0, MAX_NAME - 1)}…` : t;
 }

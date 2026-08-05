@@ -118,6 +118,76 @@ async function witness() {
   return m ? m[1].trim() : '(no witness line)';
 }
 
+/**
+ * A ref resolved out of ONE observation, without touching the shared model.
+ *
+ * `refFor` reads the running model and exits the process when a label is
+ * ambiguous, which is right for setup and wrong inside a security check: a
+ * guard that cannot find its button must FAIL and say so, not take the suite
+ * down. Returns null rather than throwing, and null rather than guessing when
+ * a label matches more than once.
+ */
+function refIn(observation, label, role) {
+  const m = new Map();
+  applyObservation(m, observation);
+  const hits = [...m.entries()].filter(
+    ([, e]) => e.label === label && (!role || e.role === role),
+  );
+  return hits.length === 1 ? hits[0][0] : null;
+}
+
+/**
+ * The code points `src/core/snapshot/text.ts` removes, removed here too.
+ *
+ * A guard asserting `!text.includes(pw)` is not enough for the split-value
+ * sinks: the whole finding was that the bytes on the wire carry a separator
+ * Aperture itself deletes on the way to the model, so the check has to be made
+ * in the alphabet the MODEL reads as well as the one the transport carries.
+ * Deliberately a copy of the predicate and not an import — the bench must be
+ * able to fail when the product's copy changes.
+ */
+function stripFormat(s) {
+  return [...s]
+    .filter((ch) => {
+      const c = ch.codePointAt(0);
+      if (c === 0x09 || c === 0x0a || c === 0x0d) return true;
+      return !(
+        c <= 0x1f || c === 0x85 || (c >= 0x7f && c <= 0x9f) ||
+        c === 0x2028 || c === 0x2029 ||
+        (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)
+      );
+    })
+    .join('');
+}
+
+/**
+ * Every reading of a string Aperture itself could produce from the value.
+ *
+ * `!text.includes(pw)` is not the whole assertion for the split-value sinks.
+ * The finding is that the bytes on the wire carry separators and escapes that
+ * APERTURE removes or introduces, so absence has to be checked in each
+ * alphabet the model can arrive at without doing anything the browser would
+ * not: the raw text, the text with the invisible code points gone, and both of
+ * those percent-decoded (a `new URL(...)` on the way out is what encoded them).
+ */
+function readings(s) {
+  const out = [s, stripFormat(s)];
+  for (const c of [s, s.replace(/\+/g, ' ')]) {
+    try {
+      const d = decodeURIComponent(c);
+      out.push(d, stripFormat(d));
+    } catch {
+      /* a lone % is not an escape */
+    }
+  }
+  return out;
+}
+
+/** True when the value is absent from every reading of the text. */
+function absentEverywhere(text, value) {
+  return !readings(text).some((r) => r.includes(value));
+}
+
 function finish() {
   const failed = checks.filter((c) => !c.ok);
   console.log(`\n${checks.length - failed.length}/${checks.length} guards hold`);
@@ -987,6 +1057,232 @@ const beta = refFor('Beta action', 'button');
           leakLine.includes('/leak?pw=') && /value-withheld/.test(leakLine),
         `link line: ${leakLine.trim().slice(0, 160) || '(no line carrying the echoed link)'}`,
       );
+
+      // --- G19c: the snapshot HEADER line — Snapshot.title and Snapshot.url --
+      //
+      // Split from G19 for the reason G19b was: an aggregate `!includes(pw)`
+      // says only "something leaked". These two sinks fail for a reason of
+      // their own — they are page-controlled strings that live on `Snapshot`
+      // rather than on `SnapshotNode`, and `redactTainted` walked the node
+      // tree only, so the needles never covered them at all
+      // (docs/design/security-review-2026-08.md F1).
+      //
+      // The delivery is automatic and unavoidable: a URL change forces a full
+      // snapshot (`navigated`, engine.ts), and a full snapshot is exactly what
+      // prints this line. The mechanism guaranteeing the agent hears about a
+      // route change was the one carrying the secret.
+      //
+      // Both halves of the assertion matter. `!includes(SEEDED_PW)` is the
+      // security claim; `TITLESINK` and `urlsink=` still being present is what
+      // makes the guard non-vacuous — a fixture that failed to arm the sink
+      // would otherwise pass by writing nothing.
+      const headerLine = after.split('\n').find((l) => l.startsWith('page "')) ?? '';
+      check(
+        'G19c',
+        'the full-snapshot header carries neither a page-written title nor a page-written URL in clear',
+        headerLine !== '' && !headerLine.includes(SEEDED_PW) &&
+          /TITLESINK/.test(headerLine) && /urlsink=/.test(headerLine) &&
+          /withheld/.test(headerLine),
+        `header line: ${headerLine.trim().slice(0, 200) || '(no page header line in the full snapshot)'}`,
+      );
+
+      // --- G19g: ONE INVISIBLE CHARACTER, four sinks at once -----------------
+      //
+      // `redactObserved` ran on the raw walk result; `render.ts` then put every
+      // name / value / text / cell and the title through quote() -> sanitize(),
+      // which STRIPS U+202A-202E rather than escaping them. A value split by
+      // one matched no needle when the scrub ran and was whole again in the
+      // text the model received — `Snapshot.title`, `SnapshotNode.value`,
+      // `.name` and `.rows`, all four measured at once
+      // (docs/design/sink-closure-review.md F-B).
+      //
+      // Asserted on the WHOLE snapshot rather than a line, because the finding
+      // is precisely that four unrelated fields failed for one shared reason.
+      // Both alphabets are checked: verbatim, and again once the separator is
+      // removed, since removing it is what Aperture does on the way out.
+      // The SPLITSINK count is the non-vacuity half — a fixture that failed to
+      // arm would otherwise pass by writing nothing at all.
+      const splitRef = refIn(after, 'Split password into page', 'button');
+      if (!splitRef) {
+        check('G19g', 'a credential split by one invisible character does not come back whole',
+          false, '"Split password into page" did not resolve to exactly one button');
+      } else {
+        await call('browser_act', { action: 'click', ref: splitRef });
+        await sleep(400);
+        const splitSnap = await call('browser_snapshot', { mode: 'full' });
+        const splitRead = await call('browser_read', {});
+        const armed = (splitSnap.match(/SPLITSINK/g) ?? []).length;
+        check(
+          'G19g',
+          'a credential split by one invisible character does not come back whole — title, value, name, rows and href',
+          absentEverywhere(splitSnap, SEEDED_PW) &&
+            absentEverywhere(splitRead, SEEDED_PW) &&
+            armed >= 5 && /withheld/.test(splitSnap),
+          `SPLITSINK sinks armed in the snapshot: ${armed} (need >= 5); ` +
+            `snapshot verbatim: ${splitSnap.includes(SEEDED_PW)}, once stripped: ${stripFormat(splitSnap).includes(SEEDED_PW)}, in any reading: ${!absentEverywhere(splitSnap, SEEDED_PW)}; ` +
+            `read verbatim: ${splitRead.includes(SEEDED_PW)}, in any reading: ${!absentEverywhere(splitRead, SEEDED_PW)}\n        ` +
+            splitSnap.split('\n').filter((l) => /SPLITSINK/.test(l)).join(' ⏎ ').slice(0, 340),
+        );
+      }
+
+      // --- G19d / G19f / G19i: THE CARRIER TAB -------------------------------
+      //
+      // G19d used to open `about:blank` and ask for the listing "from a second
+      // tab that has never held a credential". That construction cannot fail
+      // for the reason it names: `browser_tabs list` takes no tabId, so which
+      // tab asks changes nothing about what is scrubbed, and the value in the
+      // listing sat in the FILLED tab's own title. An independent gate swapped
+      // the cross-tab union for a per-tab scrub and the whole suite stayed
+      // green (docs/design/sink-closure-review.md §2).
+      //
+      // The construction that discriminates is a CARRIER: a tab whose OWN title
+      // and URL hold the value and which was never filled. The page opens it
+      // with window.open, which makes Aperture create AND ACTIVATE it. Three
+      // legs share the fixture, because they fail for three different reasons:
+      //
+      //   G19d  the aggregate listing        — what the union closed
+      //   G19f  the DIRECT read of that tab  — what it did not, and the richer
+      //         surface: browser_snapshot with NO arguments returns the whole
+      //         tree, and that is the call an agent makes anyway
+      //   G19i  the same carrier on a FOREIGN origin — reachable only through
+      //         the opener origin Aperture records when it creates the tab
+      const filledTab = /^\*\s*(\S+)/m.exec(
+        (await call('browser_tabs', { action: 'list' }))
+          .split('\n').find((l) => l.trim().startsWith('*')) ?? '',
+      )?.[1] ?? '';
+
+      const popRef = refIn(after, 'Open carrier tab', 'button');
+      if (!popRef || !filledTab) {
+        for (const g of ['G19d', 'G19f', 'G19i']) {
+          check(g, 'the carrier tab a filled page opens carries no credential', false,
+            `carrier button: ${popRef ?? '(unresolved)'}; filled tab: ${filledTab || '(unknown)'}`);
+        }
+      } else {
+        await call('browser_act', { action: 'click', ref: popRef });
+        await sleep(1600);
+
+        // Asked with NO ARGUMENTS AT ALL. The carrier is the active tab because
+        // Aperture activated it, so this is the agent's ordinary next call.
+        const carrierSnap = await call('browser_snapshot', {});
+        const carrierRead = await call('browser_read', {});
+        const listing = await call('browser_tabs', { action: 'list' });
+
+        check(
+          'G19d',
+          'the cross-tab listing does not carry a credential held by a CARRIER tab that was never filled',
+          !listing.includes(SEEDED_PW) &&
+            /CARRIERSINK/.test(listing) && /carried=/.test(listing) &&
+            /withheld/.test(listing),
+          `listing: ${listing.split('\n').filter((l) => /CARRIERSINK|carried=|withheld/.test(l)).join(' ⏎ ').slice(0, 260) || listing.slice(0, 260)}`,
+        );
+
+        check(
+          'G19f',
+          'browser_snapshot and browser_read with no arguments do not carry the credential out of the carrier tab',
+          !carrierSnap.includes(SEEDED_PW) && !carrierRead.includes(SEEDED_PW) &&
+            /CARRIERSINK/.test(carrierSnap) && /withheld/.test(carrierSnap),
+          `snapshot carries it: ${carrierSnap.includes(SEEDED_PW)}; read carries it: ${carrierRead.includes(SEEDED_PW)}\n        ` +
+            carrierSnap.split('\n').filter((l) => /CARRIERSINK|page "/.test(l)).join(' ⏎ ').slice(0, 300),
+        );
+
+        await call('browser_tabs', { action: 'focus', tabId: filledTab });
+        await sleep(400);
+        const foreignRef = refIn(
+          await call('browser_snapshot', { mode: 'full' }),
+          'Open foreign carrier tab',
+          'button',
+        );
+        if (!foreignRef) {
+          check('G19i', 'a carrier the filled page opens on ANOTHER origin carries no credential either',
+            false, '"Open foreign carrier tab" did not resolve to exactly one button');
+        } else {
+          await call('browser_act', { action: 'click', ref: foreignRef });
+          await sleep(1800);
+          const fSnap = await call('browser_snapshot', {});
+          const fList = await call('browser_tabs', { action: 'list' });
+          check(
+            'G19i',
+            'a carrier the filled page opens on ANOTHER origin carries no credential either',
+            !fSnap.includes(SEEDED_PW) && !fList.includes(SEEDED_PW) &&
+              /CARRIERSINK/.test(fSnap) && /127\.0\.0\.2/.test(fSnap) &&
+              /withheld/.test(fSnap),
+            `snapshot carries it: ${fSnap.includes(SEEDED_PW)}; listing carries it: ${fList.includes(SEEDED_PW)}\n        ` +
+              fSnap.split('\n').filter((l) => /CARRIERSINK|page "/.test(l)).join(' ⏎ ').slice(0, 300),
+          );
+        }
+
+        // Leave exactly the filled tab behind, so G19e and G19h read the page
+        // they think they are reading.
+        for (const line of (await call('browser_tabs', { action: 'list' })).split('\n')) {
+          const m = /^[* ]\s*(\S+)\s+\[/.exec(line);
+          if (m && m[1] !== filledTab && /carrier\.html/.test(line)) {
+            await call('browser_tabs', { action: 'close', tabId: m[1] });
+          }
+        }
+        await call('browser_tabs', { action: 'focus', tabId: filledTab });
+        await sleep(500);
+      }
+
+      // --- G19e: the element's TAG NAME in browser_act's refusal prose -------
+      //
+      // Both a needle leak and an injection surface: page-chosen bytes,
+      // unquoted, uncapped, interpolated into a sentence that sits
+      // deliberately OUTSIDE the untrusted envelope, in Aperture's own voice.
+      // Every other page-authored string on this path goes through `quote()`;
+      // this one did not.
+      const modelTag = new Map();
+      applyObservation(modelTag, after);
+      const tagHits = [...modelTag.entries()].filter(([, e]) => e.label === 'Tag sink');
+      if (tagHits.length !== 1) {
+        check('G19e', 'a page-chosen element tag name cannot carry the credential into harness prose',
+          false, `"Tag sink" resolves to ${tagHits.length} elements`);
+      } else {
+        const notSelect = await call('browser_act', {
+          action: 'select', ref: tagHits[0][0], option: 'anything',
+        });
+        check(
+          'G19e',
+          'a page-chosen element tag name cannot carry the credential into harness prose',
+          !notSelect.includes(SEEDED_PW) && /not a native <select>/.test(notSelect) &&
+            /withheld/.test(notSelect),
+          `reply: ${notSelect.split('\n')[0].slice(0, 220)}`,
+        );
+      }
+
+      // --- G19h: THE NAVIGATION THAT USED TO DISARM THE REDACTION -----------
+      //
+      // No second tab, no popup, no script beyond one assignment. The filled
+      // page navigates ITSELF, document-replacing, to a same-origin URL holding
+      // the value. `invalidate(tabId, true)` called `clearNeedles(tabId)` on
+      // exactly that event, so the navigation that DELIVERED the secret was the
+      // navigation that disarmed the mechanism, and the next snapshot rendered
+      // it in clear on the header line, in the tree, in browser_read AND in
+      // browser_tabs list — the cross-tab union included, because with every
+      // needle gone the union is empty too.
+      //
+      // Runs LAST in this block: it destroys the page every other G19 leg
+      // reads. Guards after it call goFixture and start clean.
+      const goRef = refIn(after, 'Navigate away carrying the value', 'button');
+      if (!goRef) {
+        check('G19h', 'a document-replacing navigation does not disarm the credential redaction',
+          false, '"Navigate away carrying the value" did not resolve to exactly one button');
+      } else {
+        await call('browser_act', { action: 'click', ref: goRef });
+        await sleep(1800);
+        const navSnap = await call('browser_snapshot', { mode: 'full' });
+        const navRead = await call('browser_read', {});
+        const navList = await call('browser_tabs', { action: 'list' });
+        check(
+          'G19h',
+          'a document-replacing navigation to a URL carrying the credential does not disarm the redaction',
+          !navSnap.includes(SEEDED_PW) && !navRead.includes(SEEDED_PW) &&
+            !navList.includes(SEEDED_PW) &&
+            /CARRIERSINK/.test(navSnap) && /carried=/.test(navSnap) &&
+            /withheld/.test(navSnap),
+          `snapshot: ${navSnap.includes(SEEDED_PW)}; read: ${navRead.includes(SEEDED_PW)}; listing: ${navList.includes(SEEDED_PW)}\n        ` +
+            (navSnap.split('\n').find((l) => l.startsWith('page "')) ?? '(no header line)').slice(0, 220),
+        );
+      }
     }
   }
 

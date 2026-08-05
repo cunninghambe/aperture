@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Carrier</title>
+  </head>
+  <body>
+    <h1>Carrier page</h1>
+
+    <!--
+      THE CARRIER — the tab that holds the credential and was never filled.
+
+      Reached three ways from login.html, all three of which Aperture drives
+      itself:
+
+        · "Open carrier tab"          window.open, SAME origin  → G19d, G19f
+        · "Open foreign carrier tab"  window.open, 127.0.0.2    → G19i
+        · "Navigate away…"            location.href, same tab   → G19h
+
+      In every case the value arrives in the URL Aperture is asked to load, so
+      `Snapshot.url` carries it before one line of script on this page runs.
+      That is the point: the carrier needs no network, no storage and no opener
+      handle. It needs Aperture to create the tab and activate it, which is
+      exactly what setWindowOpenHandler does.
+
+      NOTHING WAS EVER FILLED HERE. A needle store keyed by TAB is empty for
+      this document, so every per-tab scrub is a no-op and `redactObserved`
+      returns at its first line. Keying by ORIGIN — plus the opener origin
+      Aperture records when it creates the tab — is what closes it.
+
+      This page prints no secret of its own: it copies whatever the URL handed
+      it into the four fields the agent reads, which is the same rule
+      login.html follows.
+    -->
+
+    <p id="txt">(nothing carried)</p>
+    <p><a id="lnk" href="/nothing">Carrier link</a></p>
+    <table id="tbl">
+      <tr><td>CARRIERSINK cell</td><td id="cell">-</td></tr>
+    </table>
+    <p id="state">carrier-log: (not rendered)</p>
+
+    <script>
+      (() => {
+        const v = decodeURIComponent(location.hash.slice(1));
+
+        document.getElementById('txt').textContent = 'CARRIERSINK text ' + v;
+        document.getElementById('cell').textContent = v;
+        const lnk = document.getElementById('lnk');
+        lnk.href = '/leak?pw=' + v;
+        lnk.setAttribute('aria-label', 'CARRIERSINK name ' + v);
+        document.title = 'CARRIERSINK ' + v;
+
+        // Same-document, so this does not re-enter the navigation path: it just
+        // moves the value from the fragment into the query, where browser_tabs
+        // and the snapshot header both print it.
+        history.replaceState(null, '', '/carrier.html?carried=' + encodeURIComponent(v));
+
+        // Booleans only, exactly as login.html does — the guard reads this to
+        // know the fixture actually armed rather than passing on an empty page.
+        document.getElementById('state').textContent =
+          'carrier-log: carried:' + (v.length > 0) + ' len-nonzero:' + (v.length > 0);
+      })();
+    </script>
+  </body>
+</html>

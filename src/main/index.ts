@@ -10,7 +10,7 @@ import { startMcpServer } from '@mcp/server';
 import { profiles } from '@vault/profileStore';
 import { vault } from '@vault/vault';
 import { revokeAllGrants } from './consent.js';
-import { clearAllNeedles, invalidate } from '@core/snapshot/engine';
+import { clearAllNeedles, invalidate, setOriginScope } from '@core/snapshot/engine';
 import { flushTelemetry, initTelemetry, report } from '../telemetry/reporter.js';
 import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
 
@@ -69,6 +69,17 @@ async function createWindow(): Promise<void> {
   win.on('resize', layoutChrome);
 
   tabs = new TabManager(win);
+
+  // THE REDACTION SCOPE, WIRED BEFORE ANYTHING CAN BE FILLED.
+  //
+  // Needles are keyed by origin (`engine.ts`, `OriginScope`), and only the tab
+  // manager knows which origins a given tab could be showing content from — the
+  // one it is on, and the one that opened it. `engine.ts` must not import a tab
+  // list, so it asks. This is wired here, at construction, and the MCP server is
+  // started later in this same function: an unwired scope answers "no origins",
+  // which redacts nothing, so it must not be reachable from a tool call.
+  const manager = tabs;
+  setOriginScope({ forTab: (tabId: string) => manager.originScope(tabId) });
 
   // Refs are invalidated on any navigation, including same-document ones,
   // because a pushState can rewrite the whole view.

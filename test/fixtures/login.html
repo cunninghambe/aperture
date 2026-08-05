@@ -101,6 +101,27 @@
       <button type="button" id="armbtn">Arm page change</button>
     </p>
 
+    <!--
+      THE SINKS THE PER-TAB, RAW-BYTES SCRUB DID NOT REACH (2026-08-05, gate 2).
+
+      Three constructions, each of which defeated the whole needle mechanism on
+      the build that closed the five sinks above. They are grouped here because
+      they share one root cause in two halves: the scrub has to see the bytes
+      the model sees (the SPLIT button), and it has to be in scope wherever the
+      page can put those bytes (the two carriers and the navigation).
+
+      Still no secret is printed as text by this fixture. Every button writes
+      the value Aperture handed this origin into a place the agent reads, and
+      the guard asserts it does not come back.
+    -->
+    <p>
+      <button type="button" id="splitbtn">Split password into page</button>
+      <button type="button" id="popbtn">Open carrier tab</button>
+      <button type="button" id="foreignbtn">Open foreign carrier tab</button>
+      <button type="button" id="gobtn">Navigate away carrying the value</button>
+    </p>
+    <div id="splitextra"></div>
+
     <script>
       (() => {
         const q = new URLSearchParams(location.search);
@@ -203,8 +224,153 @@
           // innerText, so browser_read never sees it — only the snapshot line
           // does, which is why the href gets a guard of its own (G19b).
           leaklink.href = '/leak?pw=' + (p ? p.value : '') + (o ? '&c=' + o.value : '');
+
+          // --- the sinks that are NOT on SnapshotNode --------------------------
+          //
+          // `redactTainted` took a SnapshotNode and walked the node tree. These
+          // three are page-controlled strings the agent is shown that no node
+          // carries, so the needles never covered them
+          // (docs/design/security-review-2026-08.md F1, F2, F3).
+          //
+          // Nothing here prints a secret as TEXT — the fixture's rule at the
+          // top of this file still holds. `document.title` is chrome, the URL
+          // is chrome, and a tag name is markup; all three reach agent context
+          // through channels that are not the rendered tree, which is exactly
+          // why they escaped. Same construction as the href sink above: write
+          // the value Aperture just handed this origin into a place the agent
+          // reads, and let the guard assert it does not come back.
+          const v = p ? p.value : '';
+
+          // Snapshot.title → the `page "…" …` header of every full snapshot,
+          // and every `browser_tabs list` line.
+          document.title = 'TITLESINK ' + v;
+
+          // Snapshot.url → the same header line, plus browser_tabs, plus
+          // browser_navigate's `loaded …`. replaceState is a SAME-DOCUMENT
+          // navigation, so `documentReplaced` stays false and invalidate()
+          // deliberately keeps the needles armed — the redaction state is
+          // fully live and simply did not cover this string.
+          history.replaceState(
+            null,
+            '',
+            location.pathname + location.search + '&urlsink=' + v,
+          );
+
+          // The element's own TAG NAME, which `browser_act action:"select"`
+          // interpolates raw and uncapped into harness prose that sits OUTSIDE
+          // the untrusted envelope. A custom element name may hold [a-z0-9._-]
+          // and has no length limit, so this is both a needle leak and an
+          // injection surface in Aperture's own voice.
+          if (!document.getElementById('tagsink')) {
+            const custom = document.createElement('x-' + (v || 'none'));
+            custom.id = 'tagsink';
+            custom.setAttribute('role', 'button');
+            custom.textContent = 'Tag sink';
+            document.body.appendChild(custom);
+          }
           render();
         });
+        // --- G19g: ONE INVISIBLE CHARACTER ---------------------------------
+        //
+        // `redactObserved` ran on the raw walk result and `render.ts` then put
+        // every name / value / text / cell and the title through quote() ->
+        // sanitize(), which STRIPS U+202A-202E rather than escaping them. So a
+        // value split by one of them matched no needle when the scrub ran and
+        // was whole again in the text the model received — measured on four
+        // fields at once (docs/design/sink-closure-review.md F-B).
+        //
+        // U+202D is invisible, is not whitespace, and survives the walker's
+        // \s+ normalisation, which is what makes it the sharpest separator.
+        // The fix is upstream, in walker.ts: the strip happens at WALK time, so
+        // the redactor now reads what the renderer will write.
+        document.getElementById('splitbtn').addEventListener('click', () => {
+          const v = p ? p.value : '';
+          const split = v.slice(0, 8) + '‭' + v.slice(8);
+          const extra = document.getElementById('splitextra');
+
+          // 1. SnapshotNode.text
+          const t = document.createElement('p');
+          t.id = 'splittext';
+          t.textContent = 'SPLITSINK text ' + split;
+
+          // 2. SnapshotNode.name, via the accessible name
+          const b = document.createElement('button');
+          b.id = 'splitname';
+          b.textContent = 'Split name sink';
+          b.setAttribute('aria-label', 'SPLITSINK name ' + split);
+
+          // 3. SnapshotNode.value, on a field Aperture never wrote to — so
+          //    this is the needle branch and not the taint branch.
+          const inp = document.createElement('input');
+          inp.id = 'splitvalue';
+          inp.type = 'text';
+          inp.setAttribute('aria-label', 'Split value sink');
+          inp.value = 'SPLITSINK value ' + split;
+
+          // 4. SnapshotNode.rows, a flattened data table
+          const tb = document.createElement('table');
+          tb.id = 'splitrows';
+          tb.innerHTML = '<tr><td>SPLITSINK cell</td><td></td></tr>';
+          tb.querySelectorAll('td')[1].textContent = split;
+
+          // 5. SnapshotNode.href — the field that HELD under the original
+          //    probe, because sanitizeHref strips at walk time, and still
+          //    disclosed the value: `new URL(...)` runs FIRST and turns the
+          //    separator into `%E2%80%AD`, so the strip finds nothing and the
+          //    rendered target reads `/leak?pw=guard-pw%E2%80%AD-93a1`. Two
+          //    decodings Aperture itself would do, and the password is back.
+          const a = document.createElement('a');
+          a.id = 'splithref';
+          a.textContent = 'Split href sink';
+          // The query key carries the SPLITSINK mark so the guard's
+          // non-vacuity count sees this sink too — the rendered target is the
+          // only place this one shows up, and it has no label of its own.
+          a.href = '/leak?SPLITSINK=' + split;
+
+          for (const el of [t, b, inp, tb, a]) {
+            if (!document.getElementById(el.id)) extra.appendChild(el);
+          }
+
+          // 5. Snapshot.title. TITLESINK is kept in the string so G19c's
+          //    non-vacuity check still matches if the order ever changes.
+          document.title = 'TITLESINK SPLITSINK ' + split;
+          render();
+        });
+
+        // --- G19d / G19f / G19i: THE CARRIER TAB ----------------------------
+        //
+        // window.open makes Aperture CREATE AND ACTIVATE a new tab
+        // (src/main/tabs.ts, setWindowOpenHandler). Nothing was ever filled
+        // into it, so a per-tab needle store is empty there and every per-tab
+        // scrub is a no-op — the agent's next unqualified browser_snapshot
+        // returned the whole tree in clear (sink-closure-review.md F-A).
+        //
+        // Two carriers, because they are closed by two different halves of the
+        // fix. The same-origin one is covered by keying needles by ORIGIN. The
+        // FOREIGN one is covered only by the opener origin Aperture records
+        // when it creates the tab — nothing else knows the value went there.
+        document.getElementById('popbtn').addEventListener('click', () => {
+          window.open('/carrier.html#' + encodeURIComponent(p ? p.value : ''), '_blank');
+        });
+        document.getElementById('foreignbtn').addEventListener('click', () => {
+          window.open(
+            'http://127.0.0.2:8899/carrier.html#' + encodeURIComponent(p ? p.value : ''),
+            '_blank',
+          );
+        });
+
+        // --- G19h: THE NAVIGATION THAT USED TO DROP THE NEEDLES -------------
+        //
+        // No second tab at all. A real, document-replacing navigation to a
+        // same-origin URL carrying the value. `invalidate(tabId, true)` used to
+        // call clearNeedles here, so the navigation that DELIVERED the secret
+        // was the navigation that disarmed the redaction, and the next snapshot
+        // rendered it in clear on the header line, in the tree, in
+        // browser_read, and in browser_tabs list.
+        document.getElementById('gobtn').addEventListener('click', () => {
+          location.href = '/carrier.html#' + encodeURIComponent(p ? p.value : '');
+        });
+
         document.getElementById('showbtn').addEventListener('click', () => {
           if (p) p.type = 'text';
           render();

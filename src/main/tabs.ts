@@ -25,6 +25,33 @@ interface TabRecord {
   loadState: LoadState;
   /** Resolves when the in-flight navigation settles. */
   pendingNav: { resolve: () => void; timer: NodeJS.Timeout } | null;
+  /**
+   * The origin of the page that asked for this tab, captured when Aperture
+   * created it, and never updated afterwards.
+   *
+   * This exists for exactly one reason: the needle store is keyed by origin
+   * (`engine.ts`, `OriginScope`), and a page that already holds a credential
+   * can `window.open` a FOREIGN origin with the value in the URL. The new tab
+   * is on an origin that was never filled, so its own scope is empty — but the
+   * page that put the value there is known, and it is this. Recorded at
+   * creation rather than read live because the opener may have navigated,
+   * closed, or been replaced by the time anyone asks.
+   *
+   * Never widened by a later navigation of THIS tab: a tab that goes on to
+   * some third origin under its own steam is not carrying the opener's value
+   * by Aperture's doing.
+   */
+  openerOrigin: string | null;
+}
+
+/** Origin for scoping, or null for anything that will not parse. */
+function originOf(url: string): string | null {
+  try {
+    const o = new URL(url).origin;
+    return o && o !== 'null' ? o : null;
+  } catch {
+    return null;
+  }
 }
 
 let tabSeq = 0;
@@ -55,6 +82,8 @@ export class TabManager extends EventEmitter {
     container?: ContainerId;
     agentOwned?: boolean;
     activate?: boolean;
+    /** Set only by the window-open handler; see `TabRecord.openerOrigin`. */
+    openerOrigin?: string | null;
   } = {}): TabId {
     const id = `t${++tabSeq}`;
     const containerId = opts.container ?? containers.defaultId();
@@ -83,6 +112,7 @@ export class TabManager extends EventEmitter {
       blockedCount: 0,
       loadState: 'idle',
       pendingNav: null,
+      openerOrigin: opts.openerOrigin ?? null,
     };
     this.tabs.set(id, rec);
     this.order.push(id);
@@ -258,6 +288,24 @@ export class TabManager extends EventEmitter {
       .filter((t): t is TabInfo => t !== null);
   }
 
+  /**
+   * Every origin whose filled values this tab's content could be carrying.
+   *
+   * The answer `engine.ts`'s `OriginScope` needs, and the only place that knows
+   * it. Two entries at most: where the tab IS, and who opened it. It is
+   * deliberately not on `TabInfo` — this is redaction scope, not something the
+   * renderer or the agent has any business reading.
+   */
+  originScope(id: TabId): string[] {
+    const rec = this.tabs.get(id);
+    if (!rec) return [];
+    const here = originOf(rec.view.webContents.getURL());
+    const out: string[] = [];
+    if (here) out.push(here);
+    if (rec.openerOrigin && rec.openerOrigin !== here) out.push(rec.openerOrigin);
+    return out;
+  }
+
   // -- internals ------------------------------------------------------------
 
   private wire(rec: TabRecord): void {
@@ -299,8 +347,20 @@ export class TabManager extends EventEmitter {
 
     // A page asking to open a window gets a tab in the *same* container, so
     // popups cannot be used to escape into the default cookie jar.
+    //
+    // The opener's origin rides along, and that is a redaction fix, not
+    // bookkeeping. This handler creates AND ACTIVATES the new tab, so one line
+    // of page script makes the agent's next unqualified `browser_snapshot`
+    // read a page of the opener's choosing — and if that page is on a
+    // different origin, origin-keyed needles alone would not cover it
+    // (`docs/design/sink-closure-review.md` F-A; `engine.ts`, `OriginScope`).
     wc.setWindowOpenHandler(({ url }) => {
-      this.create({ url, container: rec.container, activate: true });
+      this.create({
+        url,
+        container: rec.container,
+        activate: true,
+        openerOrigin: originOf(wc.getURL()),
+      });
       return { action: 'deny' };
     });
   }
