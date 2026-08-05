@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SETTLESINK landing page</title>
+  </head>
+  <body>
+    <h1>SETTLESINK landing page</h1>
+
+    <!--
+      THE `loaded …` LINE'S OWN FIXTURE.
+
+      `browser_navigate` prints `loaded <url>` from `info.url` read AFTER the
+      load settles, so the bytes on that line are whatever the page put in its
+      own URL during settle. That is F6's shape, and it is the surface F-C
+      re-opened in a different alphabet: the line was scrubbed with the PLAIN
+      text scrub, which does not percent-decode, while the URL parser had
+      encoded whatever the page wrote.
+
+      The carried value comes from sessionStorage, not from the URL the agent
+      asked for, and that is the whole point of the indirection: the guard
+      navigates to a plain `/settle.html` with no secret in it, and the
+      credential appears on the `loaded …` line anyway. An agent that never
+      touches the value still gets handed it.
+
+      sessionStorage is per-ORIGIN, so this page is inert on any origin the
+      filled page did not write to.
+
+      Guarded by G19j.
+    -->
+
+    <p id="state">settle-log: (not rendered)</p>
+
+    <script>
+      (() => {
+        let carried = '';
+        try {
+          carried = sessionStorage.getItem('settle') || '';
+        } catch (e) {
+          void e;
+        }
+        // Same-document, during load settle. `documentReplaced` stays false, so
+        // the needles are deliberately kept armed — the redaction state is
+        // fully live and the question is only whether this string is covered.
+        if (carried && location.search.indexOf('pw=') < 0) {
+          history.replaceState(null, '', '/settle.html?landed=1&pw=' + carried);
+        }
+        document.getElementById('state').textContent =
+          'settle-log: carried:' + (location.search.indexOf('pw=') >= 0);
+      })();
+    </script>
+  </body>
+</html>

@@ -119,6 +119,26 @@ export function scrub(s: string, needles: string[], marker = REDACTED): string {
  * A page that percent-encodes the value ITSELF before writing it is the
  * documented transformation residual, not this: the difference is who did the
  * encoding, and the answer here is that we did.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS FUNCTION IS NOT A CALL-SITE DECISION — 2026-08-05, second gate
+ * ---------------------------------------------------------------------------
+ *
+ * The sentence above ("a page that writes the value straight into `a.href`
+ * gets `?pw=my%20pass` back out") is true of FIVE agent-facing or
+ * machine-leaving URL surfaces, and this function was wired to two of them:
+ * `Snapshot.url` and `SnapshotNode.href`, both in this file. `browser_tabs
+ * list`, `browser_navigate`'s `loaded …` line and `browser_capture`'s Notion
+ * source URL used the plain scrub, which does not decode
+ * (`docs/design/sink-closure-review-2.md` F-C, measured). A sixth turned up in
+ * the same pass: the human's toolbar capture, which reaches the same Notion
+ * upload with no scrub of any kind.
+ *
+ * So callers no longer choose. `engine.ts` exposes exactly one `redactUrl`,
+ * `redactFreeText` has lost the `marker` parameter that made "right marker,
+ * wrong scrub" a spellable mistake, and `test/urlsurfaces.test.ts` fails if a
+ * third file so much as names `REDACTED_HREF`. Reach for that entry point, not
+ * for this function.
  */
 export function scrubUrlish(s: string, needles: string[], marker = REDACTED_HREF): string {
   const direct = scrub(s, needles, marker);

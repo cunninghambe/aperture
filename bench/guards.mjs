@@ -33,7 +33,10 @@
  *                             that quietly auto-approved.
  */
 
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { applyObservation, parseElementLine } from './lib/streamModel.mjs';
 
 const ARGS = process.argv.slice(2).filter((a) => !a.startsWith('--'));
@@ -48,6 +51,83 @@ if (!TOKEN) {
 if (!['allow', 'deny', 'none'].includes(PHASE)) {
   console.error(`unknown phase "${PHASE}" — expected allow, deny or none`);
   process.exit(3);
+}
+
+// ---------------------------------------------------------------------------
+// THE ARTIFACT THIS RUN IS ABOUT — refuse a stale one, and name it.
+//
+// Three separate incidents in this project were a green guard run against a
+// build that predated the fix it was meant to measure, and the third was caught
+// only because the guard that noticed happened to be new. The failure is silent
+// BY CONSTRUCTION: a green run against a stale artifact is byte-identical to a
+// green run against the right one, so nothing in the output can be read as
+// evidence either way.
+//
+// Two mechanisms, and they answer different questions:
+//
+//   REFUSE (below) answers "is this run about the tree I am looking at?" It
+//   fails closed on the one condition behind all three incidents — `out/` older
+//   than `src/` — and it cannot be forgotten, because forgetting it is exactly
+//   the mistake. A runner that BUILDS would be better in principle and is worse
+//   here: it adds ways for a guard run to fail for reasons that are not about
+//   guards. This one only ever refuses.
+//
+//   HASH answers "which bytes were these numbers produced from?" six months
+//   later, when the record is all that is left. It prints in the header and in
+//   the RESULT line, so a pasted tail is self-describing. Commit messages in
+//   this repo have claimed "all against hash-recorded builds"; that discipline
+//   belongs in the tool, not in the operator, for the same reason the congruence
+//   table exists (docs/design/sink-closure-review-2.md §5).
+//
+// The comparison is mtime, not content: the question is "did somebody edit
+// source after the last build", and mtime is exactly that question. A rebuild
+// that produces identical bytes still moves the artifact's mtime forward, so
+// the check has no false positives from a no-op rebuild.
+// ---------------------------------------------------------------------------
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ARTIFACT = join(ROOT, 'out', 'main', 'index.js');
+
+/** The most recently modified file under `dir`, recursively. */
+function newestUnder(dir) {
+  let newest = { path: dir, mtimeMs: 0 };
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    const hit = e.isDirectory() ? newestUnder(p) : { path: p, mtimeMs: statSync(p).mtimeMs };
+    if (hit.mtimeMs > newest.mtimeMs) newest = hit;
+  }
+  return newest;
+}
+
+let ARTIFACT_HASH = '(unhashed)';
+{
+  let built;
+  try {
+    built = statSync(ARTIFACT);
+  } catch {
+    console.error(
+      `REFUSING TO RUN: ${relative(ROOT, ARTIFACT)} does not exist.\n` +
+        'Run `npx electron-vite build` first — there is nothing to measure.',
+    );
+    process.exit(3);
+  }
+  const newest = newestUnder(join(ROOT, 'src'));
+  if (newest.mtimeMs > built.mtimeMs) {
+    console.error(
+      'REFUSING TO RUN: the built artifact is older than the source.\n' +
+        `  ${relative(ROOT, ARTIFACT)}  built ${new Date(built.mtimeMs).toISOString()}\n` +
+        `  ${relative(ROOT, newest.path)}  edited ${new Date(newest.mtimeMs).toISOString()}\n` +
+        'Every guard below would have been measured against code that is not on ' +
+        'disk any more. Run `npx electron-vite build`, restart Aperture, and ' +
+        'run this again.',
+    );
+    process.exit(3);
+  }
+  ARTIFACT_HASH = createHash('sha256').update(readFileSync(ARTIFACT)).digest('hex');
+  console.log(
+    `artifact  ${relative(ROOT, ARTIFACT).replace(/\\/g, '/')}  ` +
+      `sha256 ${ARTIFACT_HASH}  built ${new Date(built.mtimeMs).toISOString()}\n` +
+      `phase     ${PHASE}\n`,
+  );
 }
 
 /**
@@ -191,7 +271,13 @@ function absentEverywhere(text, value) {
 function finish() {
   const failed = checks.filter((c) => !c.ok);
   console.log(`\n${checks.length - failed.length}/${checks.length} guards hold`);
-  console.log(`\nRESULT: ${failed.length ? 'RED — ' + failed.map((f) => f.id).join(', ') : 'GREEN'}`);
+  // The hash rides the RESULT line as well as the header: a pasted tail is the
+  // part that survives into a document, and a verdict with no artifact named is
+  // the thing three stale-build incidents made unfalsifiable.
+  console.log(
+    `\nRESULT: ${failed.length ? 'RED — ' + failed.map((f) => f.id).join(', ') : 'GREEN'}` +
+      `  [out/main/index.js sha256 ${ARTIFACT_HASH.slice(0, 16)}…]`,
+  );
   process.exit(failed.length ? 1 : 0);
 }
 
@@ -921,6 +1007,13 @@ const beta = refFor('Beta action', 'button');
 //   --seed-vault --e2e-consent=allow --e2e-consent-delay-ms=1500
 // and test/fixtures served on BOTH 127.0.0.1:8899 and 127.0.0.2:8899.
 //
+// THREE ORIGINS, TWO BINDINGS. G20's cross-origin navigation and G19m's second
+// hop both use `http://localhost:8899`, which is a different origin and a
+// different registrable domain from `http://127.0.0.1:8899` while being the
+// same server — so a server bound to 127.0.0.1 already answers it and no third
+// binding is needed. A server bound with an explicit host allowlist must let
+// `localhost` through, or those two guards measure a failed load.
+//
 // The 1500ms consent delay is not padding. Three of these guards (G20, G21,
 // G22) need the page to move WHILE the consent dialog is open, because that is
 // the only window in which the preload's own re-checks — origin echo,
@@ -1283,6 +1376,210 @@ const beta = refFor('Beta action', 'button');
             (navSnap.split('\n').find((l) => l.startsWith('page "')) ?? '(no header line)').slice(0, 220),
         );
       }
+    }
+  }
+
+  // --- G19j: THE URL SURFACES `scrubUrlish` WAS NOT WIRED TO ---------------
+  //
+  // `scrubUrlish` was written for one sentence in its own header — "a page that
+  // writes the value it holds straight into a.href gets ?pw=my%20pass back out,
+  // and the needle is `my pass`" — and was then wired to two of the five places
+  // that sentence applies. The three that were not: `browser_tabs list`,
+  // `browser_navigate`'s `loaded …` line, and `browser_capture`'s sourceUrl,
+  // which leaves the machine. Measured on 43440a1: one same-origin
+  // self-navigation with one U+202D inside the value, and the snapshot header
+  // (which HAD scrubUrlish) came back clean while the other two carried
+  // `?pw=guard-pw%E2%80%AD-93a1` (sink-closure-review-2.md F-C).
+  //
+  // Two legs, because the two surfaces are reached by two different calls and a
+  // single aggregate assertion would say only "something leaked":
+  //
+  //   G19j   the tab LISTING, right after the page navigated itself
+  //   G19j2  browser_navigate's `loaded …` line, on a navigation the guard
+  //          issues to a URL with NO secret in it — settle.html puts the
+  //          carried value into its own URL during load settle
+  //
+  // `absentEverywhere` is the assertion, not `!includes`: the finding is
+  // precisely that the bytes arrive in an alphabet Aperture itself would
+  // decode, so absence is checked in every reading — raw, stripped,
+  // percent-decoded, and both.
+  {
+    await goFixture(BASE, 'login.html');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(500);
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    const navRef = refIn(snap, 'Self-navigate with the value split in the query', 'button');
+    if (!out.includes(SAYS.FILLED) || !navRef) {
+      for (const g of ['G19j', 'G19j2']) {
+        check(g, 'a URL-bearing surface does not hand back a percent-encoded credential', false,
+          `fill: ${out.split('\n')[0].slice(0, 120)}; button: ${navRef ?? '(unresolved)'}`);
+      }
+    } else {
+      await call('browser_act', { action: 'click', ref: navRef });
+      await sleep(1800);
+
+      const listing = await call('browser_tabs', { action: 'list' });
+      const header = await call('browser_snapshot', { mode: 'full' });
+      check(
+        'G19j',
+        'the tab listing does not hand back a credential the URL parser percent-encoded',
+        absentEverywhere(listing, SEEDED_PW) && absentEverywhere(header, SEEDED_PW) &&
+          /SETTLESINK/.test(listing) && /landed=1/.test(listing) &&
+          /withheld/.test(listing),
+        `listing verbatim: ${listing.includes(SEEDED_PW)}, in any reading: ${!absentEverywhere(listing, SEEDED_PW)}; ` +
+          `header in any reading: ${!absentEverywhere(header, SEEDED_PW)}\n        ` +
+          (listing.split('\n').find((l) => /settle\.html/.test(l)) ?? '(no settle line)').trim().slice(0, 240),
+      );
+
+      // No secret in the URL the guard asks for. settle.html reads what the
+      // filled page stashed for its own origin and rewrites its URL during the
+      // settle, which is exactly the surface `loaded …` reads.
+      const nav = await call('browser_navigate', { action: 'goto', url: `${BASE}/settle.html` });
+      await sleep(500);
+      check(
+        'G19j2',
+        "browser_navigate's `loaded …` line does not hand back a percent-encoded credential",
+        absentEverywhere(nav, SEEDED_PW) && /loaded/.test(nav) && /withheld/.test(nav),
+        `verbatim: ${nav.includes(SEEDED_PW)}, in any reading: ${!absentEverywhere(nav, SEEDED_PW)}\n        ` +
+          nav.split('\n')[0].slice(0, 240),
+      );
+    }
+  }
+
+  // --- G19k: CROSS-ORIGIN SELF-NAVIGATION, FRAGMENT ONLY -------------------
+  //
+  // The construction the previous pass filed as unclosable, on a premise that
+  // is false: "that navigation hands the value to the target origin's server
+  // anyway". A QUERY STRING does. A FRAGMENT DOES NOT — it is never sent — so
+  // nothing is exfiltrated and the target need not be hostile, scripted, or
+  // even awake. `inert.html` has no script at all, on purpose.
+  //
+  // What moved was the value's position relative to the redactor. Needle scope
+  // was the tab's PRESENT origin plus its opener's; a tab that walks itself out
+  // of the filled origin took the value somewhere neither covers, and
+  // `Snapshot.url` carried it verbatim (sink-closure-review-2.md F-E).
+  //
+  // Three surfaces asserted, because the finding is that one line reaches all
+  // three, and the first arrives WITHOUT A FOLLOW-UP CALL: the `browser_act`
+  // result is the same call that caused the navigation, so the credential lands
+  // in the agent's context on the turn the page chooses.
+  {
+    await goFixture(BASE, 'login.html');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(500);
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    const fragRef = refIn(snap, 'Self-navigate to a third origin, value in the fragment', 'button');
+    if (!out.includes(SAYS.FILLED) || !fragRef) {
+      check('G19k', 'a cross-origin self-navigation with the value in the FRAGMENT carries nothing back',
+        false, `fill: ${out.split('\n')[0].slice(0, 120)}; button: ${fragRef ?? '(unresolved)'}`);
+    } else {
+      const act = await call('browser_act', { action: 'click', ref: fragRef });
+      await sleep(1800);
+      const after = await call('browser_snapshot', { mode: 'full' });
+      const listing = await call('browser_tabs', { action: 'list' });
+      check(
+        'G19k',
+        'a cross-origin self-navigation with the value in the FRAGMENT carries it into none of the act result, the snapshot, or the listing',
+        absentEverywhere(act, SEEDED_PW) && absentEverywhere(after, SEEDED_PW) &&
+          absentEverywhere(listing, SEEDED_PW) &&
+          /INERTSINK/.test(after) && /127\.0\.0\.2/.test(after) && /withheld/.test(after),
+        `act result: ${act.includes(SEEDED_PW)}; snapshot: ${after.includes(SEEDED_PW)}; ` +
+          `listing: ${listing.includes(SEEDED_PW)}\n        ` +
+          (after.split('\n').find((l) => l.startsWith('page "')) ?? '(no header line)').slice(0, 240),
+      );
+    }
+  }
+
+  // --- G19l: A PAGE-CHOSEN STRING ON THE NETWORK ---------------------------
+  //
+  // The one finding in this family that is not about agent context at all.
+  // `normalizeUrl` turns a disallowed scheme into `duckduckgo.com/?q=<the whole
+  // string>`, which is the right answer for a human typing "weather" into the
+  // address bar. `setWindowOpenHandler` fed it whatever a PAGE passed to
+  // window.open, so one line of page script made Aperture send page-chosen
+  // bytes to a third-party server the page never named — and an origin whose
+  // own CSP forbids its `fetch()` from phoning home is exactly the adversary
+  // the whole needle mechanism exists for.
+  //
+  // Asserted with a MARKER, never the credential: the guard must not be the
+  // thing that mails the seeded password to a search engine. The assertion is
+  // on the tab set, not on the network, so it holds on a machine with no
+  // internet — before the fix the tab exists carrying that URL whether or not
+  // the load succeeds; after it, no tab is created at all.
+  {
+    await goFixture(BASE, 'login.html');
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    const schemeRef = refIn(snap, 'Open a non-web scheme', 'button');
+    if (!schemeRef) {
+      check('G19l', 'a page cannot make Aperture put its bytes on the network via window.open',
+        false, '"Open a non-web scheme" did not resolve to exactly one button');
+    } else {
+      await call('browser_act', { action: 'click', ref: schemeRef });
+      await sleep(2500);
+      const listing = await call('browser_tabs', { action: 'list' });
+      const searched = listing
+        .split('\n')
+        .filter((l) => /duckduckgo\.com\/\?q=/.test(l) || /SCHEMESINK93a1/i.test(l));
+      check(
+        'G19l',
+        'a window.open target with a non-web scheme is refused, not turned into a third-party search carrying the page\'s bytes',
+        searched.length === 0,
+        searched.length
+          ? `Aperture navigated to:\n        ${searched.join('\n        ').slice(0, 320)}`
+          : 'no tab was created for the refused scheme, and nothing left the machine',
+      );
+    }
+  }
+
+  // --- G19m: THE TWO-HOP OPENER CHAIN --------------------------------------
+  //
+  // Opener inheritance has to be TRANSITIVE, and it was one-deep: `openerOrigin`
+  // recorded the opener's CURRENT ORIGIN, so a chain
+  // `filled → 127.0.0.2 → localhost` left the second hop with an opener that
+  // holds no needles, and hop 2 came back
+  // `page "HOP2 guard-pw-93a1" …?carried=guard-pw-93a1`
+  // (docs/design/sink-closure-review-2.md F-D).
+  //
+  // This leg exists because a fix nobody can break is a fix nobody will notice
+  // breaking. It is the one property in this family a sabotage row proved the
+  // suite could NOT see: reverting the inheritance to the opener's current
+  // origin left all fifty-four other checks green.
+  //
+  // Three distinct ORIGINS on two host bindings — `localhost:8899` and
+  // `127.0.0.1:8899` are different origins and different registrable domains
+  // even though they are the same server, which is the same fact G20's `nav=`
+  // mode turns on. No fixture host beyond the two this file already requires.
+  {
+    await goFixture(BASE, 'login.html');
+    const out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    await sleep(500);
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    const relayRef = refIn(snap, 'Open a two-hop relay', 'button');
+    if (!out.includes(SAYS.FILLED) || !relayRef) {
+      check('G19m', 'opener inheritance survives a second hop', false,
+        `fill: ${out.split('\n')[0].slice(0, 120)}; button: ${relayRef ?? '(unresolved)'}`);
+    } else {
+      await call('browser_act', { action: 'click', ref: relayRef });
+      // Two window.opens and two loads, and the second is issued by the first
+      // page's own script after it lands.
+      await sleep(3200);
+      // Hop 2 is the ACTIVE tab, because Aperture activates what a page opens.
+      const hop2 = await call('browser_snapshot', { mode: 'full' });
+      const hop2Read = await call('browser_read', {});
+      const listing = await call('browser_tabs', { action: 'list' });
+      check(
+        'G19m',
+        'a credential relayed through TWO page-opened tabs is covered at the second hop, not only the first',
+        absentEverywhere(hop2, SEEDED_PW) && absentEverywhere(hop2Read, SEEDED_PW) &&
+          absentEverywhere(listing, SEEDED_PW) &&
+          /CARRIERSINK/.test(hop2) && /localhost/.test(hop2) &&
+          /RELAYSINK/.test(listing) && /withheld/.test(hop2),
+        `hop2 snapshot: ${hop2.includes(SEEDED_PW)}; hop2 read: ${hop2Read.includes(SEEDED_PW)}; ` +
+          `listing: ${listing.includes(SEEDED_PW)}\n        ` +
+          (hop2.split('\n').find((l) => l.startsWith('page "')) ?? '(no header line)').slice(0, 240) +
+          '\n        ' +
+          (listing.split('\n').find((l) => /relay\.html/.test(l)) ?? '(no relay line)').trim().slice(0, 200),
+      );
     }
   }
 

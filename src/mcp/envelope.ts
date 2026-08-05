@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { originLabel } from '@shared/origin.js';
 
 /**
  * The untrusted-content envelope: page bytes in, never instructions out.
@@ -96,13 +97,19 @@ export function untrusted(origin: string, body: string): string {
   return envelope(randomBytes(4).toString('hex'), origin, body);
 }
 
-/** Origin for display, or `unknown` for anything that will not parse. */
+/**
+ * Origin for display, or `unknown` for anything that will not parse.
+ *
+ * Delegates to `@shared/origin`, which is now the ONE implementation. It used
+ * to have its own `new URL(url).origin`, and `src/main/tabs.ts` had a second
+ * one — the string this returns is what `registerNeedles` keys the needle store
+ * by, and the string tabs.ts produced is what `originScope` looks it up with.
+ * Two spellings of the key a security mechanism is keyed by is a silent total
+ * failure waiting for a disagreement, so there is one
+ * (`docs/design/sink-closure-review-2.md` §8).
+ */
 export function safeOrigin(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return 'unknown';
-  }
+  return originLabel(url);
 }
 
 /**

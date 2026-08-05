@@ -358,6 +358,16 @@ Exit codes for `fidelity.mjs`: 0 green · 1 red · 2 truth unusable · 3 step
 failed · 4 **vacuous** (a run that measured nothing refuses to print a verdict
 at all). `guards.mjs`: 0 all guards hold · 1 a guard failed · 3 could not run.
 
+**`guards.mjs` refuses a stale build (exit 3).** If `out/main/index.js` is older
+than any file under `src/`, it names both timestamps and stops before the first
+check — three separate incidents here were a green guard run against an artifact
+that predated the fix it was supposed to measure, and that failure is invisible
+by construction. It prints the artifact's SHA-256 in its header and in the
+RESULT line, so a pasted verdict says what produced it. Build first, then
+restart Aperture, then run the guards; the credential guards additionally need
+fixtures on **127.0.0.1:8899 and 127.0.0.2:8899**, with `localhost:8899`
+reaching the same server (it is a third *origin*, not a third binding).
+
 The scored suites own their whole world — each refuses to start if 8817 is in
 use, then starts its own Aperture, a `no-store` fixture server, the witness
 collector and the MCP proxy, and tears all of it down on exit:

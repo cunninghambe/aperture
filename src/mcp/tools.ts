@@ -6,7 +6,6 @@ import { containers } from '@privacy/containers.js';
 import { vault } from '@vault/vault.js';
 import {
   REDACTED,
-  REDACTED_HREF,
   agentTouched,
   attachFiles,
   dropNeedles,
@@ -14,6 +13,7 @@ import {
   observe,
   keyForRef,
   redactFreeText,
+  redactUrl,
   refEntry,
   registerNeedles,
   requestRead,
@@ -162,6 +162,27 @@ function text(s: string) {
  */
 function safeForAgent(tabId: string, s: string): string {
   return redactFreeText(tabId, quote(redactFreeText(tabId, s)));
+}
+
+/**
+ * The same treatment for a page-authored string that IS A URL.
+ *
+ * Identical shape, one substitution: `redactUrl` instead of `redactFreeText`,
+ * so the decoded readings are searched too. `safeForAgent` on a URL was a leak,
+ * measured: `browser_navigate`'s `loaded …` line came back
+ * `loaded "http://…/p4.html?landed=1&pw=guard-pw%E2%80%AD-93a1"` because the
+ * plain scrub does not decode and the browser had percent-encoded the value on
+ * the way out (`docs/design/sink-closure-review-2.md` F-C).
+ *
+ * BOTH passes still earn their place, and for the same two reasons — a needle
+ * straddling `quote()`'s 80-character cut must be matched before it, and a
+ * needle split by an invisible code point is only whole after `sanitize()` has
+ * removed the separator. The percent-decoding is a THIRD alphabet on top of
+ * those two, which is why this cannot just be `safeForAgent` with a different
+ * marker: the marker was never the difference.
+ */
+function safeUrlForAgent(tabId: string, s: string): string {
+  return redactUrl(tabId, quote(redactUrl(tabId, s)));
 }
 
 /**
@@ -543,14 +564,24 @@ export function registerBrowserTools(
           //
           // Each line is scrubbed against ITS OWN TAB's origin scope, which is
           // what closes the carrier case the union was reaching for: a tab that
-          // was never filled but is on the filled origin (or was opened by it)
-          // is inside that scope. The URL takes the whitespace-free marker
-          // because it is rendered UNQUOTED and read as one token, as `href` is.
+          // was never filled but is on the filled origin (or was opened by it,
+          // or came from it) is inside that scope.
+          //
+          // The URL goes through `redactUrl`, not the plain text scrub. It used
+          // to take `redactFreeText(tab.id, tab.url, REDACTED_HREF)` — the right
+          // MARKER and the wrong SCRUB. Measured: one same-origin
+          // self-navigation with one invisible character inside the value and
+          // this line came back
+          // `"Probe 4" http://…/pfc.html?landed=1&pw=guard-pw%E2%80%AD-93a1`,
+          // while the snapshot header, which had `scrubUrlish`, was clean
+          // (docs/design/sink-closure-review-2.md F-C). No adversary is needed
+          // for the general case: any password with a space or a `#` in it is
+          // percent-encoded here by the URL parser.
           const lines = list.map(
             (tab) =>
               `${tab.id === t.active ? '*' : ' '} ${tab.id} [${tab.container}] ` +
               `${tab.loadState} ${safeTabLine(tab.id, tab.title)} ` +
-              `${redactFreeText(tab.id, tab.url, REDACTED_HREF)}` +
+              `${redactUrl(tab.id, tab.url)}` +
               (tab.blockedCount ? ` (${tab.blockedCount} trackers blocked)` : ''),
           );
           return text(untrusted('multiple', lines.join('\n')));
@@ -617,9 +648,15 @@ export function registerBrowserTools(
           // on the snapshot header line, which sits inside an envelope. A
           // bounded quoted token outside the envelope is worth more than an
           // unbounded bare one.
+          //
+          // `safeUrlForAgent`, not `safeForAgent`: this string is a URL, and
+          // the URL parser percent-encodes whatever the page put in it. With
+          // the plain scrub this line handed back
+          // `loaded "http://…?pw=guard-pw%E2%80%AD-93a1"` on a build whose
+          // snapshot header was clean (sink-closure-review-2.md F-C).
           const status = info?.loadState === 'failed' ? 'failed' : 'loaded';
           return text(
-            `${status} ${safeForAgent(id, info?.url ?? '')}\n` +
+            `${status} ${safeUrlForAgent(id, info?.url ?? '')}\n` +
               untrusted(
                 safeOrigin(info?.url ?? ''),
                 `title: ${safeForAgent(id, info?.title ?? '')}`,
@@ -940,6 +977,12 @@ export function registerBrowserTools(
               // Aperture's sentences outside the envelope, the page's bytes
               // inside it. This is the ONE refusal string that carries page
               // text, and it splits rather than wrapping the whole thing.
+              //
+              // Unscrubbed `quote()` here is the third site of the transitive
+              // argument: `plan.candidates` comes from
+              // `planCredentialFill(st.last.root, …)`, and `st.last` was
+              // redacted by the `observe()` immediately above. The note lives
+              // in full on `browser_fill_form`'s plan lines.
               candidates: untrusted(pageOrigin, labels.map((l) => quote(l)).join('\n')),
             }),
           );
@@ -953,6 +996,13 @@ export function registerBrowserTools(
       if (action === 'plan') {
         // Field labels are page-authored, so they are inside. The header and
         // the next-step instruction are Aperture's, so they are outside.
+        //
+        // `quote()` without the needle scrub is safe TRANSITIVELY, not locally:
+        // `targets` came from `planCredentialFill(st.last.root, …)` and
+        // `st.last` is the baseline `observe()` redacted at the top of this
+        // handler. Same argument, same fragility and same note as
+        // `browser_fill_form`'s plan lines — see there for why it is written
+        // down rather than left to be re-derived.
         const body = targets
           .map((c) => `${c.ref} ${quote(c.label)} → ${c.kind}`)
           .join('\n');
@@ -1711,6 +1761,30 @@ export function registerBrowserTools(
         : plan;
 
       if (action === 'plan') {
+        // WHY `quote(e.label)` AND NOT `safeForAgent(id, e.label)`.
+        //
+        // These labels ARE page-authored, and every other page-authored string
+        // in this file goes through the needle scrub. This one is safe without
+        // it, and the safety is TRANSITIVE rather than local — which is the
+        // whole reason it is written down here, at the print site, instead of
+        // being left for a reader to reconstruct.
+        //
+        // The chain: `collectFields(st.last.root)` reads the RETAINED baseline,
+        // and `st.last` is what `observe()` produced a few lines above, after
+        // `redactObserved` had already scrubbed every `name`, `value`, `text`,
+        // `rows` and `href` on it. So a needle cannot be in `e.label` today.
+        //
+        // The fragility is provenance, not logic. It depends on a caller three
+        // functions away having used `st.last` rather than taking a fresh walk,
+        // and nothing at THIS line says so — swap `collectFields(st.last.root)`
+        // for a fresh `requestWalk` result some day and this becomes a leak with
+        // no diff to review anywhere near it. The second sink-closure gate
+        // accepted the transitive argument and asked for exactly this note
+        // (`docs/design/sink-closure-review-2.md` §4).
+        //
+        // Two siblings on the same footing, for the same reason:
+        // `vault_request_fill`'s plan body and its `AMBIGUOUS_FIELDS`
+        // candidates, both built from `planCredentialFill(st.last.root, …)`.
         const lines = selected.map((e) => {
           const val = e.sensitive
             ? '(from profile — value not shown)'
@@ -1814,7 +1888,18 @@ export function registerBrowserTools(
       // interpolated `err.message`.
       const landed = res.results.filter((r) => r.landed);
       const missed = res.results.filter((r) => !r.landed);
-      const nameOf = (key: string): string => fieldOf.get(key) ?? key;
+      // `?? 'an unnamed field'`, NOT `?? key`.
+      //
+      // The fallback is unreachable — `fieldOf` is built from `toFill`, and
+      // `res.results`'s keys come from `fills`, built from the same `toFill` —
+      // so this is not a leak that was measured. It is a shipped line that
+      // CONTRADICTS a ruling: `key` is page-DERIVED (role|frame|name|…), and
+      // `test/completeness.test.ts` rules it `never-emitted` with the sharpest
+      // whyNot in that table — "printing a key anywhere would put page bytes in
+      // front of the model with no scrub on the path". The ruling was true of
+      // the renderer and false of the product, which is the exact reading error
+      // that produced `Snapshot.title`. One word makes it true everywhere.
+      const nameOf = (key: string): string => fieldOf.get(key) ?? 'an unnamed field';
       const missedLine = missed.length
         ? '\nnot filled: ' +
           missed
@@ -2010,18 +2095,34 @@ export function registerBrowserTools(
         // way that matters and was outside every scrub
         // (docs/design/sink-closure-review.md §1, `browser_capture` row).
         // Scrubbed, not quoted: nothing here is being framed for a model.
+        //
+        // The URL takes `redactUrl` — the same correction as the tab listing
+        // and the `loaded …` line. This is the surface that matters most per
+        // byte, because it is the one that forwards the string OFF THE MACHINE,
+        // and it was hardened in the same commit that left it on the scrub that
+        // cannot decode (sink-closure-review-2.md F-C).
         title: redactFreeText(id, title ?? info?.title ?? ''),
-        sourceUrl: redactFreeText(id, info?.url ?? '', REDACTED_HREF),
+        sourceUrl: redactUrl(id, info?.url ?? ''),
         diskOnly,
       });
 
+      // `location` is either a disk path Aperture built from a timestamp or a
+      // Notion page id normalised to 32 hex digits by `pageIdFromUrl`, so
+      // neither can carry page bytes. `fellBackBecause` is different: it is a
+      // THIRD PARTY's error text, raw and uncapped, in Aperture's own voice
+      // outside the envelope. Not page-controlled today — every throw on that
+      // path is a fixed string plus an HTTP status — but it is the one prose
+      // channel in this file the 2026-08 nine-site audit never counted, and the
+      // rule for foreign strings in harness prose is `safeForAgent` or nothing.
       const where =
         res.destination === 'disk'
           ? `saved to ${res.location}`
           : `appended to Notion page ${res.location}`;
       return text(
         `captured ${Math.round(res.bytes / 1024)}KB · ${where}` +
-          (res.fellBackBecause ? `\n(Notion failed: ${res.fellBackBecause})` : ''),
+          (res.fellBackBecause
+            ? `\n(Notion failed: ${safeForAgent(id, res.fellBackBecause)})`
+            : ''),
       );
     },
   );

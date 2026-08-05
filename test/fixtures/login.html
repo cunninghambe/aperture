@@ -122,6 +122,25 @@
     </p>
     <div id="splitextra"></div>
 
+    <!--
+      THE SINKS THE SECOND GATE FOUND (2026-08-05, gate 2).
+
+      Three more constructions, and none of them needs anything the previous
+      ones did not already have. Grouped separately because they fail for
+      reasons the block above does not cover: the first two are about WHICH
+      FUNCTION a URL goes through and WHERE the redaction scope reaches, and the
+      third is not a redaction failure at all — it is Aperture putting a
+      page-chosen string on the network.
+
+      Still no secret is printed as text by this fixture.
+    -->
+    <p>
+      <button type="button" id="splitnavbtn">Self-navigate with the value split in the query</button>
+      <button type="button" id="fragbtn">Self-navigate to a third origin, value in the fragment</button>
+      <button type="button" id="schemebtn">Open a non-web scheme</button>
+      <button type="button" id="relaybtn">Open a two-hop relay</button>
+    </p>
+
     <script>
       (() => {
         const q = new URLSearchParams(location.search);
@@ -369,6 +388,82 @@
         // browser_read, and in browser_tabs list.
         document.getElementById('gobtn').addEventListener('click', () => {
           location.href = '/carrier.html#' + encodeURIComponent(p ? p.value : '');
+        });
+
+        // --- G19j: THE URL SURFACES `scrubUrlish` WAS NOT WIRED TO ----------
+        //
+        // One same-origin self-navigation, one invisible character inside the
+        // value, and the result in the QUERY STRING — which the URL parser
+        // percent-encodes on the way out. The snapshot header got `scrubUrlish`
+        // and came back clean; `browser_tabs list` and `browser_navigate`'s
+        // `loaded …` line used the plain scrub, which does not decode, and came
+        // back `?pw=guard-pw%E2%80%AD-93a1`
+        // (docs/design/sink-closure-review-2.md F-C).
+        //
+        // The invisible character is the sharpest form, not the only one: any
+        // password containing a space, `#`, `&`, `%` or `+` reaches those
+        // surfaces encoded with no adversarial construction whatsoever.
+        //
+        // The value is ALSO stashed in sessionStorage so that settle.html can
+        // put it into its own URL during load settle — that is how the guard
+        // reaches the `loaded …` line without ever handling the secret itself.
+        document.getElementById('splitnavbtn').addEventListener('click', () => {
+          const v = p ? p.value : '';
+          const split = v.slice(0, 8) + '‭' + v.slice(8);
+          try { sessionStorage.setItem('settle', split); } catch (e) { void e; }
+          location.href = '/settle.html?landed=1&pw=' + split;
+        });
+
+        // --- G19k: CROSS-ORIGIN SELF-NAVIGATION, FRAGMENT ONLY --------------
+        //
+        // The target has no script, never reads its fragment, and A FRAGMENT IS
+        // NEVER SENT TO THE SERVER — so nothing leaves the machine and the
+        // target need not be attacker-controlled. What moves is the value's
+        // position relative to the redactor: the tab leaves the filled origin,
+        // and needle scope followed the TAB's present location rather than the
+        // value. The credential came back verbatim in the `browser_act` result
+        // that caused the navigation, in the next `browser_snapshot`, and in
+        // `browser_tabs list` (sink-closure-review-2.md F-E).
+        //
+        // Closed by recording the origin this tab is LEAVING, so coverage
+        // follows the value.
+        document.getElementById('fragbtn').addEventListener('click', () => {
+          location.href = 'http://127.0.0.2:8899/inert.html#' + (p ? p.value : '');
+        });
+
+        // --- G19l: A PAGE-CHOSEN STRING ON THE NETWORK ----------------------
+        //
+        // NOT a redaction finding. `normalizeUrl` answers a disallowed scheme
+        // with a DuckDuckGo search over the whole string — correct for a human
+        // typing "weather", catastrophic for a page choosing the bytes, because
+        // `setWindowOpenHandler` fed it whatever `window.open` was given.
+        // Measured: this button produced a tab at
+        // `https://duckduckgo.com/?q=mailto%3A…%3Fsubject%3D<marker>`, so
+        // Aperture put a page-chosen string on the network, to a third party the
+        // page never named and which its own CSP could have forbidden it to
+        // reach.
+        //
+        // A MARKER, NEVER THE CREDENTIAL. Substituting `p.value` here is the
+        // same one line, and the guard must not be the thing that mails the
+        // seeded password to a search engine to prove it.
+        document.getElementById('schemebtn').addEventListener('click', () => {
+          window.open('mailto:nobody@example.invalid?subject=SCHEMESINK93a1', '_blank');
+        });
+
+        // --- G19m: THE TWO-HOP OPENER CHAIN --------------------------------
+        //
+        // relay.html (127.0.0.2) opens carrier.html on `localhost:8899`, which
+        // is a THIRD origin — different host string, different registrable
+        // domain, same server. `openerOrigin` recorded the opener's CURRENT
+        // origin rather than its SCOPE, so coverage survived exactly one hop
+        // and hop 2 came back in clear (sink-closure-review-2.md F-D).
+        //
+        // Fragment only at both hops: nothing reaches any server.
+        document.getElementById('relaybtn').addEventListener('click', () => {
+          window.open(
+            'http://127.0.0.2:8899/relay.html#' + encodeURIComponent(p ? p.value : ''),
+            '_blank',
+          );
         });
 
         document.getElementById('showbtn').addEventListener('click', () => {

@@ -5,6 +5,7 @@ import type { ContainerId, LoadState, TabId, TabInfo } from '@shared/types';
 import { containers } from '@privacy/containers';
 import { applyUaProfile, buildUaProfile, type UaProfile } from '@privacy/useragent.js';
 import { setWindowOffset } from '@core/snapshot/act.js';
+import { originOf } from '@shared/origin.js';
 
 /** Height of the browser chrome (tab strip + address bar), in CSS px. */
 export const CHROME_HEIGHT = 88;
@@ -26,32 +27,58 @@ interface TabRecord {
   /** Resolves when the in-flight navigation settles. */
   pendingNav: { resolve: () => void; timer: NodeJS.Timeout } | null;
   /**
-   * The origin of the page that asked for this tab, captured when Aperture
-   * created it, and never updated afterwards.
+   * Every origin whose filled values this tab's content could be carrying,
+   * OTHER than the one it happens to be on right now.
    *
-   * This exists for exactly one reason: the needle store is keyed by origin
-   * (`engine.ts`, `OriginScope`), and a page that already holds a credential
-   * can `window.open` a FOREIGN origin with the value in the URL. The new tab
-   * is on an origin that was never filled, so its own scope is empty — but the
-   * page that put the value there is known, and it is this. Recorded at
-   * creation rather than read live because the opener may have navigated,
-   * closed, or been replaced by the time anyone asks.
+   * COVERAGE FOLLOWS THE VALUE, NOT THE TAB'S PRESENT LOCATION. That sentence
+   * is the whole design, and getting it wrong twice is what put two findings on
+   * the same mechanism in one gate (`docs/design/sink-closure-review-2.md`).
    *
-   * Never widened by a later navigation of THIS tab: a tab that goes on to
-   * some third origin under its own steam is not carrying the opener's value
-   * by Aperture's doing.
+   * Two ways a value gets into a tab that was never filled, and this set is
+   * seeded on both:
+   *
+   *  1. **The opener.** A page holding a credential calls `window.open` with
+   *     the value in the URL. Aperture creates AND ACTIVATES that tab, so the
+   *     agent's next unqualified `browser_snapshot` reads it. The new tab is on
+   *     an origin that was never filled — but the page that put the value there
+   *     is known. Seeded with the opener's ENTIRE SCOPE, not its current origin:
+   *     inheriting the current origin only made the property survive one hop, so
+   *     a two-hop chain (filled → A → B) left B uncovered (F-D). Inheriting the
+   *     scope makes it transitive by construction, because the opener's set
+   *     already contains ITS opener's scope and its own priors.
+   *
+   *  2. **Where this tab came from.** The tab navigates ITSELF across an origin
+   *     boundary carrying the value —
+   *     `location.href = 'http://third-party/inert.html#' + password`. One line,
+   *     no popup, no opener, and the target need not be hostile or even have
+   *     script: a fragment is never sent to a server, so nothing is exfiltrated;
+   *     the value simply moved from a place the redactor covers to a place it
+   *     did not (F-E). The prior origin is added on every document-replacing
+   *     navigation.
+   *
+   * ONLY EVER ADDED TO. A tab that leaves a filled origin stays scrubbed against
+   * it for as long as that origin has needles, which is the over-redaction this
+   * module accepts everywhere else: cosmetic markers on unrelated strings,
+   * bounded by the needle TTL rather than by this set — an origin with no live
+   * needles contributes nothing to `needlesFor`, so a stale entry costs a map
+   * lookup and nothing else.
+   *
+   * Unbounded in size, and that is deliberate rather than overlooked: an entry
+   * is one short string per DISTINCT origin the tab has visited, and any cap
+   * would have to evict something, at which point the mechanism could silently
+   * lose the one origin that mattered. A tab that visits every port on loopback
+   * costs about a megabyte; a tab that loses coverage costs the credential.
    */
-  openerOrigin: string | null;
-}
-
-/** Origin for scoping, or null for anything that will not parse. */
-function originOf(url: string): string | null {
-  try {
-    const o = new URL(url).origin;
-    return o && o !== 'null' ? o : null;
-  } catch {
-    return null;
-  }
+  carriedOrigins: Set<string>;
+  /**
+   * The origin of the document currently committed here, so that the NEXT
+   * document-replacing navigation knows what this tab is leaving.
+   *
+   * Kept rather than read at the moment of the event because by the time
+   * `did-navigate` fires the new document is already committed and
+   * `getURL()` answers the destination, not the source.
+   */
+  lastOrigin: string | null;
 }
 
 let tabSeq = 0;
@@ -82,8 +109,11 @@ export class TabManager extends EventEmitter {
     container?: ContainerId;
     agentOwned?: boolean;
     activate?: boolean;
-    /** Set only by the window-open handler; see `TabRecord.openerOrigin`. */
-    openerOrigin?: string | null;
+    /**
+     * The opener's ORIGIN SCOPE, not its current origin. Set only by the
+     * window-open handler; see `TabRecord.carriedOrigins`.
+     */
+    inherits?: string[];
   } = {}): TabId {
     const id = `t${++tabSeq}`;
     const containerId = opts.container ?? containers.defaultId();
@@ -112,7 +142,8 @@ export class TabManager extends EventEmitter {
       blockedCount: 0,
       loadState: 'idle',
       pendingNav: null,
-      openerOrigin: opts.openerOrigin ?? null,
+      carriedOrigins: new Set(opts.inherits ?? []),
+      lastOrigin: null,
     };
     this.tabs.set(id, rec);
     this.order.push(id);
@@ -292,17 +323,21 @@ export class TabManager extends EventEmitter {
    * Every origin whose filled values this tab's content could be carrying.
    *
    * The answer `engine.ts`'s `OriginScope` needs, and the only place that knows
-   * it. Two entries at most: where the tab IS, and who opened it. It is
-   * deliberately not on `TabInfo` — this is redaction scope, not something the
+   * it: where the tab IS, plus everything it CARRIES — who opened it (and who
+   * opened them), and every origin it has left. See `TabRecord.carriedOrigins`
+   * for why those two are one set and why it only grows.
+   *
+   * Deliberately not on `TabInfo` — this is redaction scope, not something the
    * renderer or the agent has any business reading.
    */
   originScope(id: TabId): string[] {
     const rec = this.tabs.get(id);
     if (!rec) return [];
     const here = originOf(rec.view.webContents.getURL());
-    const out: string[] = [];
-    if (here) out.push(here);
-    if (rec.openerOrigin && rec.openerOrigin !== here) out.push(rec.openerOrigin);
+    const out = here ? [here] : [];
+    for (const o of rec.carriedOrigins) {
+      if (o !== here) out.push(o);
+    }
     return out;
   }
 
@@ -335,6 +370,31 @@ export class TabManager extends EventEmitter {
     wc.on('page-title-updated', () => this.emitChanged());
     wc.on('did-navigate', () => {
       // The document was replaced.
+      //
+      // REDACTION SCOPE FIRST, before anything downstream observes the tab.
+      // A page that already holds a credential can move it across an origin
+      // boundary the tab takes with it, in one line and with nothing leaving
+      // the machine:
+      //
+      //     location.href = 'http://any-third-party/inert.html#' + password
+      //
+      // The target need not be hostile, need not have script, and never
+      // receives the fragment — measured: the third-party server logged a
+      // request for `/inert.html` and nothing else. What moved was not the
+      // secret's location on the network, it was the secret's location relative
+      // to the REDACTOR, and `Snapshot.url` then carried it verbatim into the
+      // act result, the next snapshot and the tab listing
+      // (`docs/design/sink-closure-review-2.md` F-E).
+      //
+      // So the origin being LEFT joins this tab's carried set. Kept even if the
+      // tab later comes back or moves on again, for the same reason the opener
+      // scope is kept: coverage follows the value.
+      const now = originOf(wc.getURL());
+      if (rec.lastOrigin && rec.lastOrigin !== now) {
+        rec.carriedOrigins.add(rec.lastOrigin);
+      }
+      rec.lastOrigin = now;
+
       this.emit('navigated', rec.id);
       this.emit('document-navigated', rec.id);
       this.emitChanged();
@@ -348,18 +408,41 @@ export class TabManager extends EventEmitter {
     // A page asking to open a window gets a tab in the *same* container, so
     // popups cannot be used to escape into the default cookie jar.
     //
-    // The opener's origin rides along, and that is a redaction fix, not
+    // THE SCHEME IS CHECKED HERE AND NOT LEFT TO `normalizeUrl`, and that is a
+    // network finding rather than a tidiness one. `normalizeUrl` answers a
+    // disallowed scheme with `searchFor(s)` — `duckduckgo.com/?q=<the whole
+    // string>` — which is the right answer for a HUMAN typing "weather" into
+    // the address bar and a catastrophic one for a page choosing the bytes.
+    // Measured on the shipped build: a page running
+    //
+    //     window.open('mailto:nobody@example.invalid?subject=' + MARKER)
+    //
+    // produced a tab at `https://duckduckgo.com/?q=mailto%3A…%3FMARKER`, so
+    // Aperture put a page-chosen string on the network, to a third-party server
+    // the page never named. Substituting a filled credential for the marker is
+    // the same line. That matters most for the exact adversary the needles were
+    // built for — injected script on an otherwise-honest origin — because such
+    // an origin's own CSP (`connect-src 'self'`) can forbid its `fetch()` and
+    // cannot forbid this. The search affordance is for input the human or the
+    // agent typed; a page's `window.open` target is neither, and Chromium hands
+    // it to us already resolved and absolute, so nothing legitimate needs it.
+    //
+    // The opener's SCOPE rides along, and that is a redaction fix, not
     // bookkeeping. This handler creates AND ACTIVATES the new tab, so one line
     // of page script makes the agent's next unqualified `browser_snapshot`
     // read a page of the opener's choosing — and if that page is on a
     // different origin, origin-keyed needles alone would not cover it
     // (`docs/design/sink-closure-review.md` F-A; `engine.ts`, `OriginScope`).
+    // The whole scope rather than the opener's current origin, so the property
+    // is transitive: a two-hop chain used to break at the second hop, because
+    // hop 1's own origin holds no needles (sink-closure-review-2.md F-D).
     wc.setWindowOpenHandler(({ url }) => {
+      if (!isAllowedScheme(url)) return { action: 'deny' };
       this.create({
         url,
         container: rec.container,
         activate: true,
-        openerOrigin: originOf(wc.getURL()),
+        inherits: this.originScope(rec.id),
       });
       return { action: 'deny' };
     });

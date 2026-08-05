@@ -5,6 +5,7 @@ import { blockedCount } from '@privacy/blocker';
 import { vault } from '@vault/vault';
 import { openVaultWindow } from './vaultWindow.js';
 import { capturePage, routeCapture } from '../capture/capture.js';
+import { redactFreeText, redactUrl } from '@core/snapshot/engine.js';
 
 export interface IpcDeps {
   tabs: TabManager;
@@ -37,6 +38,29 @@ export function registerIpc(d: IpcDeps): void {
 
   handle('privacy:stats', () => ({ blocked: blockedCount() }));
 
+  // THE OTHER CALL SITE OF routeCapture, AND THE ONE NOBODY SCRUBBED.
+  //
+  // `browser_capture` (src/mcp/tools.ts) was hardened on 2026-08-05 because its
+  // caption and source URL LEAVE THE MACHINE: both are page-written
+  // (`document.title`, `history.replaceState`) and both are forwarded to Notion
+  // as the caption of the uploaded image, so a credential Aperture wrote into
+  // that page moments earlier is disclosed to a third party. `security.md` then
+  // recorded "Both fields are needle-scrubbed now."
+  //
+  // That sentence was false here. This is the human's toolbar button, it reaches
+  // the same `routeCapture` with the same two page-written strings, and it had
+  // no scrub of any kind. The agent cannot invoke it — but the agent does not
+  // need to: the skimmer writes `document.title = password` and waits for the
+  // human to file a screenshot, which is the one thing this button exists for.
+  //
+  // Same treatment as the agent path, and the same split: `redactUrl` for the
+  // URL because the browser percent-encodes what the page put in it,
+  // `redactFreeText` for the title because nothing encoded it.
+  //
+  // NOT given `browser_capture`'s agent-owned-tab refusal, deliberately: that
+  // rule exists to stop an INJECTED "capture tab t1" from screenshotting the
+  // human's bank tab, and a human pressing their own capture button on their own
+  // tab is the case the rule is carving out.
   handle('capture:page', async () => {
     const t = deps!.tabs;
     const id = t.active;
@@ -45,8 +69,8 @@ export function registerIpc(d: IpcDeps): void {
     const bytes = await capturePage(t.webContents(id));
     return routeCapture(bytes, {
       openUrls: t.list().map((tab) => tab.url),
-      title: info?.title,
-      sourceUrl: info?.url,
+      title: redactFreeText(id, info?.title ?? ''),
+      sourceUrl: redactUrl(id, info?.url ?? ''),
     });
   });
 

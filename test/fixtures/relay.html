@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Relay</title>
+  </head>
+  <body>
+    <h1>RELAYSINK relay</h1>
+
+    <!--
+      HOP 1 OF THE TWO-HOP OPENER CHAIN (G19m).
+
+      The property under test is that opener inheritance is TRANSITIVE.
+      `openerOrigin` recorded the opener's CURRENT ORIGIN, so coverage survived
+      exactly one hop:
+
+        filled 127.0.0.1  →  hop1 127.0.0.2   (covered: opener is the filled origin)
+                          →  hop2 localhost   (opener is 127.0.0.2, which holds
+                                               no needles — UNCOVERED)
+
+      Measured on the shipped build at 43440a1: hop2 came back
+      `page "HOP2 guard-pw-93a1" http://…/hop2.html?carried=guard-pw-93a1`
+      (docs/design/sink-closure-review-2.md F-D). Fixed by inheriting the
+      opener's whole SCOPE, which makes the property transitive by construction
+      rather than one-deep.
+
+      THREE DISTINCT ORIGINS, TWO HOST BINDINGS. hop2 is `localhost:8899`, which
+      is a different origin and a different registrable domain from
+      `127.0.0.1:8899` even though it resolves to the same server — the same
+      trick G20's `nav=` mode uses. So this leg needs no fixture host the guard
+      runbook does not already require.
+
+      Fragment only at both hops: nothing reaches any server, so this is not the
+      "that origin has already exfiltrated" case.
+    -->
+
+    <p id="t">(relaying)</p>
+
+    <script>
+      (() => {
+        const v = decodeURIComponent(location.hash.slice(1));
+        document.getElementById('t').textContent = 'RELAYSINK text ' + v;
+        document.title = 'RELAYSINK ' + v;
+        // carrier.html is hop 2 — it already copies whatever it is handed into
+        // every field the agent reads, which is exactly what hop 2 must do.
+        window.open('http://localhost:8899/carrier.html#' + encodeURIComponent(v), '_blank');
+      })();
+    </script>
+  </body>
+</html>

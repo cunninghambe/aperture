@@ -10,10 +10,12 @@ import {
 import { renderDiff, renderFull, renderUnchanged } from './render.js';
 import {
   REDACTED,
+  REDACTED_HREF,
   canonicalNeedle,
   collectTaintedValues,
   redactObserved,
   scrub,
+  scrubUrlish,
 } from './redact.js';
 import { VolatilityTracker } from './volatility.js';
 import type { Observation, RefEntry, Snapshot, SnapshotNode } from './types.js';
@@ -162,6 +164,13 @@ export function invalidate(tabId: string, documentReplaced: boolean): void {
     // document. Their lifetime is now the TTL and the vault lock, and
     // `docs/design/security.md` states that rather than implying an early drop
     // that a hostile page controls the timing of.
+    //
+    // KEEPING THE NEEDLES ALIVE IS ONLY HALF OF IT, and the other half is not
+    // in this file. Keeping them armed does nothing for a navigation that
+    // leaves the ORIGIN: the needles survive, and the tab is no longer scrubbed
+    // against them because its scope followed it. `src/main/tabs.ts` records
+    // the origin the tab is leaving on this same event, which is what makes
+    // coverage follow the value (`docs/design/sink-closure-review-2.md` F-E).
   }
 }
 
@@ -480,12 +489,24 @@ interface NeedleSet {
  * `everyNeedle` and `redactAcrossTabs` are gone; there is nothing left for
  * them to do.
  *
+ * ON "STRICTLY LESS", AND ON THE CLAIM THIS COMMENT USED TO MAKE. The first
+ * version of this argument said origin scope was strictly greater in coverage
+ * than the union at less over-redaction. That was false on the one surface the
+ * union actually lived on: the union scrubbed every line of `browser_tabs list`
+ * against every needle in the browser, and it would have caught a filled tab
+ * that had navigated ITSELF away, which origin-plus-opener did not (F-E). The
+ * two were INCOMPARABLE on that listing. They are comparable now — a tab's
+ * carried set includes the origins it has left, so the union has nothing left
+ * that this does not — and the sentence is only true because that hole was
+ * closed. Across every other surface origin scope was always vastly wider.
+ *
  * WHAT A TAB'S SCOPE IS is not this module's business — it needs the tab list,
  * and this module must not import one. `OriginScope` is injected once by
- * `src/main/index.ts` and answers it: the origin the tab is on now, plus the
- * origin of the page that OPENED it, captured at creation. The second half is
- * what covers a carrier on a foreign origin — the only carrier shape origin
- * keying would otherwise miss, and the one the old cross-tab union did cover.
+ * `src/main/index.ts` and answers it: the origin the tab is on now, plus every
+ * origin it CARRIES — who opened it (transitively, so a relay chain does not
+ * break at depth 2), and every origin it has navigated away from. The second
+ * part is the one that took two gates to get right, and the rule behind it is
+ * one sentence: **coverage follows the value, not the tab's present location.**
  */
 export interface OriginScope {
   /** Every origin whose filled values this tab's content could be carrying. */
@@ -608,28 +629,70 @@ function needlesFor(tabId: string): string[] {
 }
 
 /**
+ * Every string this tab could be asked to scrub against: the needles in its
+ * origin scope, plus the live values of fields Aperture wrote into it.
+ *
+ * The second half is why `browser_read` works at all: the retained tree holds
+ * the REDACTED copy, so a value that only ever appears in free text (a page
+ * echoing it into a div) would not be matchable from the tree alone.
+ */
+function scrubbablesFor(tabId: string): string[] {
+  const st = states.get(tabId);
+  const live = needlesFor(tabId);
+  if (!st?.last || st.tainted.size === 0) return live;
+  return [
+    ...live,
+    ...collectTaintedValues(st.last.root, st.tainted).filter((v) => v.length >= 4),
+  ];
+}
+
+/**
  * Values currently tainted in this tab, for redacting text that did not come
  * through the snapshot tree — `browser_read`, in particular, which reads
  * `innerText` directly and would otherwise bypass redaction entirely.
  *
- * `marker` exists for the URL-shaped callers: an href and a tab's URL are
- * rendered UNQUOTED and read as a single whitespace-free token, so they take
- * `REDACTED_HREF`. Passing the marker rather than having a second function is
- * what keeps `browser_tabs`'s two fields on one code path.
+ * NO `marker` PARAMETER, deliberately. It used to take one so that
+ * `browser_tabs`'s title and URL could share a code path, and that is exactly
+ * how the URL came to be scrubbed with the text scrubber: the caller picked the
+ * right marker and the wrong function, and nothing could tell it apart from a
+ * correct call. A URL now has its own function; there is no argument left to
+ * get wrong, and tsc rejects the old spelling rather than accepting it.
  */
-export function redactFreeText(tabId: string, s: string, marker = REDACTED): string {
-  const st = states.get(tabId);
-  const live = needlesFor(tabId);
-  if (!live.length && (!st || st.tainted.size === 0 || !st.last)) return s;
+export function redactFreeText(tabId: string, s: string): string {
+  const all = scrubbablesFor(tabId);
+  return all.length ? scrub(s, all, REDACTED) : s;
+}
 
-  let out = live.length ? scrub(s, live, marker) : s;
-  if (st?.last && st.tainted.size) {
-    for (const value of collectTaintedValues(st.last.root, st.tainted)) {
-      if (value.length < 4) continue;
-      out = out.split(value).join(marker);
-    }
-  }
-  return out;
+/**
+ * THE ONE TREATMENT FOR A URL. Every agent-facing or machine-leaving URL goes
+ * through here, and no call site chooses between this and `redactFreeText`.
+ *
+ * `scrubUrlish` was written for one sentence in its own header — *"a page that
+ * writes the value it holds straight into `a.href` gets `?pw=my%20pass` back
+ * out, and the needle is `my pass`"* — and was then wired to two of the five
+ * places that sentence applies: `Snapshot.url` and `SnapshotNode.href`. The
+ * other three used the plain scrub, which does not decode. Measured on the
+ * shipped build (`docs/design/sink-closure-review-2.md` F-C): one same-origin
+ * self-navigation with one `U+202D` inside the value put
+ * `?pw=guard-pw%E2%80%AD-93a1` into `browser_tabs list` and into
+ * `browser_navigate`'s `loaded …` line while the snapshot header — the surface
+ * that HAD `scrubUrlish` — came back clean.
+ *
+ * And the invisible character is not needed. Any password containing a space,
+ * `#`, `&`, `%`, `+`, a quote or any non-ASCII character is percent-encoded by
+ * the URL parser on those surfaces, so the plain scrub misses it with no
+ * adversarial construction at all. That is an ORDINARY user's password, not an
+ * attacker's.
+ *
+ * So the shape is a function rather than a marker argument: a call site cannot
+ * pick the wrong one by passing `REDACTED_HREF` to the text scrubber, because
+ * the two jobs are now two names. The marker is not a parameter here for the
+ * same reason — a URL is rendered UNQUOTED and read as one whitespace-free
+ * token wherever it appears.
+ */
+export function redactUrl(tabId: string, s: string): string {
+  const all = scrubbablesFor(tabId);
+  return all.length ? scrubUrlish(s, all, REDACTED_HREF) : s;
 }
 
 /**
