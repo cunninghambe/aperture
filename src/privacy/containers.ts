@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { session, type Session } from 'electron';
 import type { Container, ContainerId } from '@shared/types';
+import { safeDownloadName } from '@shared/download.js';
 import { buildUaProfile } from './useragent.js';
 
 /**
@@ -106,6 +107,30 @@ class ContainerRegistry {
 
     s.setPermissionCheckHandler((_wc, permission) => {
       return permission === 'fullscreen';
+    });
+
+    // THE DOWNLOAD ROW OF THE EGRESS CLASS — 2026-08-05, third gate.
+    //
+    // The class is "an affordance where a page-supplied string causes Aperture
+    // to act outside the page", and it is enumerable to exhaustion:
+    // `test/egress.test.ts` is the enumeration and fails when a new affordance
+    // appears. Downloads were its one unruled row — there was NO `will-download`
+    // handler anywhere in `src/`, so a page's `a.download = '…'` or a
+    // `Content-Disposition` name went straight into the save dialog and onto the
+    // disk as the default.
+    //
+    // The transfer itself is not the finding and is not blocked: the human's
+    // save dialog is the gate, it is the gate every browser uses, and a page
+    // that can start a download can already `fetch()` the same bytes. What is
+    // closed is the STRING — by the time the dialog is drawn, the name is
+    // Aperture's, with no path, no invisible characters and a bound.
+    // `safeDownloadName` is a pure leaf and argues the rest at its own header.
+    //
+    // Installed per SESSION rather than per webContents on purpose: a session is
+    // created once per container in `sessionFor`, so this cannot double-register
+    // as tabs come and go, and there is no tab whose download path this misses.
+    s.on('will-download', (_event, item) => {
+      item.setSaveDialogOptions({ defaultPath: safeDownloadName(item.getFilename()) });
     });
 
     // Strip the Electron/Chrome version skew from the UA. A stock Electron UA

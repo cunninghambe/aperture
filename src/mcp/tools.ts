@@ -1698,6 +1698,22 @@ export function registerBrowserTools(
 
   // -- autofill -------------------------------------------------------------
 
+  // THE SENTENCE THAT WAS FALSE, AND HOW — 2026-08-05, third gate.
+  //
+  // This description used to promise, of the sensitive fields, that "their
+  // values are never returned to you". It was measured returning them on four
+  // surfaces at once (F-F, `docs/design/sink-closure-review-3.md` §2): the
+  // same-tab snapshot, a link href, the page title and a carrier tab, plus the
+  // tab listing. The promise was about the TOOL — no tool here hands a
+  // sensitive value back — and it was written as though it were about the
+  // BROWSER, which is a much larger claim and one the profile path had none of
+  // the machinery to keep.
+  //
+  // Both halves are now stated separately and both are true: the tool does not
+  // return them, and a copy the page makes of one is redacted, because
+  // `registerNeedles` is finally called on this path. The general lesson is the
+  // one the gate kept using as a search strategy — read the fix's own sentences
+  // and ask where else they apply.
   server.registerTool(
     'browser_fill_form',
     {
@@ -1715,8 +1731,9 @@ export function registerBrowserTools(
         'Low-confidence matches are listed but NOT filled, because silently ' +
         'putting the wrong value in a field the human then submits is worse ' +
         'than leaving it blank. Sensitive fields (date of birth, national ID, ' +
-        'salary) show as "from profile" and their values are never returned ' +
-        'to you — the browser inserts them directly.\n\n' +
+        'salary) show as "from profile" — no tool here returns one, the ' +
+        'browser inserts them directly, and once inserted they read as ' +
+        `${REDACTED} in snapshots and page text.\n\n` +
         ENVELOPE_POINTER,
       inputSchema: z.object({
         action: z.enum(['plan', 'apply']).default('plan'),
@@ -1853,12 +1870,49 @@ export function registerBrowserTools(
       }));
       const fieldOf = new Map(toFill.map((e) => [e.key, e.field]));
 
-      // Mark sensitive targets BEFORE the fill, so there is no window in which
-      // a concurrent snapshot could read the value back out of the DOM.
+      // Arm the redaction BEFORE the fill, so there is no window in which a
+      // concurrent snapshot could read the value back out of the DOM.
+      //
+      // BOTH HALVES, AND THIS PATH HAD ONE — the fourteenth sink, F-F
+      // (`docs/design/sink-closure-review-3.md` §2). `registerNeedles` had
+      // exactly one call site, `vault_request_fill`, so three gates of machinery
+      // — origin-keyed needles, `carriedOrigins`, `redactUrl`, the walk-time
+      // alphabet — protected credentials and nothing else. Everything here hangs
+      // off a store this path never wrote to, so:
+      //
+      //   · `redactObserved`'s NEEDLE branch never ran — it is gated on
+      //     `needles.length` — and that is the branch covering every COPY a page
+      //     makes of a value.
+      //   · the TAINT branch masks only the fields Aperture wrote into, and
+      //     `invalidate(documentReplaced = true)` clears it, so the seventh
+      //     sink's shape (navigation as the off switch) was open here.
+      //
+      // Measured on the shipped build with `dateOfBirth = 1980-01-01`: the
+      // same-tab snapshot, the link href, the page title, a carrier tab opened
+      // by one line of page script, and the tab listing all returned it
+      // verbatim. That is sink 1, the `c375415` href finding, F1, F-A and F2 —
+      // the first five findings of the whole programme — re-opened against the
+      // class of data this product treats as MORE sensitive than a password: it
+      // refuses to show these values in a plan at all.
+      //
+      // ONLY THE SENSITIVE ONES. A needle for `Melbourne` or `Brad` would redact
+      // the web, and the plan already prints the open values to the agent in
+      // clear — they are not secrets, they are defaults the human is being asked
+      // to confirm. `registrableNeedle` in `redact.ts` — the length bar and the
+      // raised bar for all-digit values — is the second filter, not this one.
+      //
+      // `pageOrigin` is the same fact the credential path keys on: the committed
+      // origin the human approved and the preload re-checks in the same task as
+      // the write.
+      const sensitive = toFill.filter((e) => e.sensitive);
+      const needleValues = sensitive
+        .map((e) => profile.values[e.field] ?? '')
+        .filter(Boolean);
       markTainted(
         id,
-        toFill.filter((e) => e.sensitive).map((e) => e.key),
+        sensitive.map((e) => e.key),
       );
+      registerNeedles(pageOrigin, needleValues);
 
       // NOT atomic: a profile fill of seven fields where one is disabled should
       // still fill the other six and say which one it skipped. A credential
@@ -1870,11 +1924,36 @@ export function registerBrowserTools(
       });
 
       if (!res.ok) {
+        if (res.reason === 'timeout') {
+          // Not a refusal: the page never answered, so whether anything landed
+          // is genuinely unknown and the taint and needles must stay.
+          return text(
+            'fill unconfirmed: the page did not answer within 5s. Call ' +
+              'browser_snapshot and look at the form.',
+          );
+        }
+        // A refusal decided BEFORE the write pass began wrote nothing, so the
+        // needles come back off — the same asymmetry the credential path takes
+        // and for the same reason. `wrote` present at all means the refusal
+        // arrived mid-write and values may be in the form, in which case they
+        // stay. Taint is left alone: it is keyed on elements Aperture may have
+        // touched and costs nothing but a mask on those fields.
+        //
+        // ONE RESIDUAL, AND IT IS WIDER HERE THAN ON THE CREDENTIAL PATH.
+        // `dropNeedles` removes by VALUE, so if the same value were registered
+        // by an earlier SUCCESSFUL fill on this origin and a later fill of it
+        // were then refused, this drops the needle for both. `vault_request_fill`
+        // is protected from that by `ALREADY_FILLED`, which answers before a
+        // second apply ever reaches the write; `browser_fill_form` has no such
+        // gate, so reaching it needs `overwrite: true` plus a page that becomes
+        // unfillable between the two calls. The value stays covered by TAINT in
+        // that window — the field Aperture wrote is still masked — and what is
+        // lost is coverage of a COPY. Recorded rather than engineered around:
+        // keeping needles for a fill that provably wrote nothing is the
+        // over-redaction R4 is about, and it is the more common case by far.
+        if (!res.wrote) dropNeedles(pageOrigin, needleValues);
         return text(
-          res.reason === 'timeout'
-            ? 'fill unconfirmed: the page did not answer within 5s. Call ' +
-                'browser_snapshot and look at the form.'
-            : `fill refused: ${denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin })}`,
+          `fill refused: ${denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin })}`,
         );
       }
 

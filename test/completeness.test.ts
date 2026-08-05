@@ -6,6 +6,7 @@ import {
   REDACTED_HREF,
   canonicalNeedle,
   redactObserved,
+  registrableNeedle,
   scrubUrlish,
 } from '../src/core/snapshot/redact.js';
 import { renderFull } from '../src/core/snapshot/render.js';
@@ -743,7 +744,12 @@ describe('every field ruled a redaction sink is actually redacted', () => {
     // one token. Getting this wrong would not leak, but it would break every
     // reader of the header line, which is a different kind of bug in the same
     // place.
-    expect(rendered).toContain('(filled,value-withheld)');
+    // The CONSTANT, not a copy of its current spelling. The marker's wording
+    // changed once already — it used to assert a provenance it cannot know off
+    // the filled origin (`redact.ts`, `REDACTED`) — and a test holding a stale
+    // literal would then fail for a reason that has nothing to do with what it
+    // measures.
+    expect(rendered).toContain(REDACTED_HREF);
   });
 
   it('the fields ruled never-emitted really are absent from the rendered text', () => {
@@ -769,9 +775,9 @@ describe('every field ruled a redaction sink is actually redacted', () => {
     const s = planted();
     s.root.value = 'hunter2-the-real-value';
     redactObserved(s, new Set([s.root.key]), []);
-    expect(s.root.value).toBe('(filled, value withheld)');
-    expect(s.root.name).toBe('(filled, value withheld)');
-    expect(s.root.text).toBe('(filled, value withheld)');
+    expect(s.root.value).toBe(REDACTED);
+    expect(s.root.name).toBe(REDACTED);
+    expect(s.root.text).toBe(REDACTED);
   });
 
   it('a needle the renderer would have re-joined is matched — F-B, at unit level', () => {
@@ -952,5 +958,69 @@ describe('the excluded fields stay excluded', () => {
     // bought with false positives, because a diff that fires on nothing is a
     // diff the agent learns to discount.
     expect(propDelta(base({ rows: [['a', 'b']], href: '/x' }), base({ rows: [['a', 'b']], href: '/x' }))).toBeNull();
+  });
+});
+
+// -- which values are worth a needle at all ----------------------------------
+
+/**
+ * R4, the over-redaction the third gate measured as a CORRECTNESS problem
+ * rather than a cosmetic one (`docs/design/sink-closure-review-3.md` §3).
+ *
+ * `registrableNeedle` is the rule and it is in the pure leaf, so this executes
+ * the shipped predicate rather than a copy of it — the same property that lets
+ * this file run `redactObserved`.
+ */
+describe('which values are worth a needle', () => {
+  it('refuses an all-digit value short enough to collide with a page', () => {
+    // The measured case: a six-digit one-time code, filled on one origin,
+    // rewrote a legitimate order number on an unrelated origin the same tab
+    // later visited. A million spellings is not enough for a string that has to
+    // survive ten minutes of ordinary pages full of order numbers and prices.
+    expect(registrableNeedle('377350')).toBe(false);
+    expect(registrableNeedle('12345678')).toBe(false);
+  });
+
+  it('accepts an all-digit value long enough not to', () => {
+    expect(registrableNeedle('123456789')).toBe(true);
+    expect(registrableNeedle('4111111111111111')).toBe(true);
+  });
+
+  it('still refuses anything under six characters, digits or not', () => {
+    // Unchanged, and it is the older half of the rule: a four-character needle
+    // redacts the web.
+    expect(registrableNeedle('abc')).toBe(false);
+    expect(registrableNeedle('12345')).toBe(false);
+    expect(registrableNeedle('')).toBe(false);
+  });
+
+  it('accepts an ordinary six-character password — the digit bar is not a length bar', () => {
+    // The non-vacuity half. A rule that refused everything would pass every
+    // assertion above and silently turn the whole mechanism off.
+    expect(registrableNeedle('hunter2')).toBe(true);
+    expect(registrableNeedle('guard-pw-93a1')).toBe(true);
+    expect(registrableNeedle('1980-01-01')).toBe(true);
+    expect(registrableNeedle('a1b2c3')).toBe(true);
+  });
+});
+
+// -- what the marker asserts -------------------------------------------------
+
+describe('the marker claims a match, not a location', () => {
+  it('does not say the value was filled here', () => {
+    // It used to read `(filled, value withheld)`, which is not a statement
+    // about redaction — it is a statement about PROVENANCE, and off the filled
+    // origin it can be false. The third gate measured it being false: a
+    // legitimate order number on an unrelated origin was labelled as a value
+    // Aperture had filled there. A missing value is a gap; a false claim is
+    // something the agent may act on.
+    for (const m of [REDACTED, REDACTED_HREF]) {
+      expect(m).not.toMatch(/^\(filled/);
+      expect(m).toContain('withheld');
+    }
+  });
+
+  it('the URL form carries no whitespace, because that line is one token', () => {
+    expect(REDACTED_HREF).not.toMatch(/\s/);
   });
 });

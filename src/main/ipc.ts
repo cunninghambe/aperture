@@ -68,7 +68,27 @@ export function registerIpc(d: IpcDeps): void {
     const info = t.info(id);
     const bytes = await capturePage(t.webContents(id));
     return routeCapture(bytes, {
-      openUrls: t.list().map((tab) => tab.url),
+      // THE THIRD PAGE-INFLUENCED ARGUMENT, AND THE ONE THE RECONCILIATION
+      // MISSED — 2026-08-05, third gate (F-G).
+      //
+      // Sink 10's lesson was "`routeCapture` has two call sites and one was
+      // hardened", and the reconciliation covered `title` and `sourceUrl`. It
+      // did not cover this one, which is the argument that picks WHERE THE
+      // SCREENSHOT GOES. `routeCapture` appends to the FIRST tab whose URL
+      // yields a Notion page id, so passing every open tab let whichever tab
+      // got there first choose the destination — and a page can create a tab:
+      // `window.open('https://www.notion.so/<id>')` produces one and it appears
+      // in `t.list()`. Measured, with `pageIdFromUrl` run against the shipped
+      // function.
+      //
+      // Bounded, and not overstated: the upload uses the human's own Notion
+      // token, so the page must name a page that token can already write, which
+      // in practice means one inside the human's own workspace. The realistic
+      // impact is a screenshot MISFILED at a page of the page's choosing, not
+      // exfiltration to a third party. It is fixed anyway, because the fix is
+      // to pass the same argument the agent path passes and the alternative is
+      // to keep arguing about blast radius on a line nobody needs.
+      openUrls: [info?.url ?? ''],
       title: redactFreeText(id, info?.title ?? ''),
       sourceUrl: redactUrl(id, info?.url ?? ''),
     });

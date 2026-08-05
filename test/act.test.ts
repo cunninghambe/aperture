@@ -98,7 +98,17 @@ vi.mock('@core/snapshot/engine.js', () => ({
   // alongside it and is gone — needles are keyed by origin now, so there is no
   // cross-tab entry point left to stub (`engine.ts`, `OriginScope`).
   redactFreeText: (_tabId: string, s: string, _marker?: string) => s,
-  REDACTED_HREF: '(filled,value-withheld)',
+  // Both markers, because `browser_fill_form`'s description interpolates the
+  // text one — a tool description is built at REGISTRATION time, so a marker
+  // missing from this stub is a module-load crash rather than a failed
+  // assertion, which is how this line came to be added.
+  //
+  // Stubbed literals are copies of constants whose wording has already changed
+  // once (`redact.ts`, `REDACTED`: it used to assert a provenance it cannot know
+  // off the filled origin). Nothing in this file asserts on their VALUE, so the
+  // copy is inert rather than a second source of truth.
+  REDACTED: '(withheld: matches a filled value)',
+  REDACTED_HREF: '(withheld:matches-a-filled-value)',
   requestRead: vi.fn(),
   taintedValues: () => [],
   requestFill: vi.fn(),

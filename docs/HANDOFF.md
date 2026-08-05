@@ -368,6 +368,23 @@ restart Aperture, then run the guards; the credential guards additionally need
 fixtures on **127.0.0.1:8899 and 127.0.0.2:8899**, with `localhost:8899`
 reaching the same server (it is a third *origin*, not a third binding).
 
+**The `allow` phase needs `--seed-profile` as well as `--seed-vault`** since
+2026-08-05:
+
+```bash
+npx electron . --seed-vault --seed-profile \
+  --e2e-consent=allow --e2e-consent-delay-ms=1500 > /tmp/ap.log 2>&1 &
+```
+
+The G30 block exercises the **profile** fill path, which had none of the
+credential path's redaction machinery wired to it for three gates
+(`docs/design/sink-closure-review-3.md` F-F). `G30-seed` fails loudly when the
+flag is missing, so a forgotten flag reads as a RED rather than as a block of
+passes against an empty form. Note also that the vault's idle auto-lock is five
+minutes and is not reset by a dev-auto consent, so the credential guards have to
+finish inside that window — a fresh Aperture per run, which is the recommendation
+anyway.
+
 The scored suites own their whole world — each refuses to start if 8817 is in
 use, then starts its own Aperture, a `no-store` fixture server, the witness
 collector and the MCP proxy, and tears all of it down on exit:

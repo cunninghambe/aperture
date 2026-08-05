@@ -45,7 +45,7 @@ import { stripFormat } from './text.js';
  * property of the product. It is neither, on its own, and an independent gate
  * measured two complete bypasses of it on the build that first shipped it
  * (`docs/design/sink-closure-review.md`, F-A and F-B). Both are fixed; the
- * honest statement of the rule now carries its three qualifiers, because every
+ * honest statement of the rule now carries its four qualifiers, because every
  * one of them was a leak before it was a qualifier:
  *
  *   1. **SCOPE.** This function scrubs against the needles it is HANDED. It
@@ -67,6 +67,14 @@ import { stripFormat } from './text.js';
  *      The line this file draws: transformations APERTURE performs between the
  *      value and the model are matched through (2, and `scrubUrlish`);
  *      transformations the PAGE performs are the documented residual.
+ *   4. **COVERAGE.** This function scrubs against values somebody REGISTERED,
+ *      and for three gates only one call site did — the credential path. The
+ *      profile path wrote a date of birth into a page with the needle branch
+ *      unarmed, so every copy of it went out verbatim (F-F,
+ *      `docs/design/sink-closure-review-3.md`). Like scope, this is not a bug
+ *      that can be caught in this file: nothing here can tell an empty needle
+ *      list from a value nobody registered. `test/fillpaths.test.ts` is where it
+ *      is caught, by enumerating every call site of the fill funnel.
  *
  * This file imports one type and one function, and the function comes from the
  * other pure leaf (`text.ts`, which imports nothing at all). That is deliberate
@@ -74,8 +82,32 @@ import { stripFormat } from './text.js';
  * executes the shipped redactor rather than a copy of it.
  */
 
-/** The one marker, defined once. `tools.ts` imports it rather than repeating it. */
-export const REDACTED = '(filled, value withheld)';
+/**
+ * The one marker, defined once. `tools.ts` imports it rather than repeating it.
+ *
+ * WHAT THIS SENTENCE ASSERTS, AND WHAT IT USED TO ASSERT FALSELY — 2026-08-05,
+ * third gate. It read `(filled, value withheld)`, which is not a statement
+ * about redaction at all; it is a statement about PROVENANCE — *Aperture filled
+ * this value into this place*. On the origin that was filled that is true. Off
+ * it, it can be false, and the third gate measured it being false: a six-digit
+ * one-time code filled on one origin turned a legitimate order number on an
+ * unrelated origin into `(filled, value withheld)`, so the agent was told a
+ * credential sat in that table cell. **That is worse than a missing value,
+ * because it is a claim the agent may act on.**
+ *
+ * A needle is a substring match against a value Aperture filled SOMEWHERE in
+ * this tab's origin scope (`engine.ts`, `OriginScope`) — the tab's current
+ * origin, the origins it has left, and the scope of whoever opened it. Scope
+ * that wide is what closes F-A, F-D and F-E, and it is exactly why the marker
+ * cannot claim the value belongs here. So the marker now says what is true on
+ * every surface: *something here matched a value Aperture filled*. It asserts a
+ * MATCH, not a location, and it no longer tells the agent whose value it is.
+ *
+ * The word `withheld` is load-bearing in the other direction and is kept: the
+ * agent must read this as Aperture removing text, not as the page's own
+ * content, or it will treat the string as data and try to use it.
+ */
+export const REDACTED = '(withheld: matches a filled value)';
 
 /**
  * The same words, with no whitespace, for the fields that are rendered
@@ -85,7 +117,7 @@ export const REDACTED = '(filled, value withheld)';
  * so that every reader of those lines — `render.ts`'s format and the bench
  * stream reader alike — can take them as one whitespace-free token.
  */
-export const REDACTED_HREF = '(filled,value-withheld)';
+export const REDACTED_HREF = '(withheld:matches-a-filled-value)';
 
 export function scrub(s: string, needles: string[], marker = REDACTED): string {
   let out = s;
@@ -198,6 +230,59 @@ function decodings(s: string): string[] {
  */
 export function canonicalNeedle(v: string): string {
   return v.replace(/\s+/g, ' ').trim();
+}
+
+/** Values too short to register. A four-character needle redacts the web. */
+const MIN_NEEDLE_LENGTH = 6;
+
+/**
+ * The same bar, raised for an ALL-DIGIT value — 2026-08-05, third gate.
+ *
+ * `MIN_NEEDLE_LENGTH` is about the size of the alphabet the needle is drawn
+ * from, and it silently assumed that alphabet was a password's. A six-character
+ * value drawn from `[0-9]` has a million spellings rather than a hundred
+ * billion, and digits are the single most common thing on an ordinary page:
+ * order numbers, prices, quantities, postcodes, timestamps, references.
+ *
+ * Nine is where an all-digit string stops colliding with ordinary page content
+ * at a rate that makes the marker a LIE more often than a protection — and the
+ * marker is a claim the agent may act on, which is why the third gate raised
+ * this as a correctness problem rather than a cosmetic one.
+ */
+const MIN_DIGIT_NEEDLE_LENGTH = 9;
+
+/**
+ * Is this value worth a needle?
+ *
+ * A PURE PREDICATE, in the pure leaf, so the suite executes the shipped rule
+ * rather than a copy of it — the same reason `redactObserved` lives here. It is
+ * policy about redaction, not bookkeeping about the store, and `engine.ts`'s
+ * `registerNeedles` is its one caller.
+ *
+ * THE MEASURED CASE, and the reason the digit rule exists. A six-digit one-time
+ * code was filled on one origin; the same tab then visited an unrelated origin
+ * whose legitimate content contained that string, and the agent was shown
+ * `"ORDER-B" | "(withheld: matches a filled value)"` while the same page in a
+ * tab with no carried scope read `"377350"`. Precise rather than blanket — the
+ * neighbouring order numbers survived — and still wrong in the way that costs
+ * most: the same URL read differently in two tabs, with nothing in the output
+ * saying so.
+ *
+ * WHAT IS NOT LOST BY EXCLUDING IT. A one-time code is single-use,
+ * replay-blocked (`lastIssued`) and live for about thirty seconds, while a
+ * needle costs ten minutes of false positives across every origin the tab
+ * afterwards visits. It stays covered by the TAINT branch, which is keyed on the
+ * ELEMENT rather than the value and therefore has no false positives at all;
+ * G26a-blind measures exactly that and is not allowed to go red.
+ *
+ * WHAT IS LOST, stated because it is real: a sensitive profile value that is all
+ * digits and shorter than nine — a short account number — gets taint coverage
+ * and no needle, so a COPY the page makes of it is not scrubbed.
+ */
+export function registrableNeedle(v: string): boolean {
+  if (v.length < MIN_NEEDLE_LENGTH) return false;
+  if (/^\d+$/.test(v) && v.length < MIN_DIGIT_NEEDLE_LENGTH) return false;
+  return true;
 }
 
 /**

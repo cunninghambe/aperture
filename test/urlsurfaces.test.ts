@@ -70,12 +70,24 @@ const SOURCES = filesUnder(join(ROOT, 'src'), '.ts').map((path) => ({
 })).map((f) => ({ ...f, code: code(f.text) }));
 
 describe('every URL that leaves this process goes through the URL scrubber', () => {
-  it('every routeCapture call site scrubs BOTH the caption and the source URL', () => {
+  it('every routeCapture call site treats ALL THREE page-influenced arguments', () => {
     // The caption and the source URL are forwarded to Notion, so this is the
     // one surface in the codebase where a page-written string leaves the
     // MACHINE rather than merely entering the model's context. There are two
     // call sites — the agent's `browser_capture` and the human's toolbar
     // button — and for one commit only the first was scrubbed.
+    //
+    // THE THIRD ARGUMENT, ADDED 2026-08-05 (third gate, F-G) — and the reason
+    // it was missing is the reason this file exists. Sink 10's lesson was
+    // "`routeCapture` has two call sites and one was hardened". The
+    // reconciliation covered `title` and `sourceUrl`, and this guard was written
+    // in the same pass to stop the recurrence — enumerating both call sites and
+    // asserting on TWO of the three page-influenced arguments. `openUrls` picks
+    // WHERE THE SCREENSHOT GOES: `routeCapture` appends to the first tab whose
+    // URL yields a Notion page id, so the human path's `t.list().map(…)` let
+    // whichever tab got there first choose the destination, and a page can
+    // create a tab. A guard that reconciles two of three arguments is the same
+    // mistake it is guarding against, one level up.
     const sites = SOURCES.filter(
       (f) => /routeCapture\(/.test(f.code) && !/export async function routeCapture/.test(f.code),
     );
@@ -86,6 +98,7 @@ describe('every URL that leaves this process goes through the URL scrubber', () 
       const opts = /routeCapture\([\s\S]*?\n\s*\}\)/.exec(f.code)?.[0] ?? '';
       const title = /title:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
       const sourceUrl = /sourceUrl:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
+      const openUrls = /openUrls:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
 
       expect(title, `${f.rel}: the Notion caption must be needle-scrubbed`).toMatch(
         /redactFreeText\(/,
@@ -95,6 +108,22 @@ describe('every URL that leaves this process goes through the URL scrubber', () 
         `${f.rel}: the source URL must go through redactUrl, not the text scrub — ` +
           'the browser percent-encodes whatever the page put in it',
       ).toMatch(/redactUrl\(/);
+
+      // The destination is a ONE-ELEMENT array literal, and it is not built by
+      // walking a collection. Both halves are needed: `[a, b]` and
+      // `t.list().map(…)` are the two spellings of "let something other than the
+      // active tab choose", and only the second is what shipped.
+      expect(
+        openUrls,
+        `${f.rel}: the capture destination must come from the ACTIVE TAB ONLY. ` +
+          'routeCapture takes the FIRST tab whose URL yields a Notion page id, ' +
+          'so any wider list hands the destination to whichever tab got there ' +
+          'first — and a page can open one (F-G).',
+      ).toMatch(/^\s*\[[^,\]]*\]\s*,?\s*$/);
+      expect(
+        openUrls,
+        `${f.rel}: the destination must not be derived from the tab list`,
+      ).not.toMatch(/\.list\(|\.map\(/);
     }
   });
 

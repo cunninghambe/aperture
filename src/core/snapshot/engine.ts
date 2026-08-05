@@ -14,6 +14,7 @@ import {
   canonicalNeedle,
   collectTaintedValues,
   redactObserved,
+  registrableNeedle,
   scrub,
   scrubUrlish,
 } from './redact.js';
@@ -437,7 +438,12 @@ export { REDACTED, REDACTED_HREF } from './redact.js';
 // exists for profile secrets is structurally blind to vault secrets, which is
 // the row docs/design/security.md marks "designed, not yet implemented".
 //
-// So credential fills register their values directly, here, in main.
+// So credential fills register their values directly, here, in main. **And
+// profile fills do too, since 2026-08-05** — `registerNeedles` had exactly one
+// call site for three gates, so every mechanism built on this store protected
+// passwords and left a date of birth to be copied out of the page verbatim
+// (F-F, `docs/design/sink-closure-review-3.md` §2). `test/fillpaths.test.ts` is
+// what stops a third path shipping the same way.
 //
 // Three honest statements, none of which is hedging:
 //
@@ -451,10 +457,19 @@ export { REDACTED, REDACTED_HREF } from './redact.js';
 //     reversed, base64'd, or one character per element is not caught by
 //     substring matching and cannot be. This is a mitigation against a careless
 //     or late-compromised origin, not a boundary.
-//   * A six-digit one-time code will over-redact: an unrelated `123456` on the
-//     page becomes the marker. Over-redaction is cosmetic; under-redaction is a
-//     disclosure. Values shorter than six characters are not registered at all,
-//     and the FIELD is still tainted either way.
+//   * It over-redacts, and "over-redaction is cosmetic" was too easy. This
+//     comment used to say a six-digit one-time code would turn an unrelated
+//     `123456` into the marker and that this was cosmetic. The third gate
+//     measured it and it is not: the same URL then reads differently in two
+//     tabs with nothing in the output saying so, and the marker asserts a claim
+//     the agent may act on. Two things changed rather than one — an all-digit
+//     value now needs nine characters (`registrableNeedle`, `redact.ts`), and
+//     the marker no longer claims the value was filled HERE. What remains is
+//     genuinely cosmetic and is stated as the residual it is.
+//   * It is bounded by a TTL and by nothing else. `carriedOrigins` makes the
+//     blast radius follow the tab across origins for those ten minutes, which
+//     is what closes F-E — the cost is real and it is the trade this module
+//     takes everywhere.
 // ---------------------------------------------------------------------------
 
 interface NeedleSet {
@@ -525,8 +540,13 @@ export function setOriginScope(scope: OriginScope): void {
 const needles = new Map<string, NeedleSet>();
 const NEEDLE_TTL_MS = 10 * 60 * 1000;
 
-/** Values too short to register. A four-character needle redacts the web. */
-const MIN_NEEDLE_LENGTH = 6;
+// WHICH VALUES ARE WORTH A NEEDLE is `registrableNeedle`, in `redact.ts`.
+//
+// It lives in the pure leaf rather than here so the suite can execute the
+// shipped rule instead of a copy of it — the same reason `redactObserved` is
+// there — and because it is redaction POLICY (how wide a net is worth casting)
+// rather than bookkeeping about this store. It carries the length bar and the
+// raised bar for all-digit values, and argues both at its own header.
 
 /**
  * The forms of one filled value that have to be searched for.
@@ -555,7 +575,7 @@ function needleForms(v: string): string[] {
 export function registerNeedles(origin: string, values: string[]): void {
   if (!origin) return;
   const usable = values
-    .filter((v) => v.length >= MIN_NEEDLE_LENGTH)
+    .filter(registrableNeedle)
     .flatMap(needleForms);
   if (!usable.length) return;
 
@@ -608,6 +628,30 @@ function clearNeedles(origin: string): void {
 export function clearAllNeedles(): void {
   for (const n of needles.values()) clearTimeout(n.timer);
   needles.clear();
+}
+
+/**
+ * Does this origin hold any live needle right now?
+ *
+ * The one question `TabManager.originScope` needs and cannot answer: a tab's
+ * carried set is bookkeeping about where the tab has BEEN, and whether any of
+ * those origins still matters is a fact about this store. Exported as a
+ * BOOLEAN — a caller can learn that an origin is worth scrubbing against and
+ * cannot obtain a single byte of what it holds, which is the same line
+ * `needlesFor` draws by not being exported at all.
+ *
+ * Safe to prune on, and the reason is a fact about WHEN an origin joins a
+ * carried set: at the moment the tab leaves it, or at the moment the tab is
+ * created by an opener that was already there. A value registered AFTER that
+ * moment cannot be in this tab's content — the tab's document was replaced on
+ * the way out, and Aperture hands a page no window handle to write through
+ * (`setWindowOpenHandler` denies and creates the tab itself). So an origin with
+ * no live needles is not merely contributing nothing now; it cannot begin to
+ * contribute later. If the tab navigates back, the origin is its CURRENT one
+ * and enters scope that way instead.
+ */
+export function hasNeedles(origin: string): boolean {
+  return (needles.get(origin)?.values.size ?? 0) > 0;
 }
 
 /**

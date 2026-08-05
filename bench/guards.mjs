@@ -22,9 +22,16 @@
  * and its setting is a property of the LAUNCH, not of a call. So the credential
  * guards are split by which launch they need:
  *
- *   --phase=allow (default) — Aperture launched `--seed-vault --e2e-consent=allow
- *                             --e2e-consent-delay-ms=1500`. Runs G1-G15 and
- *                             G16-G27a.
+ *   --phase=allow (default) — Aperture launched `--seed-vault --seed-profile
+ *                             --e2e-consent=allow --e2e-consent-delay-ms=1500`.
+ *                             Runs G1-G15, G16-G27a, and G30-G31.
+ *                             `--seed-profile` is not optional since 2026-08-05:
+ *                             the G30 block exercises the PROFILE fill path,
+ *                             which had none of the credential path's redaction
+ *                             machinery wired to it for three gates (F-F).
+ *                             G30-seed fails loudly when the flag is missing, so
+ *                             a forgotten flag reads as a RED rather than as a
+ *                             block of vacuous passes.
  *   --phase=deny            — Aperture launched `--seed-vault --e2e-consent=deny`.
  *                             Runs G27b only.
  *   --phase=none            — Aperture launched `--seed-vault` and NOTHING else.
@@ -295,6 +302,20 @@ const BASE_LOCALHOST = BASE.replace('127.0.0.1', 'localhost');
 /** Seeded by `--seed-vault`. Known here so the guard can assert ABSENCE. */
 const SEEDED_PW = 'guard-pw-93a1';
 const SEEDED_TOTP_SEED = 'JBSWY3DPEHPK3PXP';
+/** The same record's username. Registered as a needle like every other filled
+ *  value, which is what makes it G31's control: it must STILL be redacted on
+ *  the page where the six-digit code must not be. */
+const SEEDED_USER = 'guard@example.com';
+
+/**
+ * Seeded by `--seed-profile` — the demo profile's `dateOfBirth`.
+ *
+ * The G30 block asserts its ABSENCE on the profile path's surfaces, exactly as
+ * SEEDED_PW is asserted absent on the credential path's. It is the class of
+ * value this product treats as MORE sensitive than a password: it refuses to
+ * print one in a plan at all, answering `(from profile — value not shown)`.
+ */
+const SEEDED_DOB = '1980-01-01';
 
 /** The one-time code, computed here, so G19 can look for it and not find it. */
 function totpAt(counter) {
@@ -410,7 +431,11 @@ const SAYS = {
   TOTP_ALREADY_ISSUED: 'already inserted in the current 30-second window',
   FILL_REVERTED: 'the page did not keep them',
   FILL_INTERRUPTED: 'changed the sign-in form while Aperture was filling it',
-  FILLED: 'value withheld',
+  // The marker's wording changed on 2026-08-05 (third gate): it used to say
+  // `(filled, value withheld)`, which asserts a PROVENANCE the mechanism cannot
+  // know off the filled origin. `redact.ts` argues it; this is the substring the
+  // fill-success prose carries now.
+  FILLED: 'matches a filled value',
 };
 
 if (PHASE !== 'allow') {
@@ -1120,10 +1145,10 @@ const beta = refFor('Beta action', 'button');
       check(
         'G19',
         'a filled credential cannot be read back, even once the page echoes it into visible text',
-        clean && /value withheld/.test(read),
+        clean && /matches a filled value/.test(read),
         `snapshot carries the password: ${after.includes(SEEDED_PW)}; ` +
           `browser_read carries it: ${read.includes(SEEDED_PW)}; ` +
-          `marker present in read: ${/value withheld/.test(read)}`,
+          `marker present in read: ${/matches a filled value/.test(read)}`,
       );
 
       // --- G19b: the href sink, named and asserted on its own ---------------
@@ -1147,7 +1172,7 @@ const beta = refFor('Beta action', 'button');
         'G19b',
         'the same credential does not escape through a link href, which browser_read cannot see at all',
         leakLine !== '' && !leakLine.includes(SEEDED_PW) &&
-          leakLine.includes('/leak?pw=') && /value-withheld/.test(leakLine),
+          leakLine.includes('/leak?pw=') && /matches-a-filled-value/.test(leakLine),
         `link line: ${leakLine.trim().slice(0, 160) || '(no line carrying the echoed link)'}`,
       );
 
@@ -1799,6 +1824,264 @@ const beta = refFor('Beta action', 'button');
       /submits:1/.test(w) && /submitted-values-match:true/.test(w) &&
         out.includes(SAYS.FILLED),
       `reply: ${out.split('\n').slice(0, 2).join(' ').slice(0, 200)}\n        witness: ${w}`,
+    );
+  }
+
+  // ==========================================================================
+  // G30: THE PROFILE PATH — the same sinks, the other fill path
+  // ==========================================================================
+  //
+  // THE FOURTEENTH FINDING, AND IT IS THE FIRST ONE AGAIN. `registerNeedles`
+  // had exactly ONE call site for three gates — `vault_request_fill` — so every
+  // mechanism above (origin-keyed needles, `carriedOrigins`, `redactUrl`, the
+  // walk-time alphabet) protected credentials and nothing else.
+  // `browser_fill_form` called `markTainted` alone, which masks the FIELDS
+  // Aperture wrote into and no copy of them, and which a document-replacing
+  // navigation clears. So the third gate pointed sink 1 — "copy the value into a
+  // div and have the agent read it", the first attack of the whole programme —
+  // at a filled `dateOfBirth` and it walked out through the same-tab snapshot,
+  // a link href, the page title, a carrier tab and the tab listing
+  // (docs/design/sink-closure-review-3.md §2).
+  //
+  // These legs are DELIBERATELY the credential legs re-pointed, one for one:
+  //
+  //   G30a ← G19  + G19c   the echoed value, the read, and the header line
+  //   G30b ← G19b          the href, which browser_read cannot see at all
+  //   G30c ← G19d + G19f   the carrier tab: the listing AND the direct read
+  //   G30d ← G19i          the same carrier on a FOREIGN origin
+  //   G30e ← G19h          the document-replacing self-navigation
+  //
+  // If these needed new shapes, the parity claim would be about something other
+  // than parity. What stops a THIRD fill path shipping uncovered is not here at
+  // all — it is `test/fillpaths.test.ts`, which enumerates every `requestFill`
+  // call site and requires each to arm both halves. These legs prove the
+  // instance; that file guards the mechanism.
+  //
+  // Needs `--seed-profile` on the launch. G30-seed fails loudly rather than
+  // letting the rest pass vacuously on an empty form.
+  {
+    await goFixture(BASE, 'profile.html');
+    const planned = await call('browser_fill_form', { action: 'plan' });
+    check(
+      'G30-seed',
+      'the dev-seeded profile is reachable, so the profile guards test something',
+      /dateOfBirth/.test(planned) && /value not shown/.test(planned),
+      /no identity profile saved/.test(planned)
+        ? 'NO PROFILE SEEDED. Relaunch with --seed-profile; every G30 leg below ' +
+          'fails on apparatus, not on discrimination.'
+        : `plan: ${planned.split('\n').filter((l) => /→/.test(l)).join(' ⏎ ').slice(0, 220)}`,
+    );
+
+    const applied = await call('browser_fill_form', { action: 'apply' });
+    await sleep(700);
+    const filledLog = await call('browser_read', {});
+    check(
+      'G30-fill',
+      'the profile fill lands the sensitive value in the page, so the sinks below have something to carry',
+      /filled \d+ of/.test(applied) && /dateOfBirth/.test(applied) &&
+        /dob-set:true/.test(filledLog),
+      `reply: ${applied.split('\n')[0].slice(0, 180)}\n        ` +
+        `page witness: ${(/profile-log: (.*)/.exec(filledLog) ?? [, '(none)'])[1]}`,
+    );
+
+    const base = await call('browser_snapshot', { mode: 'full' });
+    const echoRef = refIn(base, 'Echo profile value to page', 'button');
+    if (!echoRef) {
+      for (const g of ['G30a', 'G30b']) {
+        check(g, 'the filled profile value does not come back out of the page', false,
+          '"Echo profile value to page" did not resolve to exactly one button');
+      }
+    } else {
+      await call('browser_act', { action: 'click', ref: echoRef });
+      await sleep(400);
+      const after = await call('browser_snapshot', { mode: 'full' });
+      const read = await call('browser_read', {});
+      const headerLine = after.split('\n').find((l) => l.startsWith('page "')) ?? '';
+
+      // G19 + G19c, re-pointed. The whole snapshot, browser_read, and the
+      // header line — which carries Snapshot.title and Snapshot.url, the two
+      // strings that are page-controlled without a navigation. Non-vacuity is
+      // the PROFILESINK / dobsink= half: a fixture that failed to arm would
+      // otherwise pass by writing nothing at all.
+      check(
+        'G30a',
+        'a filled PROFILE value does not come back through the snapshot, browser_read, or the header line',
+        absentEverywhere(after, SEEDED_DOB) && absentEverywhere(read, SEEDED_DOB) &&
+          /PROFILESINK/.test(after) && /dobsink=/.test(headerLine) &&
+          /withheld/.test(after) && /withheld/.test(read),
+        `snapshot carries it: ${!absentEverywhere(after, SEEDED_DOB)}; ` +
+          `read carries it: ${!absentEverywhere(read, SEEDED_DOB)}\n        ` +
+          `header: ${headerLine.trim().slice(0, 200) || '(no header line)'}`,
+      );
+
+      // G19b, re-pointed. Split out for the reason G19b was: a link target is
+      // not innerText, so browser_read cannot see it and only the snapshot line
+      // can catch it. It is also the field this codebase forgets.
+      const leakLine =
+        after.split('\n').find((l) => l.includes('/leak?dob=')) ??
+        after.split('\n').find((l) => l.includes('Continue')) ?? '';
+      check(
+        'G30b',
+        'the profile value does not escape through a link href either',
+        leakLine !== '' && absentEverywhere(leakLine, SEEDED_DOB) &&
+          leakLine.includes('/leak?dob=') && /matches-a-filled-value/.test(leakLine),
+        `link line: ${leakLine.trim().slice(0, 180) || '(no line carrying the echoed link)'}`,
+      );
+
+      // G19d + G19f + G19i, re-pointed. The carrier is a tab that was NEVER
+      // filled, on a page Aperture created and activated because the page asked
+      // — so `browser_snapshot` with no arguments at all is the agent's
+      // ordinary next call and it returns the whole tree.
+      const filledTab = /^\*\s*(\S+)/m.exec(
+        (await call('browser_tabs', { action: 'list' }))
+          .split('\n').find((l) => l.trim().startsWith('*')) ?? '',
+      )?.[1] ?? '';
+      const popRef = refIn(after, 'Open profile carrier tab', 'button');
+      if (!popRef || !filledTab) {
+        for (const g of ['G30c', 'G30d']) {
+          check(g, 'the carrier tab a filled profile page opens carries no profile value', false,
+            `carrier button: ${popRef ?? '(unresolved)'}; filled tab: ${filledTab || '(unknown)'}`);
+        }
+      } else {
+        await call('browser_act', { action: 'click', ref: popRef });
+        await sleep(1600);
+        const carrierSnap = await call('browser_snapshot', {});
+        const carrierRead = await call('browser_read', {});
+        const listing = await call('browser_tabs', { action: 'list' });
+        check(
+          'G30c',
+          'a carrier tab the filled profile page opens carries the value on no surface — snapshot, read or listing',
+          absentEverywhere(carrierSnap, SEEDED_DOB) &&
+            absentEverywhere(carrierRead, SEEDED_DOB) &&
+            absentEverywhere(listing, SEEDED_DOB) &&
+            /CARRIERSINK/.test(carrierSnap) && /withheld/.test(carrierSnap),
+          `snapshot: ${!absentEverywhere(carrierSnap, SEEDED_DOB)}; read: ${!absentEverywhere(carrierRead, SEEDED_DOB)}; ` +
+            `listing: ${!absentEverywhere(listing, SEEDED_DOB)}\n        ` +
+            carrierSnap.split('\n').filter((l) => /CARRIERSINK|page "/.test(l)).join(' ⏎ ').slice(0, 300),
+        );
+
+        await call('browser_tabs', { action: 'focus', tabId: filledTab });
+        await sleep(400);
+        const foreignRef = refIn(
+          await call('browser_snapshot', { mode: 'full' }),
+          'Open foreign profile carrier tab',
+          'button',
+        );
+        if (!foreignRef) {
+          check('G30d', 'a foreign-origin carrier the filled profile page opens carries nothing either',
+            false, '"Open foreign profile carrier tab" did not resolve to exactly one button');
+        } else {
+          await call('browser_act', { action: 'click', ref: foreignRef });
+          await sleep(1800);
+          const fSnap = await call('browser_snapshot', {});
+          const fList = await call('browser_tabs', { action: 'list' });
+          check(
+            'G30d',
+            'a carrier the filled profile page opens on ANOTHER origin carries nothing either',
+            absentEverywhere(fSnap, SEEDED_DOB) && absentEverywhere(fList, SEEDED_DOB) &&
+              /CARRIERSINK/.test(fSnap) && /127\.0\.0\.2/.test(fSnap) && /withheld/.test(fSnap),
+            `snapshot: ${!absentEverywhere(fSnap, SEEDED_DOB)}; listing: ${!absentEverywhere(fList, SEEDED_DOB)}\n        ` +
+              fSnap.split('\n').filter((l) => /CARRIERSINK|page "/.test(l)).join(' ⏎ ').slice(0, 300),
+          );
+        }
+
+        for (const line of (await call('browser_tabs', { action: 'list' })).split('\n')) {
+          const m = /^[* ]\s*(\S+)\s+\[/.exec(line);
+          if (m && m[1] !== filledTab && /carrier\.html/.test(line)) {
+            await call('browser_tabs', { action: 'close', tabId: m[1] });
+          }
+        }
+        await call('browser_tabs', { action: 'focus', tabId: filledTab });
+        await sleep(500);
+      }
+
+      // G19h, re-pointed, and the leg that most needed the profile path to have
+      // needles at all. `invalidate(documentReplaced = true)` CLEARS TAINT — the
+      // fields really are gone with the document — so before this fix the
+      // profile path had nothing left on the other side of a navigation. Runs
+      // last in this block: it destroys the page every leg above reads.
+      const goRef = refIn(
+        await call('browser_snapshot', { mode: 'full' }),
+        'Navigate away carrying the profile value',
+        'button',
+      );
+      if (!goRef) {
+        check('G30e', 'a document-replacing navigation does not disarm the profile redaction',
+          false, '"Navigate away carrying the profile value" did not resolve to exactly one button');
+      } else {
+        await call('browser_act', { action: 'click', ref: goRef });
+        await sleep(1800);
+        const navSnap = await call('browser_snapshot', { mode: 'full' });
+        const navRead = await call('browser_read', {});
+        const navList = await call('browser_tabs', { action: 'list' });
+        check(
+          'G30e',
+          'a document-replacing navigation carrying the profile value does not disarm the redaction',
+          absentEverywhere(navSnap, SEEDED_DOB) && absentEverywhere(navRead, SEEDED_DOB) &&
+            absentEverywhere(navList, SEEDED_DOB) &&
+            /CARRIERSINK/.test(navSnap) && /carried=/.test(navSnap) && /withheld/.test(navSnap),
+          `snapshot: ${!absentEverywhere(navSnap, SEEDED_DOB)}; read: ${!absentEverywhere(navRead, SEEDED_DOB)}; ` +
+            `listing: ${!absentEverywhere(navList, SEEDED_DOB)}\n        ` +
+            (navSnap.split('\n').find((l) => l.startsWith('page "')) ?? '(no header line)').slice(0, 220),
+        );
+      }
+    }
+  }
+
+  // --- G31: OVER-redaction, which is the only guard here pointing that way ---
+  //
+  // Every other check in this file fails when something LEAKS. This one fails
+  // when something is redacted that should not be, and it exists because the
+  // third gate measured a cost that is not cosmetic (sink-closure-review-3 §3).
+  //
+  // A six-digit one-time code was the shortest value the store accepted. Filled
+  // on one origin, it then rewrote a legitimate order number on an UNRELATED
+  // origin the same tab visited — precisely (the neighbours survived), and
+  // wrongly in three ways: the same URL read differently in two tabs with
+  // nothing saying so, and the marker asserted `(filled, value withheld)` where
+  // nothing had been filled, which is a claim the agent may act on rather than
+  // merely a gap.
+  //
+  // THE SECOND ROW IS WHAT MAKES THIS DISCRIMINATE. `ORDER-D` carries the
+  // USERNAME from the same fill — a needle by every rule — on the same page, in
+  // the same snapshot. Without it a green here is indistinguishable from
+  // redaction being switched off, from a tab that never carried the filled
+  // origin, and from a fixture that failed to arm. With it, one observation
+  // shows the mechanism live and the all-digit bar doing exactly one thing.
+  {
+    await goFixture(BASE, 'login.html', 'mode=otp');
+    let out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    // G26 already issued a code in whatever 30-second window it ran in, and the
+    // vault refuses a second one inside the same window — correctly, that is
+    // G26b's whole claim. So this leg waits for the next counter rather than
+    // measuring a refusal: an over-redaction guard whose fill never landed is
+    // vacuous in the direction that is hardest to notice, because "nothing was
+    // rewritten" is exactly what it asserts.
+    if (out.includes(SAYS.TOTP_ALREADY_ISSUED)) {
+      await sleep(30_000 - (Date.now() % 30_000) + 800);
+      out = await call('vault_request_fill', { action: 'apply', entryId: entry });
+    }
+    await sleep(600);
+    const now = Math.floor(Date.now() / 1000 / 30);
+    const codes = [totpAt(now), totpAt(now - 1)];
+    await call('browser_navigate', {
+      action: 'goto',
+      url: `${BASE_2}/numbers.html#${codes[0]}|${SEEDED_USER}`,
+    });
+    await sleep(1200);
+    const snap = await call('browser_snapshot', { mode: 'full' });
+    const codeSurvives = codes.some((c) => snap.includes(c));
+    const controlsSurvive = snap.includes('100200') && snap.includes('998877');
+    const needleRedacted = !snap.includes(SEEDED_USER) && /withheld/.test(snap);
+    check(
+      'G31',
+      'a value too short to be a needle does not rewrite an unrelated origin, while a real needle on the same page still does',
+      out.includes(SAYS.FILLED) && /NUMBERSINK/.test(snap) &&
+        codeSurvives && controlsSurvive && needleRedacted,
+      `fill: ${out.split('\n')[0].slice(0, 120)}\n        ` +
+        `six-digit code survived: ${codeSurvives}; controls survived: ${controlsSurvive}; ` +
+        `the co-filled username on the same page WAS redacted: ${needleRedacted}\n        ` +
+        snap.split('\n').filter((l) => /ORDER-|page "/.test(l)).join(' ⏎ ').slice(0, 320),
     );
   }
 }

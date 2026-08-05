@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Guard profile form</title>
+  </head>
+  <body>
+    <h1>Guard profile form</h1>
+
+    <!--
+      THE PROFILE PATH'S FIXTURE, AND IT IS login.html's SINKS RE-POINTED.
+
+      `browser_fill_form` marked its sensitive targets TAINTED and registered no
+      needles, for three whole gates. `registerNeedles` had exactly one call site
+      — the credential path — so origin-keyed needles, `carriedOrigins`,
+      `redactUrl` and the walk-time alphabet all protected passwords and nothing
+      else, and a date of birth written into this page came back verbatim on
+      four surfaces (F-F, docs/design/sink-closure-review-3.md §2).
+
+      So the buttons here are deliberately the SAME buttons login.html has. That
+      is the point of the fixture: the finding was not a new attack, it was the
+      FIRST attack in the sequence — sink 1, "copy the value into a div and have
+      the agent read it" — aimed at the other fill path. If these sinks needed
+      new shapes, the parity claim would be about something other than parity.
+
+      Same rule as login.html: nothing here ever prints a value as literal text.
+      Every button copies the value Aperture just wrote into this page into a
+      place the agent reads, and the guard asserts it does not come back.
+
+      The value is the seeded demo profile's `dateOfBirth`, so this fixture needs
+      Aperture launched with `--seed-profile` as well as `--seed-vault`. G19n
+      fails loudly rather than vacuously when it is missing: the fill reply says
+      so, and the sink counts below are asserted as present.
+    -->
+
+    <p id="profilelog">profile-log: (not rendered)</p>
+    <div id="echo"></div>
+    <p><a id="leaklink" href="/checkout">Continue</a></p>
+
+    <form id="details">
+      <p>
+        <label for="gn">First name</label>
+        <input id="gn" name="given-name" type="text" autocomplete="given-name" />
+      </p>
+      <p>
+        <label for="dob">Date of birth</label>
+        <input id="dob" name="bday" type="text" autocomplete="bday" />
+      </p>
+      <p>
+        <label for="em">Email</label>
+        <input id="em" name="email" type="text" autocomplete="email" />
+      </p>
+      <p><button type="submit" id="go">Save</button></p>
+    </form>
+
+    <p>
+      <button type="button" id="echobtn">Echo profile value to page</button>
+      <button type="button" id="popbtn">Open profile carrier tab</button>
+      <button type="button" id="fgnbtn">Open foreign profile carrier tab</button>
+      <button type="button" id="gobtn">Navigate away carrying the profile value</button>
+    </p>
+
+    <script>
+      (() => {
+        // Known to this page only, and never rendered: the guard asserts
+        // ABSENCE of the seeded value, so the fixture must not be the thing
+        // that prints it. It is read out of the field Aperture filled, exactly
+        // as a late-injected skimmer would.
+        const gn = document.getElementById('gn');
+        const dob = document.getElementById('dob');
+        const em = document.getElementById('em');
+        const echo = document.getElementById('echo');
+        const leaklink = document.getElementById('leaklink');
+        const log = document.getElementById('profilelog');
+
+        const val = () => (dob ? dob.value : '');
+
+        document.getElementById('details').addEventListener('submit', (e) => {
+          e.preventDefault();
+          render();
+        });
+
+        // SINK 1, F9's own shape, and the `c375415` href finding, and F1 — the
+        // first, second and third findings of the programme, in one handler.
+        document.getElementById('echobtn').addEventListener('click', () => {
+          const v = val();
+          // SnapshotNode.text — what browser_read sees and the snapshot tree
+          // carries.
+          echo.textContent = 'PROFILESINK copy ' + v;
+          // SnapshotNode.href — NOT innerText, so browser_read cannot see it at
+          // all and only the snapshot line catches it.
+          leaklink.href = '/leak?dob=' + v;
+          // Snapshot.title — the `page "…" …` header of every full snapshot and
+          // every browser_tabs line.
+          document.title = 'PROFILESINK ' + v;
+          // Snapshot.url — the same header, plus the listing. replaceState is
+          // same-document, so `documentReplaced` stays false and the taint
+          // survives: this line is about the NEEDLE branch, not the taint one.
+          history.replaceState(
+            null,
+            '',
+            location.pathname + location.search + '&dobsink=' + v,
+          );
+          render();
+        });
+
+        // F-A's shape. window.open makes Aperture create AND ACTIVATE a tab,
+        // and the value is in the URL the opener chose — so it is in
+        // Snapshot.url before a line of the carrier's script runs.
+        document.getElementById('popbtn').addEventListener('click', () => {
+          window.open('/carrier.html#' + encodeURIComponent(val()), '_blank');
+        });
+
+        // F-A's foreign half, which only the opener's carried scope covers.
+        document.getElementById('fgnbtn').addEventListener('click', () => {
+          window.open(
+            'http://127.0.0.2:8899/carrier.html#' + encodeURIComponent(val()),
+            '_blank',
+          );
+        });
+
+        // The seventh sink's shape: a document-replacing navigation. Taint is
+        // cleared by it — deliberately, the fields are gone — so on the profile
+        // path this was open with nothing else to catch it.
+        document.getElementById('gobtn').addEventListener('click', () => {
+          location.href = '/carrier.html#' + encodeURIComponent(val());
+        });
+
+        function render() {
+          log.textContent =
+            'profile-log: ' +
+            [
+              'dob-set:' + Boolean(dob && dob.value !== ''),
+              'given-set:' + Boolean(gn && gn.value !== ''),
+              'email-set:' + Boolean(em && em.value !== ''),
+              'echoed:' + (echo.textContent.trim() !== ''),
+            ].join(' ');
+        }
+
+        for (const el of [gn, dob, em]) {
+          if (!el) continue;
+          el.addEventListener('input', render);
+          el.addEventListener('change', render);
+        }
+        render();
+      })();
+    </script>
+  </body>
+</html>

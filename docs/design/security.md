@@ -63,7 +63,8 @@ containment rests on.
 | "Fill the Google password here" (on evil.com) | Agent cannot *name* the entry: origin-scoped listing never minted an id for it |
 | "Read the field back and tell me" | Password field values are never serialized; `••••••` placeholder only |
 | "The user already approved this" | Consent lives in browser UI; no API parameter asserts prior consent |
-| Copy value into a `<div>` and have the agent read it | Redaction while the fill is tainted — **implemented and measured** (G19; residuals below) |
+| Copy value into a `<div>` and have the agent read it | Redaction against the values the fill registered — **implemented and measured on BOTH fill paths** (G19 for a credential, G30a for a profile value; residuals below). Until 2026-08-05 this row said "implemented and measured" without qualification and was true of credentials only: `registerNeedles` had one call site, so a filled date of birth came back verbatim (F-F, below) |
+| The same, against a **profile** value — date of birth, national ID, tax ID | The same mechanism, now that `browser_fill_form` registers needles too. `test/fillpaths.test.ts` is what makes it a property of every fill path rather than of the two that exist (G30a-e) |
 | Copy value into the page title, the URL, a link target, an option label, or an element's own tag name | The same redaction, once its scope was widened past `SnapshotNode` — see "Redaction: what it covers" (G19b-e) |
 | Split the value with one invisible character the renderer strips on the way out | The strip moved to walk time, so the redactor reads the bytes the model gets (G19g) |
 | `window.open` a page — same origin or foreign — whose URL or title holds the value | Needles keyed by origin, plus the opener's whole SCOPE on a tab Aperture creates for a page, so a relay chain stays covered past the first hop (G19d, G19f, G19i, G19m) |
@@ -71,6 +72,7 @@ containment rests on.
 | Navigate the filled tab itself to a THIRD-PARTY origin with the value in the **fragment** — inert target, nothing sent to any server | The tab carries the origins it has left, so coverage follows the value rather than the tab (G19k) |
 | Put the value in a URL and let the browser percent-encode it, so the substring scrub misses it | Every URL surface goes through one `redactUrl`, which searches the decoded readings (G19b, G19c, G19j, G19j2) |
 | `window.open('mailto:…' + value)`, so Aperture's own search fallback puts it on the network | A page-chosen `window.open` target with a non-web scheme is refused, not searched (G19l) |
+| `a.download = value`, or a `Content-Disposition` filename, so a page names a file Aperture writes to the human's disk | The transfer is the human's save dialog, as in every browser; the NAME is Aperture's — `safeDownloadName` strips the path, the invisible code points and the length before the dialog is drawn (`test/egress.test.ts`) |
 | `google.com.evil.com`, `paypaI.com` | Registrable-domain comparison in punycode; confusable check at record creation |
 | Exfiltrate via the page's own `fetch()` | **Not preventable and not in scope** — that origin already has the credential |
 
@@ -236,6 +238,10 @@ before it was a qualifier, so the rule is now stated with them attached:
    or one character per element is not caught and cannot be. The line is
    ownership: transformations *Aperture* performs are matched through;
    transformations *the page* performs are the residual.
+4. **Coverage — which values.** A scrub is only as wide as the set of values
+   somebody remembered to register. This is the fourth qualifier and the newest,
+   and it was a leak for three gates before it was a qualifier: `registerNeedles`
+   had exactly ONE call site. See "Coverage" below.
 
 The previous spelling of that rule was "every string on `SnapshotNode` that the
 renderer can emit", and it was one type too narrow. `Snapshot.title` and
@@ -297,6 +303,22 @@ than over the instance, because the failure was never "somebody forgot a
 scrub" — it was **a helper written for a sentence and wired to some of the
 places the sentence applies**.
 
+**And that guard reconciled two of the three page-influenced arguments —
+corrected 2026-08-05, third gate (F-G).** `routeCapture` takes `title`,
+`sourceUrl` and `openUrls`, and the third one picks **where the screenshot
+goes**: it appends to the first tab whose URL yields a Notion page id. The
+agent's path passed the active tab only and said so in a comment; the human's
+path passed *every* tab, so whichever tab got there first chose the destination
+— and a page can create a tab (`window.open('https://www.notion.so/<id>')`
+produces one, and `pageIdFromUrl` accepts that URL; measured against the shipped
+function). Bounded, and not overstated: the upload uses the human's own Notion
+token, so the target must already be writable by that integration — in practice a
+page inside the human's own workspace — and the realistic impact is a screenshot
+**misfiled**, not exfiltrated. Both call sites now pass the active tab, and
+`urlsurfaces.test.ts` asserts on all three arguments rather than two. The lesson
+is the sharper one: **a guard written against "a helper wired to some of the
+places it applies" was itself wired to some of the arguments it applies to.**
+
 A tab's **origin scope** is the origin it is currently on, plus every origin it
 CARRIES (`TabManager.originScope`): the whole scope of the page that asked
 Aperture to open it, and every origin it has navigated away from. All three
@@ -356,10 +378,26 @@ needs covering is the VALUE. The second gate measured both ways that gap opens:
   opener that holds no needles.
 
 A tab now carries a SET: the opener's whole scope at creation, plus every origin
-it navigates away from, only ever added to. `TabRecord.carriedOrigins` argues
-the cost — the over-redaction is bounded by the needle TTL, not by the set, and
-the set is deliberately uncapped because any eviction policy could drop the one
-origin that mattered.
+it navigates away from. `TabRecord.carriedOrigins` argues the cost — the
+over-redaction is bounded by the needle TTL, not by the set, and the set is
+deliberately uncapped because any eviction policy could drop the one origin that
+mattered.
+
+**Pruned, not evicted — 2026-08-05, third gate.** "Only ever added to" was the
+previous sentence, and the third gate accepted the size argument and asked for
+the one deletion that costs nothing: an origin whose needle set is **gone** is
+dropped the next time `originScope` is read. This is not an eviction policy and
+it cannot lose the origin that mattered, because of *when* an origin joins the
+set — at the moment the tab leaves it, or at the moment the tab is created by an
+opener already there. A value registered after that moment cannot be in this
+tab's content: the document was replaced on the way out, and Aperture hands a
+page no window handle to write through. So a dead entry is not merely
+contributing nothing now; it cannot begin to contribute later. What this buys is
+truth rather than bytes — **the unboundedness argument is now true rather than
+merely affordable**, because the set is bounded by the origins that currently
+matter. `engine.hasNeedles` answers it, and it answers a boolean: a caller can
+learn that an origin is worth scrubbing against and cannot obtain one byte of
+what it holds.
 
 **One claim retracted.** This section used to say origin scope was strictly
 greater in coverage than the old cross-tab union. On the one surface the union
@@ -378,6 +416,99 @@ The lifetime is now the 10-minute TTL, a refused fill (`dropNeedles`), or a
 vault lock (`clearAllNeedles`) — one bound plus two explicit events, **not**
 "bounded twice over" as this file previously claimed. That phrase was one bound
 stated twice.
+
+### Coverage — which VALUES the machinery was ever wired to (2026-08-05, third gate)
+
+The fourth qualifier, and the one that shows how far a correct mechanism can
+travel while protecting half of what it was built for.
+
+**`registerNeedles` had exactly one call site.** `vault_request_fill`. For three
+gates. `browser_fill_form` — the path that writes a **date of birth, national
+ID, tax ID, bank account or salary** into a page — called `markTainted` and
+nothing else. So on the profile path:
+
+- `redactObserved`'s **needle branch never ran**; it is gated on
+  `needles.length`, and that is the branch covering every *copy* a page makes.
+- The **taint branch** masked only the fields Aperture wrote into, and
+  `invalidate(documentReplaced)` clears it — so the seventh sink's shape, a
+  navigation as the off switch, was open here with nothing behind it.
+- `carriedOrigins`, `redactUrl` and the walk-time alphabet all operate on
+  needles, so **none of the last three gates' work applied**.
+
+Measured on the shipped tree at `3942ff8`, `dateOfBirth = 1980-01-01`:
+
+```
+P0  the filled field itself                      clean   ← taint works
+P1  SAME TAB, value copied into text/href/title   LEAK
+P2  SAME TAB, browser_read                        clean   ← the live-walk path only
+P3  CARRIER TAB, browser_snapshot no arguments    LEAK
+P4  the tab listing                               LEAK
+```
+
+P1 is **sink 1** — the first attack in this whole programme — plus the `c375415`
+href finding and F1. P3 is F-A. P4 is F2. Five of the earliest findings,
+re-opened at once, against the class of data this product treats as *more*
+sensitive than a password: it refuses to print these values in a plan at all,
+answering `(from profile — value not shown)`.
+
+**The one-line fix is the instance. The guard is the point.**
+`test/fillpaths.test.ts` enumerates every call site of `requestFill` — the one
+funnel from main into the preload's write pass, so enumerating it enumerates the
+fill paths — and requires each to reach `registerNeedles` **and** `markTainted`,
+before the write. A third fill path fails there by name. Both halves are
+required and neither implies the other: taint is keyed on the ELEMENT and dies
+with the document; needles are keyed on the VALUE and the ORIGIN and are what
+every other mechanism here operates on.
+
+**Only the sensitive values.** A needle for `Brad` or `Melbourne` would redact
+the web, and the plan already prints the open values to the agent in clear —
+they are defaults a human is being asked to confirm, not secrets.
+
+**And a sentence in `browser_fill_form`'s own description was false.** It
+promised that sensitive values "are never returned to you". That is a true
+statement about the TOOL — no tool here hands one back — written as though it
+were a statement about the BROWSER, which is a far larger claim and one this path
+had none of the machinery to keep. Both halves are now stated separately and
+both are true.
+
+### What the marker asserts — and what it used to assert falsely
+
+`(filled, value withheld)` is not a statement about redaction. It is a statement
+about **provenance**: *Aperture filled this value into this place.* On the filled
+origin that is true. Off it, it can be false, and the third gate measured it
+being false — a legitimate order number on an unrelated origin was labelled as a
+credential Aperture had put there. **That is worse than a missing value, because
+it is a claim the agent may act on.**
+
+The marker now reads `(withheld: matches a filled value)` — and the URL form,
+`(withheld:matches-a-filled-value)`, which is whitespace-free because that line
+is read as one token. It asserts a **match**, not a location, which is exactly
+what the mechanism knows: this text matched a value Aperture filled *somewhere in
+this tab's origin scope*. Scope that wide is what closes F-A, F-D and F-E; it is
+also precisely why the marker cannot claim the value belongs where it was found.
+`withheld` is kept and is load-bearing in the other direction — the agent must
+read the string as Aperture removing text rather than as the page's own content.
+
+**And the needle bar was raised for one alphabet.** `MIN_NEEDLE_LENGTH = 6` is
+about the size of the alphabet a needle is drawn from, and it silently assumed
+that alphabet was a password's. A six-character value drawn from `[0-9]` has a
+million spellings rather than a hundred billion, and digits are the most common
+thing on an ordinary page. So `registrableNeedle` (in `redact.ts`, a pure leaf,
+so the suite executes the shipped rule) refuses an all-digit value shorter than
+**nine** characters. The value that excludes is the one-time code, and it needs
+no needle: single-use, replay-blocked, live for about thirty seconds, against a
+needle that costs ten minutes of false positives on every origin the tab
+afterwards visits. It stays covered by the **taint** branch, which is keyed on
+the element rather than the value and therefore has no false positives at all
+(G26a-blind). **Residual, stated because it is a real loss:** a sensitive profile
+value that is all digits and shorter than nine — a short account number — gets
+taint coverage and no needle, so a copy the page makes of it is not scrubbed.
+
+G31 is the guard, and it is the only one here that fails on OVER-redaction. It
+carries its own control: the same page holds the co-filled **username**, which is
+a needle by every rule and must still be redacted in the same snapshot. Without
+that row a green G31 would be indistinguishable from redaction being switched
+off.
 
 ### The alphabet — the redactor reads what the renderer writes
 
@@ -422,7 +553,9 @@ matching and always will: reversed, base64'd, or one character per element is
 not caught. Truncation boundaries can leak fragments, which is why
 `safeForAgent` scrubs before `quote()` as well as after, and why the walker's
 own `MAX_NAME` cut can still shorten a long value into an unmatchable fragment.
-A value shorter than six characters is never registered.
+A value shorter than six characters is never registered, and an **all-digit**
+value shorter than nine is not either — see "What the marker asserts" above for
+why that bar has two heights and what the second one costs.
 
 **A residual that was filed and was not one — retracted 2026-08-05, second
 gate.** This list used to end: *"a tab that navigates ITSELF to a foreign origin
@@ -466,8 +599,13 @@ the value), G19i (a carrier on a *foreign* origin), G19j and G19j2 (the tab
 listing and the `loaded …` line, against a value the URL parser
 percent-encoded), G19k (a cross-origin self-navigation with the value in the
 **fragment**), G19l (a `window.open` scheme Aperture would otherwise have turned
-into a third-party search), G19m (a two-hop opener chain) — 55 guards in the
-`allow` phase — and, for the recurrence mechanism rather than the instances,
+into a third-party search), G19m (a two-hop opener chain), **G30a-e (all of the
+above, re-pointed at the PROFILE fill path — the echo, the href, the carrier
+tab, the foreign carrier, the self-navigation)** and **G31 (the only leg here
+that fails on OVER-redaction: a value too short to be a needle must not rewrite
+an unrelated origin, while a real needle on the same page still must)** — 63
+guards in the `allow` phase — and, for the recurrence mechanism rather than the
+instances,
 `test/completeness.test.ts` and `test/urlsurfaces.test.ts`. The first is total
 over **two** axes: what
 the diff reports, and whether the field can carry a secret. The second axis is
@@ -485,8 +623,16 @@ to some of the places that sentence applies.** It cannot be closed the way
 than type members and no runtime observation enumerates them — so it asserts
 over the source, which is weaker and is the strongest instrument available for
 "did every call site get the treatment". It fails if a `routeCapture` call site
-stops scrubbing either field, if a third file names `REDACTED_HREF`, or if a
-second implementation of "which origin is this URL on" appears.
+stops scrubbing either field **or lets anything other than the active tab choose
+the destination**, if a third file names `REDACTED_HREF`, or if a second
+implementation of "which origin is this URL on" appears.
+
+`test/fillpaths.test.ts` and `test/egress.test.ts` are the two added in the third
+gate, and each closes a class rather than an instance — the first by enumerating
+every call site of the one fill funnel and requiring both halves of the arming,
+the second by enumerating the platform primitives that reach outside a page and
+requiring a ruling on each. Both are argued at their own headers, including what
+they cannot do.
 
 **One process guarantee, not a security one.** `bench/guards.mjs` refuses to
 start when `out/main/index.js` is older than anything under `src/`, and prints
@@ -496,6 +642,49 @@ that failure is silent by construction — a green run against the wrong build i
 byte-identical to a green run against the right one. The refusal cannot be
 forgotten, because forgetting is the mistake; the hash makes a pasted verdict
 name what produced it.
+
+## The stopping criterion: six mechanisms, six guards, six sabotage rows (2026-08-05)
+
+Fifteen findings across four rounds, and the count never bent — read found 0,
+probe 4, fixing 5, gate 7, fix 9, gate 11, fix 13, gate 15. So "no more findings"
+was the wrong criterion. It is unfalsifiable, and it had been wrong four times.
+
+Sorted by **mechanism** rather than by surface, the fifteen collapse to six. The
+criterion that can actually be met, and that the third gate proposed: *every
+mechanism has a guard that fails when that mechanism regresses, and each guard
+has been shown to fail by sabotage.* Three of six held that at `3942ff8`. All six
+hold it now, and the sabotage column is measured rather than argued — each row is
+one exact substitution applied to the tree, run, and reverted, with the artifact
+hash recorded by the runner.
+
+| # | mechanism | instances | the guard that covers it | sabotage — what was reverted, and what went red |
+|---|---|---|---|---|
+| **A** | **enumeration** — a sink nobody listed | 1, href, title/url, tabs list, `sel.tag`, select labels, obstructor, navigate url, `r.tag` | `completeness.test.ts`: totality over both types by tsc, and "rendered" is a **measurement** — a canary in every string-bearing field, `renderFull` run, survivors checked against their rulings | rule `SnapshotNode.name` `not-page-text` with a plausible sentence → **RED**, on *no RENDERED page-controlled string is ruled anything but a sink* and on *every OTHER rendered field is on the frozen list* |
+| **B** | **scope** — the redactor's reach does not follow the value | F-A, seventh sink, F-E, F-D | origin-keyed needles + `carriedOrigins` (opener scope, and every origin left) | `originScope` returns the current origin only → **RED — G19i, G19k, G19m, G30d, G31** (G31 too, and correctly: its control needle reaches the unrelated origin only through the carried scope) |
+| **C** | **alphabet** — redactor and renderer read different bytes | F-B, F-C | walk-time `stripFormat`, one `redactUrl` composing `scrubUrlish`, `canonicalNeedle` | `redactUrl` uses the text scrub, so the decoded readings are not searched → **RED — G19j, G19j2** |
+| **D** | **parity** — one function, two call sites, divergent treatment | sink 10, F-G | `urlsurfaces.test.ts`, now over **all three** page-influenced arguments of `routeCapture` rather than two | restore `openUrls: t.list().map(…)` on the human path → **RED**, *every routeCapture call site treats ALL THREE page-influenced arguments* |
+| **E** | **egress** — Aperture acts on a page-supplied string | eleventh sink, downloads | `test/egress.test.ts`: the platform primitives enumerated, every occurrence ruled, **total in both directions** | delete the `will-download` handler → **RED**, on *every ruling still has an affordance under it* (the stale-ruling half) and on *the download row is a handler and not a hope* |
+| **F** | **coverage** — a data class the machinery was never wired to | F-F | `test/fillpaths.test.ts`: every call site of the one fill funnel must reach `registerNeedles` **and** `markTainted`, before the write — plus G30a-e live | drop `registerNeedles` from `browser_fill_form` → **RED** in the suite (*BOTH fill paths reach registerNeedles and markTainted*) **and RED live — G30a, G30b, G30c, G30d, G30e** |
+
+**Two of the six are closed by construction rather than by guard, and that is
+worth more.** `redactFreeText` lost its `marker` parameter, so "the right marker
+with the wrong scrub" is a compile error rather than a reviewable mistake; and
+the egress class is *enumerable to exhaustion*, so E is the one row here where
+the guard is a complete audit rather than a sample. The other four are guards
+over call sites and over measurements, which is the strongest instrument
+available for properties that live in the source.
+
+**What this does not claim.** It does not claim there is no sixteenth finding. It
+claims something narrower and checkable: a sixteenth finding that is an instance
+of A–F fails a guard, and one that is not is a **seventh mechanism** — which is
+the thing to report, because it is the only kind of finding that moves the count
+that matters. Two mechanisms appeared in the last two rounds and one of them (E)
+was enumerable the moment it was named. `R5` — transformations the *page*
+performs (base64, reversal, one character per element) — remains unclosable by
+substring matching, is documented as such, and is not a seventh mechanism.
+
+The next reviewer's job is therefore verifying six guards rather than inventing a
+fifteenth attack. That is a job that terminates.
 
 ## `GET /metrics`: an authenticated read-only endpoint (2026-08-02)
 
@@ -589,6 +778,51 @@ it to `normalizeUrl`: a page-chosen target with a non-web scheme is refused, and
 no tab is created. The search affordance is for input a human or the agent typed
 and stays exactly as it was. **Guarded by G19l**, and the sabotage row for it
 reproduced the DuckDuckGo line verbatim.
+
+### The class, enumerated to exhaustion (2026-08-05, third gate)
+
+The class is *"an affordance where a page-supplied string causes Aperture to act
+outside the page"*, and it is **the only class in this programme that can be
+enumerated rather than probed**. The set of ways a browser reaches outside a page
+is small, fixed, and named by the platform. So the audit is not something to
+remember — it is `test/egress.test.ts`, and it is total in **both** directions: a
+new file reaching for one of these primitives fails with the file and the
+primitive named, and a ruling whose affordance has disappeared fails too. That
+second half is what stops this becoming the stale audit the preload `reason:`
+count turned out to be, where the number stayed at four while the membership
+changed underneath it.
+
+| affordance | page-supplied? | ruling |
+|---|---|---|
+| `setWindowOpenHandler` → `normalizeUrl` (`tabs.ts`) | **yes** | **fixed** — scheme checked in the handler (G19l) |
+| `loadURL` on a tab (`tabs.ts`) | **yes** | `isAllowedScheme` enforced again at the funnel, because this is the last place a bad scheme can be stopped |
+| **downloads** (`containers.ts`) | **yes** | **closed 2026-08-05** — there was no `will-download` handler anywhere in `src/`. The transfer stays gated by the human's save dialog; the NAME is now Aperture's (`safeDownloadName`: no path, no invisible code points, bounded, never empty) |
+| `will-navigate` app-wide (`index.ts`) | **yes** | denies `file://` only — **E1, known-open**. Theoretical: the shell renderer has no link, no `window.open` and no `innerHTML` sink to reach it with |
+| `shell.openExternal` from the chrome renderer (`index.ts`) | **yes if reached** | **E2, known-open**, gated behind E1. `vaultWindow.ts` allowlists the same call to Notion HTTPS and is the treatment this one did not get |
+| `routeCapture` destination (`openUrls`) | **yes** | **F-G, fixed** — both call sites now pass the active tab only; `urlsurfaces.test.ts` asserts it |
+| `browser_capture` destination, agent path | no — active tab only | OK by construction, and it says so |
+| `browser_attach` file paths | no — library ids | OK |
+| container id / name | no — agent-chosen, never page-chosen | OK |
+| `shell.openExternal` from the vault window | no — allowlisted to Notion HTTPS | OK |
+| `fetch` to api.notion.com (`notion.ts`, `vaultWindow.ts`) | no — fixed host; the caption and source URL it carries are scrubbed at both call sites | OK |
+| filter-list fetch and cache (`blocker.ts`) | no — the vendor's own endpoints | OK |
+| every `writeFile` (vault, profiles, attachments, telemetry, capture, mcp.json) | no — paths Aperture builds, under `userData` | OK |
+| native dialogs (`consent.ts`, `vaultWindow.ts`) | no — human-facing, no agent-reachable parameter | OK |
+| the MCP listener (`server.ts`) | no, and it is inbound | loopback-bound, per-launch bearer, Host and Origin validated before auth |
+
+Two rows are known-open (E1, E2) and they are one chain; everything else is
+ruled and enforced.
+
+**One scope note on the download row, stated rather than implied.** The handler
+is installed by `containers.harden()`, which runs once per **container session**
+— so it covers every tab, because every tab is created on a container session.
+It does **not** cover `session.defaultSession`, which is what the two trusted
+windows land on (E5, known-open and unchanged). Nothing can start a download
+there: both load bundled local content, the vault window denies `window.open`
+and `will-navigate` outright, and the shell window has no link and no
+`innerHTML` sink. That is a true statement about today's tree rather than a
+structural guarantee, and it is the third consequence of E5 rather than a new
+one.
 
 ## Finding: a link's href could change under a stable label with no report (2026-08-01)
 

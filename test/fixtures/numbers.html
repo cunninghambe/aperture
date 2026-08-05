@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Order history</title>
+  </head>
+  <body>
+    <!-- The mark is on the HEADING, not on the paragraph below the table: the
+         walker serialises a semantic tree, and a plain <p> of body text reaches
+         the agent through browser_read rather than through the snapshot. A
+         non-vacuity marker the snapshot cannot see is a non-vacuity check that
+         does not run. -->
+    <h1>NUMBERSINK order history</h1>
+
+    <!--
+      AN ORDINARY PAGE ON AN UNRELATED ORIGIN, and every number on it is
+      legitimate page content.
+
+      This fixture exists for the guard that measures OVER-redaction rather than
+      under-redaction, which is the only one of its kind here. The third gate
+      filled a six-digit one-time code — the shortest value the store accepted —
+      and then walked the same tab to a page whose real content contained that
+      string. `carriedOrigins` is what makes coverage follow the value across
+      that boundary, and it made this happen:
+
+          "ORDER-B" | "(filled, value withheld)"
+
+      Three things were wrong and only the first is what "over-redaction"
+      usually means. It was precise (the neighbouring numbers survived). The
+      SAME URL then read differently in two tabs, with nothing in the output
+      saying so. And the marker asserted a provenance — *Aperture filled this
+      value here* — that was false, which is worse than a missing value because
+      it is a claim the agent may act on.
+
+      Both mitigations are measured against this page: an all-digit value now
+      needs nine characters before it is registered as a needle
+      (`registrableNeedle`, redact.ts), and the marker no longer claims the
+      value was filled where it was found (`REDACTED`, redact.ts).
+
+      TWO STRINGS ARRIVE IN THE FRAGMENT, `short|long`, and they are what makes
+      the guard DISCRIMINATE rather than merely pass:
+
+        · `short` is the six-digit one-time code. It must survive, because it is
+          below the all-digit bar and was never registered.
+        · `long` is a value from the SAME fill that IS a needle. It must be
+          redacted, on this same page, in the same snapshot.
+
+      Without the second row a green G31 is indistinguishable from a build where
+      redaction is switched off, from a tab that never carried the filled origin,
+      and from a fixture that failed to arm. With it, one snapshot shows the
+      mechanism live and the digit rule doing exactly one thing.
+
+      The fragment is never sent to a server, so the guard chooses both strings
+      and 127.0.0.2 logs neither.
+    -->
+
+    <table>
+      <tr><td>Order</td><td>Total</td></tr>
+      <tr><td>ORDER-A</td><td id="n1">100200</td></tr>
+      <tr><td>ORDER-B</td><td id="n2">COLLIDE</td></tr>
+      <tr><td>ORDER-C</td><td id="n3">998877</td></tr>
+      <tr><td>ORDER-D</td><td id="n4">CONTROL</td></tr>
+    </table>
+    <p id="prose">Reference COLLIDE was shipped on 2026-08-05.</p>
+
+    <script>
+      (() => {
+        const raw = decodeURIComponent(location.hash.slice(1));
+        const bar = raw.indexOf('|');
+        const short = bar === -1 ? raw : raw.slice(0, bar);
+        const long = bar === -1 ? '' : raw.slice(bar + 1);
+        document.getElementById('n2').textContent = short;
+        document.getElementById('n4').textContent = long;
+        document.getElementById('prose').textContent =
+          'NUMBERSINK reference ' + short + ' was shipped on 2026-08-05.';
+        document.title = 'Order ' + short;
+      })();
+    </script>
+  </body>
+</html>

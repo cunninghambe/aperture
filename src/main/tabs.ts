@@ -5,6 +5,7 @@ import type { ContainerId, LoadState, TabId, TabInfo } from '@shared/types';
 import { containers } from '@privacy/containers';
 import { applyUaProfile, buildUaProfile, type UaProfile } from '@privacy/useragent.js';
 import { setWindowOffset } from '@core/snapshot/act.js';
+import { hasNeedles } from '@core/snapshot/engine.js';
 import { originOf } from '@shared/origin.js';
 
 /** Height of the browser chrome (tab strip + address bar), in CSS px. */
@@ -56,7 +57,20 @@ interface TabRecord {
    *     did not (F-E). The prior origin is added on every document-replacing
    *     navigation.
    *
-   * ONLY EVER ADDED TO. A tab that leaves a filled origin stays scrubbed against
+   * ADDED TO ON EVERY CROSSING, AND PRUNED ONLY WHEN AN ENTRY CAN NEVER MATTER
+   * AGAIN — 2026-08-05, third gate. An origin whose needles are gone (the TTL
+   * ran out, the fill was refused, the vault locked) contributes nothing to
+   * `needlesFor` and cannot begin to contribute later: an origin joins this set
+   * at the moment the tab LEAVES it, and a value registered after that moment is
+   * not in this tab's content. `engine.hasNeedles` is the one question that
+   * decides it, and it answers a boolean rather than handing anything back.
+   *
+   * That is not a behaviour change and it is not presented as one. It is what
+   * makes the unboundedness argument below TRUE rather than merely affordable:
+   * the set is now bounded by the origins that currently matter, not by every
+   * origin the tab has ever visited.
+   *
+   * A tab that leaves a filled origin stays scrubbed against
    * it for as long as that origin has needles, which is the over-redaction this
    * module accepts everywhere else: cosmetic markers on unrelated strings,
    * bounded by the needle TTL rather than by this set — an origin with no live
@@ -336,6 +350,14 @@ export class TabManager extends EventEmitter {
     const here = originOf(rec.view.webContents.getURL());
     const out = here ? [here] : [];
     for (const o of rec.carriedOrigins) {
+      // Pruned here rather than on a timer: this is the only place that reads
+      // the set, so a dead entry is dropped at exactly the moment anybody would
+      // have paid for it. See `TabRecord.carriedOrigins` for why an origin with
+      // no live needles can never matter again.
+      if (!hasNeedles(o)) {
+        rec.carriedOrigins.delete(o);
+        continue;
+      }
       if (o !== here) out.push(o);
     }
     return out;
