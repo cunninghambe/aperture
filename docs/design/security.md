@@ -64,6 +64,7 @@ containment rests on.
 | "Read the field back and tell me" | Password field values are never serialized; `••••••` placeholder only |
 | "The user already approved this" | Consent lives in browser UI; no API parameter asserts prior consent |
 | Copy value into a `<div>` and have the agent read it | Redaction against the values the fill registered — **implemented and measured on BOTH fill paths** (G19 for a credential, G30a for a profile value; residuals below). Until 2026-08-05 this row said "implemented and measured" without qualification and was true of credentials only: `registerNeedles` had one call site, so a filled date of birth came back verbatim (F-F, below) |
+| The same, where the value is a SHORT ALL-DIGIT one — a one-time code, a short national ID or account number | The same mechanism, bounded to the origin the value was filled into (G32). For one commit these were not registered at all, and a copy on the filled origin came back in clear — see "What the marker asserts" for why the bar is a reach and not a refusal |
 | The same, against a **profile** value — date of birth, national ID, tax ID | The same mechanism, now that `browser_fill_form` registers needles too. `test/fillpaths.test.ts` is what makes it a property of every fill path rather than of the two that exist (G30a-e) |
 | Copy value into the page title, the URL, a link target, an option label, or an element's own tag name | The same redaction, once its scope was widened past `SnapshotNode` — see "Redaction: what it covers" (G19b-e) |
 | Split the value with one invisible character the renderer strips on the way out | The strip moved to walk time, so the redactor reads the bytes the model gets (G19g) |
@@ -239,9 +240,13 @@ before it was a qualifier, so the rule is now stated with them attached:
    ownership: transformations *Aperture* performs are matched through;
    transformations *the page* performs are the residual.
 4. **Coverage — which values.** A scrub is only as wide as the set of values
-   somebody remembered to register. This is the fourth qualifier and the newest,
-   and it was a leak for three gates before it was a qualifier: `registerNeedles`
-   had exactly ONE call site. See "Coverage" below.
+   somebody remembered to register. This is the fourth qualifier, and it was a
+   leak for three gates before it was a qualifier: `registerNeedles` had exactly
+   ONE call site. See "Coverage" below.
+5. **Lifetime — when.** A scrub is only as wide as the window in which the
+   redactor still holds the value. This is the fifth qualifier and the newest,
+   and like the other four it was a leak first: the navigation that delivered
+   the secret was the one that dropped the needles. See "Lifetime" below.
 
 The previous spelling of that rule was "every string on `SnapshotNode` that the
 renderer can emit", and it was one type too narrow. `Snapshot.title` and
@@ -415,7 +420,7 @@ disarmed the redaction, so the "early drop" was a page-controlled off switch.
 The lifetime is now the 10-minute TTL, a refused fill (`dropNeedles`), or a
 vault lock (`clearAllNeedles`) — one bound plus two explicit events, **not**
 "bounded twice over" as this file previously claimed. That phrase was one bound
-stated twice.
+stated twice. The whole class this belongs to is named below, under "Lifetime".
 
 ### Coverage — which VALUES the machinery was ever wired to (2026-08-05, third gate)
 
@@ -460,6 +465,21 @@ required and neither implies the other: taint is keyed on the ELEMENT and dies
 with the document; needles are keyed on the VALUE and the ORIGIN and are what
 every other mechanism here operates on.
 
+**And for one commit that guard enumerated the wrong unit — corrected
+2026-08-05, fourth gate.** The claim above is true; the implementation did not
+check it. It split `tools.ts` on `server.registerTool(` and looked for
+`requestFill(` inside the resulting blocks, discarding everything above the
+first one — so a genuinely new third fill path, written as a module-scope helper
+and called from a tool whose own handler never names `requestFill`, left both
+assertions passing **vacuously** with the suite green. It now follows the write
+instead of the syntax, and every link is asserted rather than claimed: the
+channels the page-world preload listens on are frozen and ruled on *can this
+write a value into a field* (one can); `aperture:fill` is shown to have exactly
+one sender; every occurrence of `requestFill(` in real code is named by its
+ENCLOSING FUNCTION and frozen, so a third one — or a **second one inside a
+function that already writes** — fails on the list before any structural check
+runs; and each enclosing function must arm both halves before its write.
+
 **Only the sensitive values.** A needle for `Brad` or `Melbourne` would redact
 the web, and the plan already prints the open values to the agent in clear —
 they are defaults a human is being asked to confirm, not secrets.
@@ -468,8 +488,64 @@ they are defaults a human is being asked to confirm, not secrets.
 promised that sensitive values "are never returned to you". That is a true
 statement about the TOOL — no tool here hands one back — written as though it
 were a statement about the BROWSER, which is a far larger claim and one this path
-had none of the machinery to keep. Both halves are now stated separately and
-both are true.
+had none of the machinery to keep. Both halves are now stated separately.
+
+**The replacement was still wider than the truth — corrected 2026-08-05, fourth
+gate.** It said the values "read as `(withheld: matches a filled value)` in
+snapshots and page text", full stop. True of the field; false of a COPY, for any
+sensitive value six-to-eight digits long, because `registrableNeedle` refused
+those outright. The shape rule is gone and the sentence now carries the scope
+the mechanism actually has — *the field reads as the marker, and so does a copy
+the site makes of it while you are still on that site.* **This is the third
+round in which a corrected sentence was corrected to a new sentence that was
+still slightly too wide, and the pattern is worth naming: the sentence describes
+the mechanism's intent; the qualifier lives in a predicate two files away.**
+
+### Lifetime — WHEN the redactor holds a value (2026-08-05, fourth gate)
+
+The fifth qualifier and the seventh mechanism class. Scope is *where* the
+redactor looks, alphabet is *what bytes* it compares, coverage is *which values*
+it was ever given; this is *when it holds one*, and sorting the existing
+findings by that question makes four fall out that the other six do not span.
+
+**The invariant, as one sentence.** *A value Aperture writes into a page stays
+covered from before the write until the redactor's own clock or the human's own
+lock says otherwise — the only disarms are an outcome that proves the value
+never landed, the TTL, and a vault lock; never an event a page can cause, and
+never a drop of coverage that a different write earned.*
+
+The four members, and what each one is:
+
+| # | member | which clause it broke |
+|---|---|---|
+| 1 | **The seventh sink.** `invalidate(documentReplaced)` called `clearNeedles`, so the navigation that DELIVERED the value disarmed the redactor | *never an event a page can cause*. Filed under scope at the time; it is not a scope bug — the scope was right and the value was forgotten at the wrong moment |
+| 2 | **`dropNeedles`'s cross-fill residual.** A refusal on attempt two removed a needle attempt one had earned | *never a drop of coverage a different write earned*. Fixed: `registerNeedles` returns what it ADDED and only that comes back off |
+| 3 | **The TTL boundary.** Ten minutes, then every copy the page made goes clear | the clock clause, which is the disclosed exception rather than a violation. Ruled, never measured at runtime — stated rather than implied |
+| 4 | **`unmarkTainted`'s asymmetry.** Taint comes off on a global refusal and stays on every uncertain outcome | *proves the value never landed*. Correct, and until now reasoned about nowhere near the other three, which is how 1 and 2 both shipped |
+
+**The guard is `test/lifetime.test.ts`,** and it enumerates disarms rather than
+instances. Two tables, both total in both directions: every expression in `src/`
+that can reduce what the redactor will produce, ruled by the function it may
+live in; and every call site of the three coverage-shrinking functions, ruled by
+the event class that fires it — `PROVES-NOTHING-LANDED`, `TTL`, `HUMAN-ACT`.
+Re-adding `clearNeedles` to `invalidate` lands there as an unruled row before it
+can land in a snapshot as a password.
+
+**"Shrink" means what `needlesFor` will RETURN, not what the map contains,** and
+that distinction was bought with a sabotage row rather than reasoned out. The
+first version of the table enumerated removals — `delete`, `clear` — and a row
+that *adds* to the origin-bound set takes coverage away just as completely,
+because such a needle is refused on every carried origin. One helper called from
+`invalidate`, confining every live needle to its filled origin, re-opened F-A,
+F-D and F-E for every value with the whole suite green. `narrow.add(` is
+therefore ruled as a shrink.
+
+What the guard cannot do, stated because every guard here states it: it cannot
+execute the store. `engine.ts` imports `electron`, so no unit test in this repo
+can import it, and the lifetime logic is not in the pure leaf the way
+`registrableNeedle` is. Members 1 and 2 have live counterparts (G19h, G30e; and
+the `dropNeedles` signature is checked in source). Members 3 and 4 have rulings
+and **no runtime measurement anywhere.**
 
 ### What the marker asserts — and what it used to assert falsely
 
@@ -489,26 +565,50 @@ also precisely why the marker cannot claim the value belongs where it was found.
 `withheld` is kept and is load-bearing in the other direction — the agent must
 read the string as Aperture removing text rather than as the page's own content.
 
-**And the needle bar was raised for one alphabet.** `MIN_NEEDLE_LENGTH = 6` is
-about the size of the alphabet a needle is drawn from, and it silently assumed
-that alphabet was a password's. A six-character value drawn from `[0-9]` has a
-million spellings rather than a hundred billion, and digits are the most common
-thing on an ordinary page. So `registrableNeedle` (in `redact.ts`, a pure leaf,
-so the suite executes the shipped rule) refuses an all-digit value shorter than
-**nine** characters. The value that excludes is the one-time code, and it needs
-no needle: single-use, replay-blocked, live for about thirty seconds, against a
-needle that costs ten minutes of false positives on every origin the tab
-afterwards visits. It stays covered by the **taint** branch, which is keyed on
-the element rather than the value and therefore has no false positives at all
-(G26a-blind). **Residual, stated because it is a real loss:** a sensitive profile
-value that is all digits and shorter than nine — a short account number — gets
-taint coverage and no needle, so a copy the page makes of it is not scrubbed.
+**And one class of value has a shorter REACH — corrected 2026-08-05, fourth
+gate; this paragraph previously described a shorter LIFE.** `MIN_NEEDLE_LENGTH
+= 6` is about the size of the alphabet a needle is drawn from, and it silently
+assumed that alphabet was a password's. A six-character value drawn from `[0-9]`
+has a million spellings rather than a hundred billion, and digits are the most
+common thing on an ordinary page.
 
-G31 is the guard, and it is the only one here that fails on OVER-redaction. It
-carries its own control: the same page holds the co-filled **username**, which is
-a needle by every rule and must still be redacted in the same snapshot. Without
-that row a green G31 would be indistinguishable from redaction being switched
-off.
+The third gate measured the cost of that and the fix it prompted was
+`registrableNeedle` refusing an all-digit value shorter than **nine** characters
+outright. **Wrong instrument, and the fourth gate measured the bill.** On the
+origin the value was filled into, one line of ordinary page script —
+`a.href = '/leak?pw=' + pw.value + '&c=' + otp.value` — returned
+`link e1 "Continue to checkout" /leak?pw=&c=108140`, the code in clear on the
+very next snapshot; `browser_read` was clean only because it takes a live
+`taintedValues` walk, and **an href is not innerText**, which is the G19b
+argument re-opened for this value class. And the refusal did not only unneedle
+one-time codes: a 6-to-8 digit `nationalId`, `bankAccount`, `taxId`, or a
+`salaryExpectation` of `120000` are sensitive by this product's own ruling, all
+long-lived, and all were left with taint coverage and no needle anywhere.
+
+**The diagnosis is that the collision was on a CARRIED origin, so the fix is
+scope rather than shape.** `registrableNeedle` is a length bar again and nothing
+else. `originBoundNeedle` (same pure leaf, same reason) answers a different
+question — *how far may this needle reach* — and a short all-digit value is
+registered like any other and matched **only on the origin it was filled into**
+(`engine.ts`, `needlesFor`, which is handed `here` and `carried` as two fields
+rather than one list precisely so this decision is spellable).
+
+**Residual, stated exactly, because it is a real loss and not a closure:** a
+short all-digit value copied onto an origin the tab merely CARRIES — a foreign
+carrier tab, or a self-navigation away with the digits in the URL — is not
+scrubbed there. That is not an oversight: on a carried origin nothing
+distinguishes those six digits from the page's own order number, which is what
+the third gate measured. A marker that is sometimes a lie is worse than coverage
+that is sometimes absent, and the trade is made at the narrowest place it can be.
+
+G31 and G32 are the two directions of that one bound and neither is sufficient
+alone. **G31** is the only guard here that fails on OVER-redaction: the code
+must not rewrite an unrelated origin, and it carries its own control — the same
+page holds the co-filled **username**, a needle by every rule, which must still
+be redacted in the same snapshot, so a green G31 cannot be redaction being
+switched off. **G32** fails if the bound is implemented as a refusal to register
+rather than as a limit on reach: the same code, copied into a link target on the
+origin it was filled into, must come back as the marker.
 
 ### The alphabet — the redactor reads what the renderer writes
 
@@ -601,11 +701,12 @@ percent-encoded), G19k (a cross-origin self-navigation with the value in the
 **fragment**), G19l (a `window.open` scheme Aperture would otherwise have turned
 into a third-party search), G19m (a two-hop opener chain), **G30a-e (all of the
 above, re-pointed at the PROFILE fill path — the echo, the href, the carrier
-tab, the foreign carrier, the self-navigation)** and **G31 (the only leg here
-that fails on OVER-redaction: a value too short to be a needle must not rewrite
-an unrelated origin, while a real needle on the same page still must)** — 63
-guards in the `allow` phase — and, for the recurrence mechanism rather than the
-instances,
+tab, the foreign carrier, the self-navigation)**, **G31 (the only leg here that
+fails on OVER-redaction: an origin-bound value must not rewrite an unrelated
+origin, while a real needle on the same page still must)** and **G32 (the same
+bound from the other side: that value, copied into a link target on the origin
+it WAS filled into, must come back as the marker)** — in the `allow` phase — and,
+for the recurrence mechanism rather than the instances,
 `test/completeness.test.ts` and `test/urlsurfaces.test.ts`. The first is total
 over **two** axes: what
 the diff reports, and whether the field can carry a secret. The second axis is
@@ -627,12 +728,16 @@ stops scrubbing either field **or lets anything other than the active tab choose
 the destination**, if a third file names `REDACTED_HREF`, or if a second
 implementation of "which origin is this URL on" appears.
 
-`test/fillpaths.test.ts` and `test/egress.test.ts` are the two added in the third
-gate, and each closes a class rather than an instance — the first by enumerating
-every call site of the one fill funnel and requiring both halves of the arming,
-the second by enumerating the platform primitives that reach outside a page and
-requiring a ruling on each. Both are argued at their own headers, including what
-they cannot do.
+`test/fillpaths.test.ts` and `test/egress.test.ts` were added in the third gate
+and rebuilt in the fourth, because both enumerated the wrong unit — a
+`registerTool` block and a list of chosen function names — and both passed a
+genuinely new member of their own class. They now key off the thing the class is
+about: the write itself, and the module surface. `test/lifetime.test.ts` is the
+fourth gate's addition and covers the seventh class. All three share one source
+reader, `test/lib/source.ts`, for the reason two of them needed rebuilding: a
+second copy of a parser is the same failure as a helper wired to some of the
+places its sentence applies. Each is argued at its own header, including what it
+cannot do.
 
 **One process guarantee, not a security one.** `bench/guards.mjs` refuses to
 start when `out/main/index.js` is older than anything under `src/`, and prints
@@ -643,48 +748,82 @@ byte-identical to a green run against the right one. The refusal cannot be
 forgotten, because forgetting is the mistake; the hash makes a pasted verdict
 name what produced it.
 
-## The stopping criterion: six mechanisms, six guards, six sabotage rows (2026-08-05)
+## The stopping criterion: seven mechanisms, seven guards, author-independent sabotage (2026-08-05)
 
 Fifteen findings across four rounds, and the count never bent — read found 0,
 probe 4, fixing 5, gate 7, fix 9, gate 11, fix 13, gate 15. So "no more findings"
 was the wrong criterion. It is unfalsifiable, and it had been wrong four times.
 
-Sorted by **mechanism** rather than by surface, the fifteen collapse to six. The
-criterion that can actually be met, and that the third gate proposed: *every
-mechanism has a guard that fails when that mechanism regresses, and each guard
-has been shown to fail by sabotage.* Three of six held that at `3942ff8`. All six
-hold it now, and the sabotage column is measured rather than argued — each row is
-one exact substitution applied to the tree, run, and reverted, with the artifact
-hash recorded by the runner.
+Sorted by **mechanism** rather than by surface, the findings collapse to seven.
+The criterion the third gate proposed was: *every mechanism has a guard that
+fails when that mechanism regresses, and each guard has been shown to fail by
+sabotage.*
 
-| # | mechanism | instances | the guard that covers it | sabotage — what was reverted, and what went red |
-|---|---|---|---|---|
-| **A** | **enumeration** — a sink nobody listed | 1, href, title/url, tabs list, `sel.tag`, select labels, obstructor, navigate url, `r.tag` | `completeness.test.ts`: totality over both types by tsc, and "rendered" is a **measurement** — a canary in every string-bearing field, `renderFull` run, survivors checked against their rulings | rule `SnapshotNode.name` `not-page-text` with a plausible sentence → **RED**, on *no RENDERED page-controlled string is ruled anything but a sink* and on *every OTHER rendered field is on the frozen list* |
-| **B** | **scope** — the redactor's reach does not follow the value | F-A, seventh sink, F-E, F-D | origin-keyed needles + `carriedOrigins` (opener scope, and every origin left) | `originScope` returns the current origin only → **RED — G19i, G19k, G19m, G30d, G31** (G31 too, and correctly: its control needle reaches the unrelated origin only through the carried scope) |
-| **C** | **alphabet** — redactor and renderer read different bytes | F-B, F-C | walk-time `stripFormat`, one `redactUrl` composing `scrubUrlish`, `canonicalNeedle` | `redactUrl` uses the text scrub, so the decoded readings are not searched → **RED — G19j, G19j2** |
-| **D** | **parity** — one function, two call sites, divergent treatment | sink 10, F-G | `urlsurfaces.test.ts`, now over **all three** page-influenced arguments of `routeCapture` rather than two | restore `openUrls: t.list().map(…)` on the human path → **RED**, *every routeCapture call site treats ALL THREE page-influenced arguments* |
-| **E** | **egress** — Aperture acts on a page-supplied string | eleventh sink, downloads | `test/egress.test.ts`: the platform primitives enumerated, every occurrence ruled, **total in both directions** | delete the `will-download` handler → **RED**, on *every ruling still has an affordance under it* (the stale-ruling half) and on *the download row is a handler and not a hope* |
-| **F** | **coverage** — a data class the machinery was never wired to | F-F | `test/fillpaths.test.ts`: every call site of the one fill funnel must reach `registerNeedles` **and** `markTainted`, before the write — plus G30a-e live | drop `registerNeedles` from `browser_fill_form` → **RED** in the suite (*BOTH fill paths reach registerNeedles and markTainted*) **and RED live — G30a, G30b, G30c, G30d, G30e** |
+**Those two clauses are not equivalent, and the fourth gate proved the
+difference by measurement.** It re-applied the recorded sabotage rows for the
+two newest guards — both went red, exactly as claimed — and then wrote *its own*
+row for each: a different instance of the same class, not the finding the guard
+was written from. **Both went green.** A guard that fails on the instance it was
+written from has not been shown to fail *when the mechanism regresses*; it has
+been shown to recognise its own author's example. That is this programme's
+recurrence pattern — *a helper written for a sentence, wired to only some of the
+places the sentence applies* — reproduced inside the guards.
 
-**Two of the six are closed by construction rather than by guard, and that is
+**So the criterion carries a third clause, and it is the whole difference:**
+
+> **The sabotage row must be an instance of the class that the guard's author did
+> not have in hand when writing it** — a different member, not the finding that
+> prompted it. Equivalently: someone other than the guard's author picks the row.
+
+It is cheap to satisfy and it is exactly what an independent gate does anyway.
+Its value is not that it is hard; it is that a guard which cannot survive it is
+*known* not to be structural, and the table below can say which rows have been
+put through it and which have not.
+
+Each row is one exact substitution applied to the tree, run, and reverted, with
+the artifact hash recorded by the runner.
+
+| # | mechanism | instances | the guard that covers it | sabotage — the obvious row | sabotage — an instance the author did not have in hand |
+|---|---|---|---|---|---|
+| **A** | **enumeration** — a sink nobody listed | 1, href, title/url, tabs list, `sel.tag`, select labels, obstructor, navigate url, `r.tag` | `completeness.test.ts`: totality over both types by tsc, and "rendered" is a **measurement** — a canary in every string-bearing field, `renderFull` run, survivors checked against their rulings | rule `SnapshotNode.name` `not-page-text` with a plausible sentence → **RED**, on *no RENDERED page-controlled string is ruled anything but a sink* | **YES — the gate's own row.** A NEW rendered field (`SnapshotNode.placeholder`) ruled `not-page-text`: green at `43440a1`'s predecessor, **RED** once "rendered" became a measurement, and re-applied RED by the third and fourth gates |
+| **B** | **scope** — the redactor's reach does not follow the value | F-A, seventh sink, F-E, F-D | origin-keyed needles + `carriedOrigins` (opener scope, and every origin left); `OriginScope` now answers `here` and `carried` as two fields | `originScope` reports no carried origins → **RED — G19i, G19k, G19m, G30d, G31** (G31 too, and correctly: its control needle reaches the unrelated origin only through the carried scope) | **YES — the gate's own row.** F-E was constructed by a reviewer against a build whose author believed the case unclosable, and it is now G19k |
+| **C** | **alphabet** — redactor and renderer read different bytes | F-B, F-C | walk-time `stripFormat`, one `redactUrl` composing `scrubUrlish`, `canonicalNeedle` | `redactUrl` uses the text scrub, so the decoded readings are not searched → **RED — G19j, G19j2** | **NO — not attempted.** The builder's row is the only one. The class's own repair is partly by construction (`redactFreeText` has no `marker` parameter), which is stronger than a row, but that is an argument and not a measurement |
+| **D** | **parity** — one function, two call sites, divergent treatment | sink 10, F-G | `urlsurfaces.test.ts`, over **all three** page-influenced arguments of `routeCapture` | restore `openUrls: t.list().map(…)` on the human path → **RED**, *every routeCapture call site treats ALL THREE page-influenced arguments* | **NO — not attempted.** F-G was itself an independent finding *about* this guard, which is evidence the guard was narrow rather than evidence it is now wide |
+| **E** | **egress** — Aperture acts on a page-supplied string | eleventh sink, downloads | `test/egress.test.ts`: the ELECTRON SURFACE enumerated — every imported symbol with its files, every member of every such surface ruled — plus the eleven non-Electron primitives, total in both directions | **S-E2**, the gate's row: a new tool acting on page strings through `clipboard.writeText` and `shell.openPath`. Green against the eleven regexes; **RED** now, on three assertions, naming both members | **YES — S-E3, and it changed the guard.** `webContents.downloadURL(<page-chosen URL>)` written with an INLINE receiver: **GREEN, 567/567**, while the identical call in `tabs.ts` was red — the same act caught or missed by how its author spelled the receiver. Closed for the inline form; **RED** after |
+| **F** | **coverage** — a data class the machinery was never wired to | F-F | `test/fillpaths.test.ts`: the preload's channel surface frozen, one sender proved for the write channel, every `requestFill(` occurrence named by its enclosing function and frozen, both arming halves required before each write | **S-F2**, the gate's row: a third fill path through a module-scope helper. Green (561/561) against the `registerTool` block scan; **RED** now, on two assertions | **YES — S-F3.** A *second* `requestFill` inside `applyFill` — a retry writing values the first arming does not cover. It passes the enclosing-function check by construction, and the frozen site list is what catches it: **RED**, tsc clean |
+| **G** | **lifetime** — *when* the redactor holds the value | seventh sink, `dropNeedles` cross-fill, TTL boundary, `unmarkTainted` asymmetry | `test/lifetime.test.ts`: every expression that can reduce what the redactor produces, ruled by the function it may live in; every call site of a coverage-shrinking function, ruled by its event class | **S-L1**: restore the seventh sink — `clearNeedles` for every origin inside `invalidate` → **RED** on two assertions | **YES — S-L2, and it changed the guard.** A helper called from `invalidate` that moves every live needle into the ORIGIN-BOUND set: coverage confined, **nothing deleted from anything**, F-A/F-D/F-E re-opened for every value, **GREEN 575/575**. `narrow.add(` is now ruled as a shrink; **RED** after |
+
+**Two of the seven are closed by construction rather than by guard, and that is
 worth more.** `redactFreeText` lost its `marker` parameter, so "the right marker
 with the wrong scrub" is a compile error rather than a reviewable mistake; and
-the egress class is *enumerable to exhaustion*, so E is the one row here where
-the guard is a complete audit rather than a sample. The other four are guards
-over call sites and over measurements, which is the strongest instrument
-available for properties that live in the source.
+`registerNeedles` returns what it added, so an undo that removes another fill's
+coverage is no longer spellable. The rest are guards over call sites and over
+measurements, which is the strongest instrument available for properties that
+live in the source.
+
+**Two rows of the seven have not been put through the third clause: C and D.**
+That is stated rather than papered over. Neither has an author-independent row,
+so what is known about them is that they catch the instance they were written
+from — which is exactly the standard the fourth gate showed to be insufficient.
+They are the first thing a fifth reviewer should point at.
+
+**And twice, satisfying the clause changed the guard rather than confirming
+it** (E and G). In both cases the author-independent row was GREEN on the first
+attempt and the fix was one line of the guard. That is the clause earning its
+place: a row nobody would have thought of is worth more than three rows
+everybody would.
 
 **What this does not claim.** It does not claim there is no sixteenth finding. It
 claims something narrower and checkable: a sixteenth finding that is an instance
-of A–F fails a guard, and one that is not is a **seventh mechanism** — which is
+of A–G fails a guard, and one that is not is an **eighth mechanism** — which is
 the thing to report, because it is the only kind of finding that moves the count
-that matters. Two mechanisms appeared in the last two rounds and one of them (E)
-was enumerable the moment it was named. `R5` — transformations the *page*
-performs (base64, reversal, one character per element) — remains unclosable by
-substring matching, is documented as such, and is not a seventh mechanism.
+that matters. `R5` — transformations the *page* performs (base64, reversal, one
+character per element) — remains unclosable by substring matching, is documented
+as such, and is not a mechanism class.
 
-The next reviewer's job is therefore verifying six guards rather than inventing a
-fifteenth attack. That is a job that terminates.
+The next reviewer's job is therefore verifying seven guards, and constructing an
+author-independent row for C and D, rather than inventing a sixteenth attack.
+That is a job that terminates.
 
 ## `GET /metrics`: an authenticated read-only endpoint (2026-08-02)
 
@@ -791,6 +930,36 @@ primitive named, and a ruling whose affordance has disappeared fails too. That
 second half is what stops this becoming the stale audit the preload `reason:`
 count turned out to be, where the number stayed at four while the membership
 changed underneath it.
+
+**And "named by the platform" was true of the platform and not of the test —
+corrected 2026-08-05, fourth gate.** The enumeration was eleven hand-written
+regexes, one of which was `/shell\.openExternal\(/`: the single FUNCTION name,
+not the `shell` module. `shell.openPath`, `clipboard.writeText`,
+`webContents.print`, `session.setProxy` and `net.request` were all outside it,
+and a new `browser_share` tool acting on page-written strings through two of
+them shipped past the whole suite green. **A list of chosen function names is a
+thing somebody remembers; a module surface is a thing the platform publishes.**
+So the unit of enumeration is the surface now: every value symbol imported from
+`'electron'` is frozen **with the files that import it**, and every member
+accessed on one of those symbols — plus on the two objects held by reference
+rather than by import, `Session` and `WebContents` — carries its own ruling on
+the one question the class is about. `shell.openPath` beside a ruled
+`shell.openExternal` is an unruled row, not a near-miss. The eleven primitive
+rows stay on top: they still cover what is *not* an Electron member (node's
+`fetch`, `createServer`, `writeFile`, `child_process`) and one of them,
+`.loadURL(`, is deliberately receiver-independent.
+
+**What that guard cannot do, measured rather than guessed.** `Session` and
+`WebContents` receivers are found lexically, and a sabotage row wrote the same
+affordance two ways: `webContents.downloadURL(<a page-chosen URL>)` was RED in
+`tabs.ts`, where a `const wc = …` binding exists, and **GREEN in `tools.ts`**,
+where the same call is written inline — the same act, caught or missed according
+to how its author happened to spell the receiver. Closed for the inline form
+(the pattern now allows an intervening call, which also surfaced a real
+previously-unenumerated member, `WebContents#session` in `tabs.ts`). Still open
+for a receiver the lexer cannot follow — one passed through a generic or
+returned with an inferred type — and that residual is why `.loadURL(` keeps its
+receiver-independent row.
 
 | affordance | page-supplied? | ruling |
 |---|---|---|

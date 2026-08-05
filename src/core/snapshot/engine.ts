@@ -13,6 +13,7 @@ import {
   REDACTED_HREF,
   canonicalNeedle,
   collectTaintedValues,
+  originBoundNeedle,
   redactObserved,
   registrableNeedle,
   scrub,
@@ -474,6 +475,15 @@ export { REDACTED, REDACTED_HREF } from './redact.js';
 
 interface NeedleSet {
   values: Set<string>;
+  /**
+   * The subset of `values` that may only be matched on THIS origin.
+   *
+   * `originBoundNeedle` (`redact.ts`) decides membership and argues it. The
+   * short version: a short all-digit value is a real needle where it was
+   * filled and a collision anywhere else, so the reach is narrowed rather than
+   * the value refused.
+   */
+  narrow: Set<string>;
   timer: NodeJS.Timeout;
 }
 
@@ -523,15 +533,34 @@ interface NeedleSet {
  * part is the one that took two gates to get right, and the rule behind it is
  * one sentence: **coverage follows the value, not the tab's present location.**
  */
+export interface TabOrigins {
+  /** The origin of the document committed in this tab right now. */
+  here: string | null;
+  /** Every OTHER origin whose filled values this tab's content could carry. */
+  carried: string[];
+}
+
 export interface OriginScope {
-  /** Every origin whose filled values this tab's content could be carrying. */
-  forTab(tabId: string): string[];
+  /**
+   * Where this tab is, and what it carries — as two fields rather than one
+   * list.
+   *
+   * THE SHAPE IS THE POINT, and it changed 2026-08-05 (fourth gate). This used
+   * to answer one flat array, which is the right answer to "which needles could
+   * appear here" and the wrong answer to "which needles BELONG here". Those are
+   * different questions for exactly one class of value — the short all-digit
+   * one, whose match is meaningful where it was filled and a collision
+   * everywhere else (`redact.ts`, `originBoundNeedle`) — and a flat array gives
+   * a caller no way to ask the second. Two fields make the distinction
+   * unspellable-away rather than a comment.
+   */
+  forTab(tabId: string): TabOrigins;
 }
 
 /** Fails closed to "no origins", so an unwired scope over-redacts nothing and
  *  under-redacts everything — which is why `index.ts` wires it before the MCP
  *  server can accept a call. */
-let originScope: OriginScope = { forTab: () => [] };
+let originScope: OriginScope = { forTab: () => ({ here: null, carried: [] }) };
 
 export function setOriginScope(scope: OriginScope): void {
   originScope = scope;
@@ -572,26 +601,37 @@ function needleForms(v: string): string[] {
  * Deriving it here from the tab's live URL would be a second source of truth
  * for the fact the whole fill path is organised around.
  */
-export function registerNeedles(origin: string, values: string[]): void {
-  if (!origin) return;
+export function registerNeedles(origin: string, values: string[]): string[] {
+  if (!origin) return [];
   const usable = values
     .filter(registrableNeedle)
     .flatMap(needleForms);
-  if (!usable.length) return;
+  if (!usable.length) return [];
 
   const existing = needles.get(origin);
   if (existing) clearTimeout(existing.timer);
   const set = existing?.values ?? new Set<string>();
-  for (const v of usable) set.add(v);
+  const narrow = existing?.narrow ?? new Set<string>();
+  // WHAT THIS CALL ACTUALLY ADDED, and nothing else. `dropNeedles` takes this
+  // list, so an undo can never remove coverage a DIFFERENT fill earned — see
+  // that function.
+  const added: string[] = [];
+  for (const v of usable) {
+    if (set.has(v)) continue;
+    set.add(v);
+    if (originBoundNeedle(v)) narrow.add(v);
+    added.push(v);
+  }
 
   const timer = setTimeout(() => needles.delete(origin), NEEDLE_TTL_MS);
   // Never a reason to hold the process open; the values die with it anyway.
   timer.unref?.();
-  needles.set(origin, { values: set, timer });
+  needles.set(origin, { values: set, narrow, timer });
+  return added;
 }
 
 /**
- * Remove specific needles.
+ * Undo one registration — exactly the values THAT call added.
  *
  * The undo half of the pair that closes the redaction window in both
  * directions: register BEFORE the write, so no concurrent snapshot can read a
@@ -599,17 +639,41 @@ export function registerNeedles(origin: string, values: string[]): void {
  * value provably never landed — a global refusal, where the preload completes
  * validation before the first write.
  *
- * Named values rather than "everything for this tab", so a refused fill cannot
- * un-redact an earlier successful one. (Residual: if the same value were
- * registered twice and one of those fills were later refused, this drops it for
- * both. Reaching that needs a successful fill whose taint was then cleared,
- * because a second `apply` on a filled form answers `ALREADY_FILLED` before it
- * ever reaches this path.)
+ * ---------------------------------------------------------------------------
+ * IT TOOK A LIST OF VALUES, AND THAT WAS THE BUG — 2026-08-05, fourth gate
+ * ---------------------------------------------------------------------------
+ *
+ * This used to take the caller's intended values and delete each of them,
+ * which means a refusal on attempt two removed a needle attempt ONE had
+ * genuinely earned. `browser_fill_form` with `overwrite: true`, an earlier
+ * successful fill of the same value, and an origin-changed refusal is the
+ * three-line reproduction; the field stayed masked by taint and every COPY the
+ * page had already made went clear.
+ *
+ * That residual was disclosed at the time and justified with a wrong sentence:
+ * *"keeping needles for a fill that provably wrote nothing is the
+ * over-redaction R4 is about."* It is not. R4 is a needle matching UNRELATED
+ * content on ANOTHER origin. A needle for a value an earlier fill really did
+ * write into this origin is exactly-correct redaction, and keeping it costs
+ * nothing R4 cares about. The trade was value-keyed dropping versus
+ * refcounting, and the fix is neither: `registerNeedles` returns what it
+ * ADDED, and only that comes back off. A second registration of the same value
+ * adds nothing and therefore drops nothing.
+ *
+ * A LIFETIME PROPERTY, and it is the second of the four members of that class
+ * (`test/lifetime.test.ts`): a disarm must be an outcome that proves the value
+ * never landed, and "an outcome of a DIFFERENT fill" is not one.
  */
-export function dropNeedles(origin: string, values: string[]): void {
+export function dropNeedles(origin: string, registered: string[]): void {
   const n = needles.get(origin);
   if (!n) return;
-  for (const v of values.flatMap(needleForms)) n.values.delete(v);
+  // No `needleForms` expansion here: the argument is what `registerNeedles`
+  // returned, already in the exact spellings the store holds. Re-deriving them
+  // is how a canonical form could be dropped without its raw twin.
+  for (const v of registered) {
+    n.values.delete(v);
+    n.narrow.delete(v);
+  }
   if (n.values.size === 0) clearNeedles(origin);
 }
 
@@ -663,9 +727,24 @@ export function hasNeedles(origin: string): boolean {
  */
 function needlesFor(tabId: string): string[] {
   const all = new Set<string>();
-  for (const origin of originScope.forTab(tabId)) {
-    const n = needles.get(origin);
+  const { here, carried } = originScope.forTab(tabId);
+  if (here) {
+    const n = needles.get(here);
+    // Everything, including the origin-bound values: this is where they were
+    // filled, so a match here is the value rather than a collision.
     if (n) for (const v of n.values) all.add(v);
+  }
+  for (const origin of carried) {
+    const n = needles.get(origin);
+    if (!n) continue;
+    for (const v of n.values) {
+      // THE ONE PLACE THE NARROW SET IS READ. A short all-digit needle does not
+      // travel: on an origin this tab merely carries, nothing distinguishes it
+      // from that page's own order number, and the marker would be a claim the
+      // agent may act on rather than a protection (`redact.ts`,
+      // `originBoundNeedle`; G31 fails if this line goes away).
+      if (!n.narrow.has(v)) all.add(v);
+    }
   }
   // Longest first, so a short needle that is a substring of a long one cannot
   // shred the long one into unmatchable pieces before it is tried.

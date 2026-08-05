@@ -5,11 +5,23 @@ import type { ContainerId, LoadState, TabId, TabInfo } from '@shared/types';
 import { containers } from '@privacy/containers';
 import { applyUaProfile, buildUaProfile, type UaProfile } from '@privacy/useragent.js';
 import { setWindowOffset } from '@core/snapshot/act.js';
-import { hasNeedles } from '@core/snapshot/engine.js';
+import { hasNeedles, type TabOrigins } from '@core/snapshot/engine.js';
 import { originOf } from '@shared/origin.js';
 
 /** Height of the browser chrome (tab strip + address bar), in CSS px. */
 export const CHROME_HEIGHT = 88;
+
+/**
+ * A tab's origin scope as ONE set, for the one caller that wants it that way.
+ *
+ * Inheritance at window-open time is the only place the `here`/`carried`
+ * distinction genuinely collapses: from the NEW tab's point of view every
+ * origin the opener could be showing is an origin it merely carries — it was
+ * never on any of them, including the one the opener is on right now.
+ */
+function flatten(scope: TabOrigins): string[] {
+  return scope.here ? [scope.here, ...scope.carried] : [...scope.carried];
+}
 
 /** Built once from the real Chromium version; see privacy/useragent.ts. */
 let cachedUa: UaProfile | null = null;
@@ -344,11 +356,11 @@ export class TabManager extends EventEmitter {
    * Deliberately not on `TabInfo` — this is redaction scope, not something the
    * renderer or the agent has any business reading.
    */
-  originScope(id: TabId): string[] {
+  originScope(id: TabId): TabOrigins {
     const rec = this.tabs.get(id);
-    if (!rec) return [];
+    if (!rec) return { here: null, carried: [] };
     const here = originOf(rec.view.webContents.getURL());
-    const out = here ? [here] : [];
+    const carried: string[] = [];
     for (const o of rec.carriedOrigins) {
       // Pruned here rather than on a timer: this is the only place that reads
       // the set, so a dead entry is dropped at exactly the moment anybody would
@@ -358,9 +370,14 @@ export class TabManager extends EventEmitter {
         rec.carriedOrigins.delete(o);
         continue;
       }
-      if (o !== here) out.push(o);
+      if (o !== here) carried.push(o);
     }
-    return out;
+    // TWO FIELDS RATHER THAN ONE LIST — 2026-08-05, fourth gate. `here` is
+    // where a filled value would BELONG; `carried` is where it could merely
+    // APPEAR. The redactor treats one class of needle differently across that
+    // line (`engine.ts`, `needlesFor`), and flattening the two here would put
+    // the decision somewhere that cannot see the difference.
+    return { here, carried };
   }
 
   // -- internals ------------------------------------------------------------
@@ -464,7 +481,7 @@ export class TabManager extends EventEmitter {
         url,
         container: rec.container,
         activate: true,
-        inherits: this.originScope(rec.id),
+        inherits: flatten(this.originScope(rec.id)),
       });
       return { action: 'deny' };
     });

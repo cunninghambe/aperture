@@ -24,7 +24,7 @@
  *
  *   --phase=allow (default) — Aperture launched `--seed-vault --seed-profile
  *                             --e2e-consent=allow --e2e-consent-delay-ms=1500`.
- *                             Runs G1-G15, G16-G27a, and G30-G31.
+ *                             Runs G1-G15, G16-G27a, and G30-G32.
  *                             `--seed-profile` is not optional since 2026-08-05:
  *                             the G30 block exercises the PROFILE fill path,
  *                             which had none of the credential path's redaction
@@ -1799,6 +1799,57 @@ const beta = refFor('Beta action', 'button');
       `codes checked: 2 windows; present in read: ${codes.filter((c) => readOtp.includes(c)).length}`,
     );
 
+    // --- G32: the origin bound, measured where the value BELONGS ------------
+    //
+    // G26a-blind asserts the code is absent from `browser_read`, and it passes
+    // for a reason that does not generalise: `browser_read` takes a live
+    // `taintedValues` walk, so it sees the FIELD. An href is not innerText, so
+    // `browser_read` cannot see one at all — the G19b argument, re-opened for
+    // this value class. Nothing asserted the code was absent from a SNAPSHOT,
+    // and the fourth gate measured it leaking there:
+    //
+    //     link e1 "Continue to checkout" /leak?pw=&c=108140
+    //
+    // The cause was a SHAPE rule — `registrableNeedle` refused an all-digit
+    // value shorter than nine outright — introduced to stop an over-redaction
+    // the third gate measured on a CARRIED origin. Wrong instrument for a scope
+    // problem: it paid for one origin's false positives with every origin's
+    // coverage, and it unneedled a 6-to-8 digit nationalId, bankAccount or
+    // salary along with the one-time code. The rule is scope now
+    // (`redact.ts`, `originBoundNeedle`): registered like any other needle,
+    // matched only on the origin it was filled into.
+    //
+    // G31 and G32 are the two directions of that one bound and neither is
+    // sufficient alone. G31 fails if the bound stops existing; G32 fails if the
+    // bound is a refusal to register rather than a limit on reach.
+    {
+      const snapOtp = await call('browser_snapshot', { mode: 'full' });
+      const echoRef = refIn(snapOtp, 'Echo password to page', 'button');
+      if (!echoRef) {
+        check('G32', 'a short all-digit value is redacted in a copy the page makes on the FILLED origin',
+          false, '"Echo password to page" did not resolve to exactly one button');
+      } else {
+        await call('browser_act', { action: 'click', ref: echoRef });
+        await sleep(300);
+        const afterOtp = await call('browser_snapshot', { mode: 'full' });
+        // The link's OWN line, so this stays about the href even if some other
+        // sink regresses — the same reason G19b asserts on one line.
+        const leakLine =
+          afterOtp.split('\n').find((l) => l.includes('/leak?pw=')) ??
+          afterOtp.split('\n').find((l) => l.includes('Continue to checkout')) ??
+          '';
+        const carries = codes.filter((c) => leakLine.includes(c));
+        check(
+          'G32',
+          'a short all-digit value does not escape through a link href on the origin it was filled into',
+          leakLine !== '' && carries.length === 0 &&
+            leakLine.includes('/leak?pw=') && /matches-a-filled-value/.test(leakLine),
+          `link line: ${leakLine.trim().slice(0, 180) || '(no line carrying the echoed link)'}\n        ` +
+            `codes checked: ${codes.length} windows; present in the href: ${carries.length}`,
+        );
+      }
+    }
+
     const second = await call('vault_request_fill', { action: 'apply', entryId: entry });
     await sleep(300);
     const w2 = await vwitness();
@@ -2042,6 +2093,14 @@ const beta = refFor('Beta action', 'button');
   // nothing had been filled, which is a claim the agent may act on rather than
   // merely a gap.
   //
+  // WHAT HOLDS THIS GREEN CHANGED, AND THE LEG DID NOT — 2026-08-05, fourth
+  // gate. Between the third and fourth gates the code was not registered at
+  // all, so this leg passed because there was no needle. Now it IS registered
+  // and is refused only on origins the tab CARRIES (`redact.ts`,
+  // `originBoundNeedle`; `engine.ts`, `needlesFor`). That is a better reason
+  // for the same observation, and it is why G32 exists: without it, reverting
+  // to the refusal would look identical from here.
+  //
   // THE SECOND ROW IS WHAT MAKES THIS DISCRIMINATE. `ORDER-D` carries the
   // USERNAME from the same fill — a needle by every rule — on the same page, in
   // the same snapshot. Without it a green here is indistinguishable from
@@ -2075,7 +2134,7 @@ const beta = refFor('Beta action', 'button');
     const needleRedacted = !snap.includes(SEEDED_USER) && /withheld/.test(snap);
     check(
       'G31',
-      'a value too short to be a needle does not rewrite an unrelated origin, while a real needle on the same page still does',
+      'an origin-bound value does not rewrite an unrelated origin, while a real needle on the same page still does',
       out.includes(SAYS.FILLED) && /NUMBERSINK/.test(snap) &&
         codeSurvives && controlsSurvive && needleRedacted,
       `fill: ${out.split('\n')[0].slice(0, 120)}\n        ` +

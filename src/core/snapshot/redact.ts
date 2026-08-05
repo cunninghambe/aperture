@@ -236,22 +236,6 @@ export function canonicalNeedle(v: string): string {
 const MIN_NEEDLE_LENGTH = 6;
 
 /**
- * The same bar, raised for an ALL-DIGIT value — 2026-08-05, third gate.
- *
- * `MIN_NEEDLE_LENGTH` is about the size of the alphabet the needle is drawn
- * from, and it silently assumed that alphabet was a password's. A six-character
- * value drawn from `[0-9]` has a million spellings rather than a hundred
- * billion, and digits are the single most common thing on an ordinary page:
- * order numbers, prices, quantities, postcodes, timestamps, references.
- *
- * Nine is where an all-digit string stops colliding with ordinary page content
- * at a rate that makes the marker a LIE more often than a protection — and the
- * marker is a claim the agent may act on, which is why the third gate raised
- * this as a correctness problem rather than a cosmetic one.
- */
-const MIN_DIGIT_NEEDLE_LENGTH = 9;
-
-/**
  * Is this value worth a needle?
  *
  * A PURE PREDICATE, in the pure leaf, so the suite executes the shipped rule
@@ -259,30 +243,71 @@ const MIN_DIGIT_NEEDLE_LENGTH = 9;
  * policy about redaction, not bookkeeping about the store, and `engine.ts`'s
  * `registerNeedles` is its one caller.
  *
- * THE MEASURED CASE, and the reason the digit rule exists. A six-digit one-time
- * code was filled on one origin; the same tab then visited an unrelated origin
- * whose legitimate content contained that string, and the agent was shown
+ * ONE BAR, AND IT IS ABOUT LENGTH — the digit bar was reverted 2026-08-05,
+ * fourth gate. See `originBoundNeedle` for what replaced it and why.
+ */
+export function registrableNeedle(v: string): boolean {
+  return v.length >= MIN_NEEDLE_LENGTH;
+}
+
+/** Below this, an all-digit value collides with ordinary page content. */
+const MIN_WIDE_DIGIT_LENGTH = 9;
+
+/**
+ * Should this needle match ONLY on the origin it was filled into?
+ *
+ * ---------------------------------------------------------------------------
+ * THE INSTRUMENT WAS WRONG, AND THIS IS THE CORRECTION — 2026-08-05, fourth gate
+ * ---------------------------------------------------------------------------
+ *
+ * The third gate measured a real cost. A six-digit one-time code was filled on
+ * one origin; the same tab then visited an UNRELATED origin whose legitimate
+ * content contained that string, and the agent was shown
  * `"ORDER-B" | "(withheld: matches a filled value)"` while the same page in a
  * tab with no carried scope read `"377350"`. Precise rather than blanket — the
  * neighbouring order numbers survived — and still wrong in the way that costs
  * most: the same URL read differently in two tabs, with nothing in the output
- * saying so.
+ * saying so, and a marker that is a claim the agent may act on.
  *
- * WHAT IS NOT LOST BY EXCLUDING IT. A one-time code is single-use,
- * replay-blocked (`lastIssued`) and live for about thirty seconds, while a
- * needle costs ten minutes of false positives across every origin the tab
- * afterwards visits. It stays covered by the TAINT branch, which is keyed on the
- * ELEMENT rather than the value and therefore has no false positives at all;
- * G26a-blind measures exactly that and is not allowed to go red.
+ * The fix shipped for that was a SHAPE rule: refuse to register an all-digit
+ * value shorter than nine. The fourth gate measured what that cost and it is
+ * more than the one-time code it was aimed at
+ * (`docs/design/sink-closure-review-4.md` §4). Filled on the SAME origin, one
+ * line of page script:
  *
- * WHAT IS LOST, stated because it is real: a sensitive profile value that is all
- * digits and shorter than nine — a short account number — gets taint coverage
- * and no needle, so a COPY the page makes of it is not scrubbed.
+ *     leaklink.href = '/leak?pw=' + pw.value + '&c=' + otp.value;
+ *
+ * came back as `link e1 "Continue to checkout" /leak?pw=&c=108140` — the code
+ * in clear, on the origin it was filled into, on the very next snapshot. And
+ * the shape rule does not only unneedle one-time codes: a 6-to-8 digit
+ * `nationalId`, `bankAccount`, `taxId`, or a `salaryExpectation` of `120000`,
+ * are all sensitive by this product's own ruling, all long-lived, and were all
+ * left with taint coverage and no needle.
+ *
+ * **The collision the third gate measured was on a CARRIED origin.** That is
+ * the whole diagnosis: the problem was never the shape of the value, it was
+ * the REACH of the needle. So the rule is scope rather than shape — a short
+ * all-digit needle is registered like any other, and matched only where the
+ * value provably belongs: the origin it was filled into. On that origin a short
+ * numeric string is not "an order number that happens to collide"; it is the
+ * value Aperture just wrote, and the marker's claim is true.
+ *
+ * WHAT IS STILL LOST, stated exactly, because it is the residual and not a
+ * closure: a short all-digit value copied onto an origin the tab merely CARRIES
+ * — a foreign carrier tab the filled page opened, or a self-navigation away
+ * with the digits in the URL — is not scrubbed there. That is not an oversight
+ * to be fixed later: on a carried origin, nothing distinguishes those six
+ * digits from the page's own order number, which is exactly what the third gate
+ * measured. Trading a marker that is sometimes a lie for coverage that is
+ * sometimes absent is the trade this predicate exists to make, and it is made
+ * at the narrowest place it can be.
+ *
+ * Guarded in both directions: G31 (the code must NOT rewrite an unrelated
+ * origin, while a co-filled username on the same page still must) and G32 (the
+ * code must not survive a copy the page makes on the FILLED origin).
  */
-export function registrableNeedle(v: string): boolean {
-  if (v.length < MIN_NEEDLE_LENGTH) return false;
-  if (/^\d+$/.test(v) && v.length < MIN_DIGIT_NEEDLE_LENGTH) return false;
-  return true;
+export function originBoundNeedle(v: string): boolean {
+  return /^\d+$/.test(v) && v.length < MIN_WIDE_DIGIT_LENGTH;
 }
 
 /**

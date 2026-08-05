@@ -1162,7 +1162,10 @@ export function registerBrowserTools(
     const keys = targets.map((c) => c.key);
     const needleValues = fills.map((f) => f.value).filter(Boolean);
     markTainted(id, keys);
-    registerNeedles(pageOrigin, needleValues);
+    // WHAT THIS CALL ADDED, not what it intended to add. `dropNeedles` takes
+    // exactly this list, so a refusal here can never remove coverage an earlier
+    // successful fill of the same value earned (`engine.ts`, `dropNeedles`).
+    const registered = registerNeedles(pageOrigin, needleValues);
 
     // --- 12. the write -----------------------------------------------------
     const res = await requestFill(wc, {
@@ -1195,7 +1198,7 @@ export function registerBrowserTools(
         );
       }
       unmarkTainted(id, keys);
-      dropNeedles(pageOrigin, needleValues);
+      dropNeedles(pageOrigin, registered);
       return text(denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin }));
     }
 
@@ -1709,11 +1712,22 @@ export function registerBrowserTools(
   // BROWSER, which is a much larger claim and one the profile path had none of
   // the machinery to keep.
   //
-  // Both halves are now stated separately and both are true: the tool does not
-  // return them, and a copy the page makes of one is redacted, because
-  // `registerNeedles` is finally called on this path. The general lesson is the
-  // one the gate kept using as a search strategy — read the fix's own sentences
-  // and ask where else they apply.
+  // Both halves are now stated separately: the tool does not return them, and a
+  // copy the page makes of one is redacted, because `registerNeedles` is finally
+  // called on this path. The general lesson is the one the gate kept using as a
+  // search strategy — read the fix's own sentences and ask where else they apply.
+  //
+  // AND THE REPLACEMENT SENTENCE WAS STILL TOO WIDE — 2026-08-05, fourth gate.
+  // It said the values "read as (withheld…) in snapshots and page text", full
+  // stop, which was false of a COPY of any sensitive value six-to-eight digits
+  // long: `registrableNeedle` refused those outright, so a `nationalId`,
+  // `bankAccount` or `salaryExpectation` of that shape had taint coverage and no
+  // needle. The shape rule is gone (`redact.ts`, `originBoundNeedle`) and what
+  // replaced it is a scope rule, so the sentence now carries the scope the
+  // mechanism actually has: on the site the value was filled into. The pattern
+  // worth naming, because this is the third round of it — **the sentence
+  // describes the mechanism's intent and the qualifier lives in a predicate two
+  // files away.**
   server.registerTool(
     'browser_fill_form',
     {
@@ -1731,9 +1745,10 @@ export function registerBrowserTools(
         'Low-confidence matches are listed but NOT filled, because silently ' +
         'putting the wrong value in a field the human then submits is worse ' +
         'than leaving it blank. Sensitive fields (date of birth, national ID, ' +
-        'salary) show as "from profile" — no tool here returns one, the ' +
-        'browser inserts them directly, and once inserted they read as ' +
-        `${REDACTED} in snapshots and page text.\n\n` +
+        'salary) show as "from profile" — no tool here returns one, and the ' +
+        'browser inserts them directly. The field itself reads as ' +
+        `${REDACTED}, and so does a copy the site makes of it while you are ` +
+        'still on that site.\n\n' +
         ENVELOPE_POINTER,
       inputSchema: z.object({
         action: z.enum(['plan', 'apply']).default('plan'),
@@ -1912,7 +1927,7 @@ export function registerBrowserTools(
         id,
         sensitive.map((e) => e.key),
       );
-      registerNeedles(pageOrigin, needleValues);
+      const registered = registerNeedles(pageOrigin, needleValues);
 
       // NOT atomic: a profile fill of seven fields where one is disabled should
       // still fill the other six and say which one it skipped. A credential
@@ -1939,19 +1954,22 @@ export function registerBrowserTools(
         // stay. Taint is left alone: it is keyed on elements Aperture may have
         // touched and costs nothing but a mask on those fields.
         //
-        // ONE RESIDUAL, AND IT IS WIDER HERE THAN ON THE CREDENTIAL PATH.
-        // `dropNeedles` removes by VALUE, so if the same value were registered
-        // by an earlier SUCCESSFUL fill on this origin and a later fill of it
-        // were then refused, this drops the needle for both. `vault_request_fill`
-        // is protected from that by `ALREADY_FILLED`, which answers before a
-        // second apply ever reaches the write; `browser_fill_form` has no such
-        // gate, so reaching it needs `overwrite: true` plus a page that becomes
-        // unfillable between the two calls. The value stays covered by TAINT in
-        // that window — the field Aperture wrote is still masked — and what is
-        // lost is coverage of a COPY. Recorded rather than engineered around:
-        // keeping needles for a fill that provably wrote nothing is the
-        // over-redaction R4 is about, and it is the more common case by far.
-        if (!res.wrote) dropNeedles(pageOrigin, needleValues);
+        // THE CROSS-FILL RESIDUAL IS GONE — 2026-08-05, fourth gate.
+        //
+        // `dropNeedles` used to remove by VALUE, so a refusal here dropped a
+        // needle an earlier SUCCESSFUL fill of the same value had earned: the
+        // field stayed masked by taint and every COPY the page had already made
+        // went clear. Reaching it needed `overwrite: true` plus an
+        // origin-changed refusal — three lines, not a corner.
+        //
+        // It was disclosed at the time with a wrong justification: "keeping
+        // needles for a fill that provably wrote nothing is the over-redaction
+        // R4 is about". It is not. R4 is a needle matching UNRELATED content on
+        // ANOTHER origin, and a needle for a value this origin really was given
+        // costs R4 nothing. `registerNeedles` now returns what it ADDED and only
+        // that comes back off, so a second registration of the same value adds
+        // nothing and drops nothing.
+        if (!res.wrote) dropNeedles(pageOrigin, registered);
         return text(
           `fill refused: ${denyString(REASON_TO_CODE[res.reason], { origin: pageOrigin })}`,
         );

@@ -5,6 +5,7 @@ import {
   REDACTED,
   REDACTED_HREF,
   canonicalNeedle,
+  originBoundNeedle,
   redactObserved,
   registrableNeedle,
   scrubUrlish,
@@ -965,42 +966,76 @@ describe('the excluded fields stay excluded', () => {
 
 /**
  * R4, the over-redaction the third gate measured as a CORRECTNESS problem
- * rather than a cosmetic one (`docs/design/sink-closure-review-3.md` §3).
+ * rather than a cosmetic one (`docs/design/sink-closure-review-3.md` §3) — and
+ * the fourth gate's correction of the instrument
+ * (`docs/design/sink-closure-review-4.md` §4).
  *
- * `registrableNeedle` is the rule and it is in the pure leaf, so this executes
- * the shipped predicate rather than a copy of it — the same property that lets
- * this file run `redactObserved`.
+ * TWO PREDICATES NOW, AND THEY ANSWER DIFFERENT QUESTIONS. `registrableNeedle`
+ * is *is this worth registering at all* and is about LENGTH. `originBoundNeedle`
+ * is *how far may it reach* and is about the alphabet it is drawn from. The
+ * third gate's fix used the first to express the second — it refused all-digit
+ * values under nine outright — which unneedled a 6-to-8 digit national ID,
+ * account number or salary everywhere, including on the origin they were filled
+ * into, where the fourth gate measured one walking out through a link href.
+ *
+ * Both live in the pure leaf, so this executes the shipped predicates rather
+ * than copies of them — the same property that lets this file run
+ * `redactObserved`.
  */
 describe('which values are worth a needle', () => {
-  it('refuses an all-digit value short enough to collide with a page', () => {
-    // The measured case: a six-digit one-time code, filled on one origin,
-    // rewrote a legitimate order number on an unrelated origin the same tab
-    // later visited. A million spellings is not enough for a string that has to
-    // survive ten minutes of ordinary pages full of order numbers and prices.
-    expect(registrableNeedle('377350')).toBe(false);
-    expect(registrableNeedle('12345678')).toBe(false);
-  });
-
-  it('accepts an all-digit value long enough not to', () => {
-    expect(registrableNeedle('123456789')).toBe(true);
-    expect(registrableNeedle('4111111111111111')).toBe(true);
-  });
-
-  it('still refuses anything under six characters, digits or not', () => {
-    // Unchanged, and it is the older half of the rule: a four-character needle
-    // redacts the web.
+  it('refuses anything under six characters, digits or not', () => {
+    // The whole of the length rule: a four-character needle redacts the web.
     expect(registrableNeedle('abc')).toBe(false);
     expect(registrableNeedle('12345')).toBe(false);
     expect(registrableNeedle('')).toBe(false);
   });
 
-  it('accepts an ordinary six-character password — the digit bar is not a length bar', () => {
+  it('registers a short all-digit value rather than refusing it', () => {
+    // THE REVERTED ROW. These were `false` between the third and fourth gates,
+    // and the cost was measured: on the origin it was filled into, a six-digit
+    // code copied into a link target came back in clear
+    // (`link e1 "Continue to checkout" /leak?pw=&c=108140`), and a six-to-eight
+    // digit nationalId, bankAccount or salaryExpectation had no needle anywhere.
+    expect(registrableNeedle('377350')).toBe(true);
+    expect(registrableNeedle('12345678')).toBe(true);
+  });
+
+  it('accepts an ordinary password — the length bar is not a shape bar', () => {
     // The non-vacuity half. A rule that refused everything would pass every
     // assertion above and silently turn the whole mechanism off.
     expect(registrableNeedle('hunter2')).toBe(true);
     expect(registrableNeedle('guard-pw-93a1')).toBe(true);
     expect(registrableNeedle('1980-01-01')).toBe(true);
     expect(registrableNeedle('a1b2c3')).toBe(true);
+  });
+});
+
+describe('how far a needle may reach', () => {
+  it('binds a short all-digit value to the origin it was filled into', () => {
+    // The collision the third gate measured was on a CARRIED origin — a tab
+    // that had merely passed through the filled origin rewrote an order number
+    // on an unrelated site. So the answer is scope, not shape: registered like
+    // any other needle, matched only where the value provably belongs.
+    expect(originBoundNeedle('377350')).toBe(true);
+    expect(originBoundNeedle('12345678')).toBe(true);
+  });
+
+  it('lets a long all-digit value travel', () => {
+    // Nine digits is a billion spellings, which is where an all-digit string
+    // stops colliding with ordinary page content at a rate that makes the
+    // marker a lie more often than a protection.
+    expect(originBoundNeedle('123456789')).toBe(false);
+    expect(originBoundNeedle('4111111111111111')).toBe(false);
+  });
+
+  it('lets everything that is not all digits travel', () => {
+    // The non-vacuity half in the other direction: a predicate that answered
+    // `true` for everything would confine every needle to one origin and undo
+    // F-A, F-D and F-E in one line, with no test above noticing.
+    expect(originBoundNeedle('hunter2')).toBe(false);
+    expect(originBoundNeedle('guard-pw-93a1')).toBe(false);
+    expect(originBoundNeedle('1980-01-01')).toBe(false);
+    expect(originBoundNeedle('123 456')).toBe(false);
   });
 });
 
