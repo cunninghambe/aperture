@@ -1371,12 +1371,19 @@ the tier4 engine, not the shipped one**, and one of them is known to move:
   aperture-diff observation cost **23,276 → 45,607 chars (+96%)**; the re-dump
   arm is unmoved, so the ratio worsens for diffs on that fixture. The other
   five neutral fixtures moved <= 18 chars (ref-number width only).
-- Cause: the fixture's star-group *wrappers* are unnamed `generic` nodes,
-  content-identical, so they form a positional family even though every
-  interactive control has a unique name and the §4.2 neutrality lint is green.
-  Pre-fix they revived across a re-visit carrying `needsReannounce`, which
-  force-expanded the run; post-fix they are retired and re-minted, the run
-  collapses, and the consumer pays an `expand` round-trip.
+- Cause — **corrected 2026-08-03 by `docs/design/tier5-ruling.md`; the original
+  attribution below was wrong.** The firing family is not the generic wrappers
+  (they hold no refs, so the "nothing held" gate skips them). It is the **five
+  radios themselves**, keyed `N|0|radio|rating`: `identityKey` ranks the shared
+  `name="rating"` attribute above the radios' unique ids, so **every
+  conventional HTML radio group is a positional family** under the shipped
+  identity scheme. The §4.2 neutrality lint could not have caught this — it
+  checks unique accessible names, which the identity key never consults.
+  Retirement events in fact fire on **all six** neutral fixtures; five are
+  costless (±3–18 chars). Every neutral firing is a same-set reappearance
+  (`old=0`), never a live membership change, so **first-contact cost is
+  identical pre- and post-fix** — the whole +96% is warm-revisit cost, and the
+  pre-fix cheapness was manufactured by the revival channel tier5 closes.
 - `tier5.md` §9.1.1 preregistered this as a **stop-ship tripwire**. It fired.
   The ruling is owed and is deliberately NOT made by the party whose fix is on
   trial: whoever resumes should have an independent reviewer decide between
