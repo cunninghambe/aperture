@@ -491,7 +491,7 @@ way; a guard that has only ever passed is a guard of unknown value.
 ## Amendment — tier5 landed, and its tripwire fired (2026-08-03, HEAD `1d13e0b`)
 
 `1d13e0b` adds the positional-rebind fix — the cause of the reduced accuracy
-measured in the head-to-head. Free battery green: 512 tests, fidelity 6/6,
+measured in the head-to-head. Free battery green: unit suite, fidelity 6/6,
 guards 43/43 + 3/3 + 2/2, selftest PASS. Measurement was deliberately deferred
 by the owner, so nothing is proven about whether it works in an agent's hands.
 
