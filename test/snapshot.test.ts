@@ -17,6 +17,7 @@ import {
   renderUnchanged,
   quote,
 } from '../src/core/snapshot/render.js';
+import { normalizeText, sanitize } from '../src/core/snapshot/text.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
 import { looksGenerated } from '../src/core/snapshot/walker.js';
 import type { Role, Snapshot, SnapshotNode } from '../src/core/snapshot/types.js';
@@ -575,6 +576,93 @@ describe('quote', () => {
 
   it('caps runaway text', () => {
     expect(quote('x'.repeat(500)).length).toBeLessThan(90);
+  });
+});
+
+describe('the alphabet: the renderer removes nothing the walker left', () => {
+  // THE CLASS-C INVARIANT, AS A MEASUREMENT RATHER THAN A LIST.
+  //
+  // walker.ts emits normalizeText(x) so that redactObserved searches the bytes
+  // quote() -> sanitize() will emit. That argument holds only while sanitize is
+  // the IDENTITY on walker output, and the enumeration in isStripped is what
+  // makes it look as though it must be. It does not have to be: any later edit
+  // that removes one more invisible at render time re-opens F-B for that code
+  // point, and every fixture in this repository plants U+202D.
+  //
+  // Swept, not listed. That is the completeness.test.ts move: "rendered" is a
+  // measurement.
+  //
+  // The SHIPPED normaliser, imported rather than re-spelled. A transcription
+  // here would let the walker's order drift out from under the assertion,
+  // which is the one thing this describe exists to prevent.
+  const walkNorm = normalizeText;
+
+  const EXTRA = [0xfeff, 0x2060, 0xfe0f, 0x1d173, 0xe0001, 0xe0020];
+  const label = (cp: number) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+  // sanitize ESCAPES these two rather than deleting them, which is injective
+  // and expanding and therefore cannot hide a needle.
+  const ESCAPED = ['"', String.fromCodePoint(0x5c)];
+
+  it('sanitize is the identity on anything the walker already normalised', () => {
+    const offenders: string[] = [];
+    const sweep = (cp: number) => {
+      const ch = String.fromCodePoint(cp);
+      if (ESCAPED.includes(ch)) return;
+      const w = walkNorm(`guard${ch}pw93a1`);
+      if (sanitize(w) !== w) offenders.push(label(cp));
+    };
+    for (let cp = 0; cp <= 0x2fff; cp++) sweep(cp);
+    for (const cp of EXTRA) sweep(cp);
+    expect(
+      offenders,
+      'sanitize() removed a code point the walker left in. The redactor ran on ' +
+        'the walker output; whatever sanitize removes after that is a separator ' +
+        'Aperture deletes on the way out, which is F-B. Either add the code ' +
+        'point to isStripped (shared by both sides) or do not remove it here.',
+    ).toEqual([]);
+  });
+
+  it('...including when the code point sits between two spaces (PROBE-C0)', () => {
+    // THE WHITESPACE-BEARING FORM, WHICH IS THE NORMAL CASE.
+    //
+    // The needles that carry whitespace are not exotic: the profile fill path
+    // registers full names and street addresses (G30a-e), and `canonicalNeedle`
+    // in redact.ts collapses a needle's whitespace to single spaces *on the
+    // stated ground that the walker has already done the same to the text*.
+    //
+    // Deleting a code point BETWEEN two spaces leaves the two spaces adjacent.
+    // If the walk collapses before it strips, it emits a run of two that its
+    // own needle does not contain -- the redaction misses -- and sanitize's
+    // \s{2,} collapse then reassembles the value at render time. That is F-B
+    // exactly: Aperture removed the separator on the way out.
+    const offenders: string[] = [];
+    const sweep = (cp: number) => {
+      const ch = String.fromCodePoint(cp);
+      if (ESCAPED.includes(ch)) return;
+      const w = walkNorm(`guard ${ch} pw93a1`);
+      if (sanitize(w) !== w) offenders.push(label(cp));
+    };
+    for (let cp = 0; cp <= 0x2fff; cp++) sweep(cp);
+    for (const cp of EXTRA) sweep(cp);
+    expect(
+      offenders,
+      'sanitize() changed walker output whose code point sat between two ' +
+        'spaces. The walk emitted a double space, the needle carries one, so ' +
+        'the redactor could not match -- and sanitize then collapsed it back ' +
+        'to the value the needle names. Strip BEFORE collapsing.',
+    ).toEqual([]);
+  });
+
+  it('a whitespace-bearing secret survives the walk intact', () => {
+    // The named instance, kept executable beside the sweep so the failure has
+    // a face and not only a code-point list.
+    const secret = 'my pass phrase';
+    const onPage = `my ${String.fromCodePoint(0x202d)} pass phrase`;
+    const walked = walkNorm(onPage);
+    expect(walked, 'the needle must be findable in what the redactor searches').toContain(
+      secret,
+    );
+    expect(sanitize(walked), 'and the renderer must not reassemble it').toContain(secret);
   });
 });
 

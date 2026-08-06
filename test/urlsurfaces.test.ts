@@ -64,6 +64,36 @@ function code(text: string): string {
     .join('\n');
 }
 
+/**
+ * The body of a top-level `function name(...)` or `const name = ...`, or null.
+ *
+ * ONE LEVEL, and the shallowness is the design. This exists so the routeCapture
+ * guard can see through `openUrls: [captureDestination(t)]` — a spelling that
+ * satisfies every shape check while restoring F-G. It resolves a BARE
+ * IDENTIFIER call in the same file and nothing else; a member call is left to
+ * the `.list(`/`.map(` ban on the call site itself. Following a method through
+ * a class in another file would be a call-graph walk, which is a second parser.
+ */
+function declarationBody(c: string, name: string): string | null {
+  const decl = new RegExp(
+    `(?:function\\s+${name}\\s*\\(|(?:const|let|var)\\s+${name}\\s*=)`,
+  ).exec(c);
+  if (!decl) return null;
+  const from = decl.index;
+  const open = c.indexOf('{', from);
+  // An arrow with an expression body has no brace before its terminating `;`.
+  const semi = c.indexOf(';', from);
+  if (open === -1 || (semi !== -1 && semi < open)) {
+    return semi === -1 ? c.slice(from) : c.slice(from, semi + 1);
+  }
+  let depth = 0;
+  for (let i = open; i < c.length; i++) {
+    if (c[i] === '{') depth++;
+    else if (c[i] === '}' && --depth === 0) return c.slice(from, i + 1);
+  }
+  return null;
+}
+
 const SOURCES = filesUnder(join(ROOT, 'src'), '.ts').map((path) => ({
   rel: path.slice(ROOT.length + 1).replace(/\\/g, '/'),
   text: readFileSync(path, 'utf8'),
@@ -88,14 +118,59 @@ describe('every URL that leaves this process goes through the URL scrubber', () 
     // whichever tab got there first choose the destination, and a page can
     // create a tab. A guard that reconciles two of three arguments is the same
     // mistake it is guarding against, one level up.
-    const sites = SOURCES.filter(
-      (f) => /routeCapture\(/.test(f.code) && !/export async function routeCapture/.test(f.code),
-    );
-    expect(sites.map((f) => f.rel).sort()).toEqual(['src/main/ipc.ts', 'src/mcp/tools.ts']);
+    // ENUMERATED BY CALL SITE, NOT BY FILE — 2026-08-06, row D-i1.
+    //
+    // The previous spelling filtered SOURCES to the files containing a
+    // `routeCapture(` and then ran `exec` once per file. Two holes followed
+    // from that and neither was in the comment: `exec` returns the FIRST match
+    // only, so a second call site in an already-listed file was never
+    // examined; and the file that DEFINES routeCapture was excluded whole, so
+    // a call site inside capture.ts was invisible too. Row D-i1 added an
+    // unscrubbed second `routeCapture` to browser_capture — all three
+    // page-influenced arguments raw, destination taken from the tab list, F-G
+    // and sink 10 together — and this leg passed 666/666.
+    //
+    // `test/fillpaths.test.ts` was rebuilt in the fourth gate for exactly this
+    // defect, and `test/autocrop.test.ts`'s cropNote leg already uses
+    // matchAll. The lesson had landed in two sibling files and not in this one.
+    //
+    // The definition is excluded by its SIGNATURE, not by its file.
+    const isDefinition = (c: string, at: number) =>
+      /\bfunction\s+$/.test(c.slice(Math.max(0, at - 40), at));
+    // The site's NAME is the surface it serves, so a new one fails by name
+    // rather than by count.
+    const enclosing = (c: string, at: number) => {
+      const before = c.slice(0, at);
+      let name = '(top level)';
+      for (const m of before.matchAll(
+        /(?:registerTool\(\s*'([^']+)'|\bhandle\(\s*'([^']+)'|function\s+(\w+))/g,
+      )) {
+        name = m[1] ?? m[2] ?? m[3] ?? name;
+      }
+      return name;
+    };
+
+    const sites: { rel: string; name: string; opts: string }[] = [];
+    for (const f of SOURCES) {
+      for (const m of f.code.matchAll(/routeCapture\(/g)) {
+        const at = m.index ?? 0;
+        if (isDefinition(f.code, at)) continue;
+        sites.push({
+          rel: f.rel,
+          name: enclosing(f.code, at),
+          opts: /^routeCapture\([\s\S]*?\n\s*\}\)/.exec(f.code.slice(at))?.[0] ?? '',
+        });
+      }
+    }
+
+    expect(
+      sites.map((s) => `${s.rel} ${s.name}`).sort(),
+      'a routeCapture call site was added or moved. Every one of them forwards ' +
+        'page-written bytes off the machine, so each is frozen by name here.',
+    ).toEqual(['src/main/ipc.ts capture:page', 'src/mcp/tools.ts browser_capture']);
 
     for (const f of sites) {
-      // The whole options object, whichever call site it is.
-      const opts = /routeCapture\([\s\S]*?\n\s*\}\)/.exec(f.code)?.[0] ?? '';
+      const opts = f.opts;
       const title = /title:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
       const sourceUrl = /sourceUrl:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
       const openUrls = /openUrls:\s*([^\n]*)/.exec(opts)?.[1] ?? '';
@@ -124,6 +199,100 @@ describe('every URL that leaves this process goes through the URL scrubber', () 
         openUrls,
         `${f.rel}: the destination must not be derived from the tab list`,
       ).not.toMatch(/\.list\(|\.map\(/);
+
+      // ONE LEVEL OF INDIRECTION, RESOLVED — 2026-08-06, row D-i2.
+      //
+      // The two checks above assert the SHAPE of an expression, not what the
+      // expression computes. `[captureDestination(t)]` is a one-element array
+      // literal containing neither `.list(` nor `.map(` — both of which now
+      // live one function away — and it restores F-G on the human path while
+      // the agent path keeps its literal, which is class D exactly. It passed
+      // 666/666. This is the S-E3 / S-L2 lesson in a third place: an act caught
+      // or missed by how its author spelled it.
+      //
+      // DEPTH ONE, DELIBERATELY. A general call-graph walk in a source-level
+      // test is a second parser, which is the failure test/lib/source.ts
+      // exists to prevent. A bare-identifier call is resolvable in this file by
+      // construction, so that is the case resolved; if it cannot be resolved
+      // the guard FAILS rather than passes, because a guard that cannot see
+      // through an indirection must say so.
+      const callee = /^\s*\[\s*([A-Za-z_$][\w$]*)\s*\(/.exec(openUrls)?.[1];
+      if (callee) {
+        const src = SOURCES.find((s) => s.rel === f.rel)?.code ?? '';
+        const body = declarationBody(src, callee);
+        expect(
+          body,
+          `${f.rel}: openUrls calls ${callee}(), which this guard cannot locate ` +
+            'in the same file. The capture destination must be resolvable at ' +
+            'the call site — an unresolvable spelling is how F-G comes back.',
+        ).toBeTruthy();
+        expect(
+          body ?? '',
+          `${f.rel}: ${callee}() derives the capture destination from the tab ` +
+            'list. Moving the expression one function away does not change ' +
+            'which tab chooses where the screenshot goes (F-G).',
+        ).not.toMatch(/\.list\(|\.map\(/);
+      }
+    }
+  });
+
+  it("browser_read's body is transformed BEFORE redaction and not after", () => {
+    // The one page-text path that is not the walker's. Its alphabet agreement is
+    // maintained by hand, so the hand is what gets frozen: every mutation of the
+    // body happens before redactFreeText, and the only thing between that call
+    // and the return is the needle loop, the length cap and the envelope.
+    //
+    // Ordering, not presence. `stripFormat(body)` being present says nothing if
+    // something else re-normalises the bytes afterwards, which is F-B with the
+    // steps in the wrong order. A single `.replace(/\s{2,}/g, ' ')` added here
+    // puts `my  pass phrase` past a needle of `my pass phrase` and then emits
+    // the value whole — and the needles that carry whitespace are the ordinary
+    // ones, since the profile fill path registers full names and street
+    // addresses (G30a-e).
+    const f = SOURCES.find((x) => x.rel === 'src/mcp/tools.ts');
+    expect(f, 'src/mcp/tools.ts must exist').toBeTruthy();
+    const from = f!.code.indexOf("'browser_read'");
+    expect(from, "browser_read's registration must be locatable").toBeGreaterThan(-1);
+    const next = f!.code.indexOf('server.registerTool(', from);
+    const handler = f!.code.slice(from, next === -1 ? f!.code.length : next);
+
+    const iStrip = handler.indexOf('stripFormat(body)');
+    const iSafe = handler.indexOf('let safe =');
+    const iRedact = handler.indexOf('redactFreeText(id, body)');
+    const iReturn = handler.indexOf('return text(untrusted(');
+    for (const [i, what] of [
+      [iStrip, 'stripFormat(body)'],
+      [iSafe, 'let safe ='],
+      [iRedact, 'redactFreeText(id, body)'],
+      [iReturn, 'return text(untrusted('],
+    ] as const) {
+      expect(i, `browser_read must still contain \`${what}\``).toBeGreaterThan(-1);
+    }
+
+    expect(
+      iStrip,
+      'stripFormat(body) must run BEFORE redactFreeText, or the redactor is ' +
+        'searching bytes the caller will never see',
+    ).toBeLessThan(iRedact);
+
+    // FROZEN BY NAME, not by count: an addition fails saying what it was.
+    const tail = handler.slice(iSafe, iReturn);
+    const assigns = [...tail.matchAll(/safe\s*=\s*([^\n]*)/g)].map((m) => (m[1] ?? '').trim());
+    expect(
+      assigns,
+      'the only writes to `safe` between the redaction and the return are the ' +
+        'redaction itself and the tainted-value loop. Anything else is a ' +
+        'transformation applied AFTER the needle scrub, which is F-B.',
+    ).toEqual(['redactFreeText(id, body);', 'safe.split(v).join(REDACTED);']);
+
+    for (const banned of ['.replace(', '.normalize(', '.trim(', 'stripFormat(']) {
+      expect(
+        tail.includes(banned),
+        `browser_read calls ${banned} after redactFreeText. Whatever it ` +
+          'normalises, the needle scrub has already run on the un-normalised ' +
+          'bytes — so a needle that differs only by that normalisation is ' +
+          'missed at redaction and reassembled on the way out.',
+      ).toBe(false);
     }
   });
 

@@ -107,6 +107,43 @@ export function stripFormat(s: string): string {
 }
 
 /**
+ * The walk-time normaliser: BOTH halves of the alphabet rule, in the one order
+ * that composes with the renderer.
+ *
+ * STRIP FIRST, COLLAPSE SECOND, and the order is the whole security content of
+ * this function (2026-08-06, PROBE-C0).
+ *
+ * `stripFormat` DELETES. Deleting a code point that sat between two spaces
+ * leaves the two spaces adjacent. So collapsing first and stripping second
+ * emits a run of two spaces that the collapse has already gone past — and
+ * `sanitize` collapses runs of two, which means the walk hands `redactObserved`
+ * bytes that are NOT the bytes `quote()` will emit. A needle carrying a space
+ * then matches nothing at redaction time and is reassembled whole at render
+ * time. That is F-B verbatim, and the whitespace-bearing needle is the normal
+ * case rather than an exotic one: the profile fill path registers full names
+ * and street addresses.
+ *
+ *     collapse-then-strip:  "my <U+202D> pass phrase" -> "my  pass phrase"
+ *                           needle "my pass phrase" ABSENT, and sanitize()
+ *                           then renders "my pass phrase". The secret.
+ *     strip-then-collapse:  "my <U+202D> pass phrase" -> "my pass phrase"
+ *                           needle present; sanitize() is the identity.
+ *
+ * The output is a FIXED POINT of `sanitize` by construction: no stripped code
+ * point survives, every whitespace run is one plain space, and there is no
+ * leading or trailing whitespace — so each of `sanitize`'s clauses is a no-op
+ * on it. That is what `redact.ts`'s `canonicalNeedle` already assumes in
+ * writing ("walker.ts collapses every run of whitespace to one space"), and
+ * before this ordering that assumption was false.
+ *
+ * Stripping first costs nothing the old order bought. `stripFormat` never
+ * substitutes a space, so `a<U+202D>b` still becomes `ab` and never `a b`.
+ */
+export function normalizeText(s: string): string {
+  return stripFormat(s).replace(/\s+/g, ' ').trim();
+}
+
+/**
  * Control characters and the bidi overrides, by code point.
  *
  * Written as a code-point predicate rather than a character class: a class of

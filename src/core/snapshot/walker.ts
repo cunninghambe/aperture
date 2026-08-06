@@ -28,7 +28,7 @@ import { State } from './types.js';
 // re-spelling the code-point set is the whole point: two copies of a strip is
 // how one of them goes stale, and this one going stale is a plaintext leak
 // (see `truncate` below).
-import { stripFormat } from './text.js';
+import { normalizeText } from './text.js';
 
 const MAX_NAME = 80;
 const MAX_DEPTH = 60;
@@ -139,7 +139,7 @@ export function walk(ctx: WalkContext): WalkResult {
     // (`browser_tabs` and `browser_navigate` print `wc.getTitle()`, not this
     // string. Those paths go through `safeForAgent`, which already scrubs on
     // BOTH sides of `quote()` for precisely this reason.)
-    title: stripFormat((doc.title ?? '').replace(/\s+/g, ' ').trim()),
+    title: normalizeText(doc.title ?? ''),
     viewport: {
       top: win.scrollY,
       height: win.innerHeight,
@@ -710,7 +710,7 @@ function directText(el: HTMLElement): string | undefined {
   // Same alphabet rule as `truncate` — see its comment. `text` is rendered
   // through `quote()` in `renderLine`, so it has to arrive stripped or the
   // renderer removes a separator the redactor was never able to see.
-  const t = stripFormat(out.replace(/\s+/g, ' ').trim());
+  const t = normalizeText(out);
   return t || undefined;
 }
 
@@ -858,11 +858,15 @@ function norm(s: string): string {
  * does: the redactor and the renderer read the same bytes, by construction, in
  * one place — rather than by two treatments kept in step by review.
  *
- * Order matters. Whitespace is collapsed FIRST and the invisibles removed
- * SECOND, so `a<U+202D>b` cannot become `a b`; it becomes `ab`, which is
- * exactly what `sanitize` would have rendered.
+ * Order matters, and the order lives in `normalizeText` — invisibles removed
+ * FIRST, whitespace collapsed SECOND. The reverse order was shipped until
+ * 2026-08-06 and was wrong: `stripFormat` deletes, so removing a code point
+ * that sat between two spaces leaves a run of two behind the collapse that has
+ * already gone past, and `sanitize`'s own `\s{2,}` then closes it up at render
+ * time. See `normalizeText`'s header for the measurement (PROBE-C0, 69 code
+ * points) and for why `a<U+202D>b` still becomes `ab` either way.
  */
 function truncate(s: string): string {
-  const t = stripFormat(s.replace(/\s+/g, ' ').trim());
+  const t = normalizeText(s);
   return t.length > MAX_NAME ? `${t.slice(0, MAX_NAME - 1)}…` : t;
 }

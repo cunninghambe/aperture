@@ -2733,6 +2733,48 @@ const beta = refFor('Beta action', 'button');
           popups.map((e) => `seq=${e.seq} signed=${e.signed ? 'YES' : 'no'}`).join(', '),
     );
 
+    // --- G33f: the popup is not CAPTURABLE either ---------------------------
+    //
+    // THE SECOND DETECTOR FOR ONE KEYSTROKE. Adding `agentOwned: rec.agentOwned`
+    // to the `create()` call in tabs.ts's setWindowOpenHandler fails twice: it
+    // signs the popup (G33d) and it silently widens `browser_capture`'s refusal
+    // boundary (here). They are instrumented separately because a future
+    // refactor hits both, and a single red lets a reviewer fix one and move on.
+    //
+    // DELIBERATELY NOT WRAPPED IN requiresPresence. The capture refusal is
+    // independent of whether anything signs. Gating it on G33a would make it
+    // hard-fail during a row that only moves the mux's session, for a reason
+    // that has nothing to do with that row, and would corrupt that row's
+    // preregistered red set.
+    //
+    // BOTH HALVES IN ONE CHECK. Without the non-vacuity control this leg passes
+    // whenever browser_capture is broken for EVERY tab — a vacuous green
+    // wearing the right colour, which is the failure G33-server and G30-seed
+    // are shaped to prevent. `diskOnly` on both calls, so no Notion credential
+    // is touched and nothing leaves the machine.
+    const tabLines = (await call('browser_tabs', { action: 'list' })).split('\n');
+    const popupTab = (/\b(t\d+)\b/.exec(
+      tabLines.find((l) => /\/page2\b/.test(l)) ?? '',
+    ) ?? [, null])[1];
+    let g33fOk = false;
+    let g33fDetail = 'the popup tab was never created — the leg did not run';
+    if (popupTab) {
+      const onPopup = await call('browser_capture', { tabId: popupTab, diskOnly: true });
+      const onOwn = await call('browser_capture', { tabId: agentTab, diskOnly: true });
+      const refusedOk = /refused: browser_capture only works on tabs you opened/.test(onPopup);
+      const controlOk = /^captured \d+KB/.test(onOwn.trim());
+      g33fOk = refusedOk && controlOk;
+      g33fDetail =
+        `popup ${popupTab}: ${refusedOk ? 'REFUSED as required' : `NOT REFUSED — "${onPopup.trim().slice(0, 140)}"`}; ` +
+        `agent's own tab ${agentTab}: ${controlOk ? 'captured — non-vacuity control GREEN' : `did NOT capture, so the refusal above proves nothing — "${onOwn.trim().slice(0, 140)}"`}`;
+    }
+    check(
+      'G33f',
+      "a window.open popup is NOT capturable by the agent, and the agent's own tab still is",
+      g33fOk,
+      g33fDetail,
+    );
+
     // --- G33e: the verifier can say no, BOTH ways --------------------------
     //
     // Without this, G33a is a green of unknown value. Two legs, because an

@@ -411,24 +411,58 @@ signs anywhere. Both artifact hashes are recorded, and the ordering deviation
 (green run first, to establish the harness before a red could mean anything) is
 recorded with it. What remains:
 
-1. **§12.5 step 3 — the two live-only sabotage rows.** `installMux(
-   session.defaultSession)` in `containers.harden()`, and window-open children
-   inheriting `agentOwned` from their opener in `tabs.ts`. The first is the
-   sharper one: **every unit test stays green while nothing reaches the wire.**
-   The second must fail twice, because the same keystroke silently widens
-   `browser_capture`'s refusal boundary.
-2. **Verification queue #7 — header order and casing** under a registered
-   `onBeforeSendHeaders`. It is a diff of two launches (mux commented out, then
-   restored) capturing a request at the 8902 probe. Write the result into
-   `security.md`'s queue row **whatever it shows**. What is known without a
-   launch bounds the residual rather than closing it: the mux returns
-   `requestHeaders` unchanged when no handler contributes, and only ever adds
-   names. What is not known is whether Chromium re-serializes order or casing
-   merely because a listener returned an object at all.
+1. ~~**§12.5 step 3 — the two live-only sabotage rows.**~~ **PERFORMED
+   2026-08-06** — `docs/design/owed-verification.md` §5.1. Both rows run live
+   against a 73-leg harness (G33f was built first, because L2's red set names
+   it). **L1** (the mux on a session no tab uses, spelled as a block-scoped
+   shadow so no source guard can see it): `tsc` clean, **666/666 vitest green**,
+   guards **67/73 RED on exactly {G33a, G33b, G33c-img, G33c-fetch, G33d,
+   G33e-tamper}** — the behaviour discriminated while every offline instrument
+   stayed satisfied. **L2** (window-open children inheriting `agentOwned`):
+   guards **71/73 RED on exactly {G33d, G33f}** — it *does* fail twice, and the
+   second failure is the popup being **captured** where it should have been
+   refused. Both reverted; the artifact hash returned byte-identical both times.
+2. ~~**Verification queue #7 — header order and casing.**~~ **PERFORMED
+   2026-08-06** — `docs/design/owed-verification.md` §5.2, written into
+   `security.md`'s queue row. **Reading R1 — inert on the wire.** Four legs, not
+   two: A (no listener) ≡ B (listener, no-op path) in name **order** and name
+   **casing**; and B ≡ D (listener returning a *new* object with identical
+   content) in both as well, which is the stronger answer — inertness does not
+   depend on returning `details.requestHeaders` by identity, so that spelling is
+   not load-bearing. C's residual is exactly `Signature-Agent`,
+   `Signature-Input`, `Signature`, **appended after every pre-existing name**,
+   with no existing name moved or re-cased. `webbotauth.md` §8.2's scope
+   sentence is **confirmed** by measurement, so no amendment is owed. Bound:
+   **HTTP/1.1 cleartext only**; h2/h3 and remote (non-loopback) paths are not
+   measured and are recorded as such.
 
 ### Security
 
-3. **Author-independent sabotage rows for classes C and D** (defect 8 above).
+3. ~~**Author-independent sabotage rows for classes C and D**~~ (defect 8
+   above). **PERFORMED 2026-08-06** — `docs/design/owed-verification.md` §5.3,
+   written into `security.md`'s class C and D cells. Four rows, two per class,
+   each attacking a different clause of the same guard, constructed by someone
+   who wrote neither guard. **All four were GREEN**, which is the finding and
+   not a pass: **all four changed the guard.** That is the third, fourth, fifth
+   and sixth time satisfying the stopping criterion's third clause has changed a
+   guard rather than confirmed it. Every repair was then shown RED under its own
+   row and green on the clean tree, and every row was reverted.
+
+**NEW, and owed as its own item — raised by PROBE-C0 and REPAIRED under
+authority.** The class-C sweep, run with no substitution against the shipped
+module, found that `sanitize` was **not idempotent on walker output**:
+`walker.ts` collapsed whitespace *before* stripping the invisibles, so deleting
+a code point sitting **between two spaces** left a double space that the
+redactor's needle did not contain and that `sanitize` then closed up at render
+time — handing the model the secret whole. **69 code points**; F-B exactly, for
+a case F-B's own correctness argument did not consider; and whitespace-bearing
+needles are the ordinary case, since the profile fill path registers full names
+and street addresses. **Repaired**: strip-before-collapse, in one shared
+`normalizeText` in `src/core/snapshot/text.ts` whose output is a fixed point of
+`sanitize` by construction, with the guard importing it rather than
+transcribing it. RED before, GREEN after, single-code-point F-B form green on
+both sides. **This is the one behaviour change in `src/` from that programme**;
+everything else it touched was a sabotage row and every one was reverted.
 
 ### Harness obligations, carried forward verbatim — no code was written for any of these
 
@@ -499,7 +533,8 @@ done — the size sweep ran):
   `test/botauth.test.ts` asserts that receiver-independently; **item #8
   (`Signature-Agent` structured-field form) is RESOLVED** by the differential
   probe, 13/13, with the library version and draft revision pinned; item #7
-  (header order/casing) is owed one two-launch measurement (see "Still owed");
+  (header order/casing) is **RESOLVED — favourable, R1**, by the four-leg
+  measurement of 2026-08-06 (`docs/design/owed-verification.md` §3);
   item #3 (debugger detectability) is queued behind a trigger condition.
 - **§7 — Web Bot Auth. DONE and live-verified.** `src/net/botAuthCore.ts` (pure
   leaf: RFC 9421 canonicalization, RFC 7638/8037 thumbprints, config
