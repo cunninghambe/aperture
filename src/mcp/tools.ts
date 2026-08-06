@@ -61,7 +61,8 @@ import type {
   FillTargetRequest,
 } from '@shared/types.js';
 import { attachments } from '@vault/attachments.js';
-import { capturePage, routeCapture } from '../capture/capture.js';
+import { captureForFiling, routeCapture, type CaptureMode } from '../capture/capture.js';
+import type { CropDecline } from '../capture/autocrop.js';
 import {
   applyDarkMode,
   applyToTab,
@@ -434,6 +435,42 @@ export function denyString(
 }
 
 export { DENY_STRINGS };
+
+/**
+ * Tool-level decline union: the pre-capture refusals `browser_capture` decides,
+ * plus the three capture-level declines a detail request can surface.
+ *
+ * The auto-only `CropDecline` values (`no-uniform-background`, `blank-frame`,
+ * `savings-too-small`) are deliberately NOT here — auto-trim declines are
+ * silent (docs/design/autocrop.md §3), so they can never need prose. The full
+ * frame is filed and the ABSENCE of a note is the honest record.
+ */
+type CropDeclineReason =
+  | 'unknown-ref'
+  | 'ref-dead'
+  | 'not-visible'
+  | 'obstructed'
+  | 'modal-open'
+  | 'subframe'
+  | Extract<CropDecline, 'region-too-small' | 'region-is-frame' | 'processing-failed'>;
+
+/**
+ * `Record` over a closed union, the `DENY_STRINGS` pattern: totality by
+ * typecheck, and every string is Aperture's own. There is NO INTERPOLATION SLOT
+ * in this table, so no page byte and no unvalidated agent byte can enter the
+ * reply — the declined `crop` value is deliberately never echoed.
+ */
+const DECLINE_PROSE: Record<CropDeclineReason, string> = {
+  'unknown-ref': 'unknown ref — refs come from browser_snapshot',
+  'ref-dead': 'that element left the page',
+  'not-visible': 'the element has no visible box',
+  obstructed: 'the element is covered by another element',
+  'modal-open': 'a modal dialog is open; the full frame shows it',
+  subframe: 'the element is inside an embedded frame',
+  'region-too-small': 'the region is too small',
+  'region-is-frame': 'the region is effectively the whole frame',
+  'processing-failed': 'image processing failed',
+};
 
 /**
  * The preload's fixed reason vocabulary, mapped to the agent-facing code.
@@ -2160,9 +2197,14 @@ export function registerBrowserTools(
         tabId: z.string().optional(),
         title: z.string().optional().describe('Caption for the capture.'),
         diskOnly: z.boolean().default(false),
+        crop: z.string().optional().describe(
+          'Crop the filed image to this element ref (eN) plus padding, or "none" to ' +
+          'file the untouched full frame. Absent: empty margins are trimmed ' +
+          'automatically. Declines to the full frame rather than guess; the image ' +
+          'is still filed, never returned to you.'),
       }),
     },
-    async ({ tabId, title, diskOnly }) => {
+    async ({ tabId, title, diskOnly, crop }) => {
       const t = tabs();
       const id = tabId ?? t.active;
       if (!id) return text('error: no active tab');
@@ -2177,8 +2219,66 @@ export function registerBrowserTools(
             'Ask the human to capture their own tabs from the toolbar.',
         );
       }
-      const bytes = await capturePage(t.webContents(id));
-      const res = await routeCapture(bytes, {
+      // THE CROP DECISION, AND ITS CLOSED DECLINE LIST.
+      //
+      // Auto-trim is the default and is identical to the human's button: a
+      // deterministic function of the rendered pixels that cannot remove
+      // anything visible. `crop` is the one lever the agent has that the human
+      // does not, and it points the right way — the agent is not looking at
+      // anything, so a narrower frame has to be said out loud, in a parameter
+      // the transcript keeps and the caption records.
+      //
+      // Detail crop CAN hide things, so every entry below files the FULL
+      // UNTRIMMED FRAME. The modal rule is the consent-dialog case literally,
+      // and it declines even when the crop target IS the modal: the full frame
+      // also shows the modal, and one rule with no carve-outs survives review.
+      let mode: CaptureMode = crop === 'none' ? { kind: 'full' } : { kind: 'trim' };
+      const wantsDetail = crop !== undefined && crop !== 'none';
+      let declined: CropDeclineReason | null = null;
+
+      if (wantsDetail) {
+        const ref = crop as string;
+        const entry = /^e\d+$/.test(ref) ? refEntry(id, ref) : undefined;
+        if (!entry) declined = 'unknown-ref';
+        else if (entry.state === 'dead') declined = 'ref-dead';
+        // The preload measures each frame's own viewport, so a subframe rect is
+        // subframe-relative and cropping the TOP-LEVEL frame with it frames the
+        // wrong pixels. Refused rather than composed.
+        else if (entry.frameId !== 0) declined = 'subframe';
+        // Reads the model the AGENT ALREADY HOLDS rather than taking a fresh
+        // walk. Running `observe()` here would advance the diff baseline and
+        // discard the ops, leaving the model one state behind with no diff ever
+        // delivered — the phantom-belief class the engine exists to prevent.
+        // The freshness gap is a disclosed residual (autocrop.md §3).
+        else if (stateFor(id).last?.modal) declined = 'modal-open';
+        else {
+          agentTouched(id, entry.key);
+          const wc = t.webContents(id);
+          // `resolveRef`'s scrollIntoView side effect is INTENDED here: a detail
+          // capture of an off-screen element means "bring it on screen and shoot
+          // it", which is what a human would do.
+          const r = await resolveRef(wc, entry.key);
+          if (!r.ok) declined = r.reason === 'not-visible' ? 'not-visible' : 'ref-dead';
+          else if (r.obstructed) declined = 'obstructed';
+          // Absent against a stale preload artifact. Absence is a decline, never
+          // a guess at geometry.
+          else if (r.rect === undefined || r.vw === undefined || r.vh === undefined) {
+            declined = 'processing-failed';
+          } else {
+            mode = { kind: 'detail', ref, rect: r.rect, vw: r.vw, vh: r.vh };
+          }
+        }
+        // A DECLINED DETAIL FILES THE FULL UNTRIMMED FRAME, not a trimmed one.
+        // Measured, and the first cut was wrong: leaving the mode at the `trim`
+        // default filed an auto-trimmed image under a reply that read "filed
+        // the full frame". The prose and the pixels have to agree — a record
+        // whose annotation disagrees with its image is the exact failure this
+        // feature is arranged to avoid.
+        if (declined !== null) mode = { kind: 'full' };
+      }
+
+      const cap = await captureForFiling(t.webContents(id), mode);
+      const res = await routeCapture(cap.bytes, {
         // Destination comes from the active tab only, so opening a Notion tab
         // cannot redirect captures to an attacker-named page.
         openUrls: [t.info(t.active ?? '')?.url ?? ''],
@@ -2201,6 +2301,11 @@ export function registerBrowserTools(
         title: redactFreeText(id, title ?? info?.title ?? ''),
         sourceUrl: redactUrl(id, info?.url ?? ''),
         diskOnly,
+        // NOT page-influenced, and that is the whole reason this line is
+        // allowed to exist beside the three above. It is `cropNoteFor` output —
+        // one producer, a validated `eN` ref and four integers, a closed
+        // alphabet. No element label, no title fragment, no page byte.
+        cropNote: cap.note,
       });
 
       // `location` is either a disk path Aperture built from a timestamp or a
@@ -2215,8 +2320,21 @@ export function registerBrowserTools(
         res.destination === 'disk'
           ? `saved to ${res.location}`
           : `appended to Notion page ${res.location}`;
+      // A decline is reported only when the CALL NAMED A REF — either refused
+      // above, or refused inside the capture. Auto-trim declines stay silent:
+      // the missing parenthetical is the record.
+      let reason: CropDeclineReason | null = declined;
+      if (reason === null && wantsDetail) {
+        const d = cap.declined;
+        if (d === 'region-too-small' || d === 'region-is-frame' || d === 'processing-failed') {
+          reason = d;
+        }
+      }
       return text(
-        `captured ${Math.round(res.bytes / 1024)}KB · ${where}` +
+        `captured ${Math.round(res.bytes / 1024)}KB` +
+          (cap.note ? ` (${cap.out.w}×${cap.out.h} of ${cap.frame.w}×${cap.frame.h})` : '') +
+          ` · ${where}` +
+          (reason ? `\nfiled the full frame (crop declined: ${DECLINE_PROSE[reason]})` : '') +
           (res.fellBackBecause
             ? `\n(Notion failed: ${safeForAgent(id, res.fellBackBecause)})`
             : ''),

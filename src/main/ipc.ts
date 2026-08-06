@@ -4,7 +4,7 @@ import { containers } from '@privacy/containers';
 import { blockedCount } from '@privacy/blocker';
 import { vault } from '@vault/vault';
 import { openVaultWindow } from './vaultWindow.js';
-import { capturePage, routeCapture } from '../capture/capture.js';
+import { captureForFiling, routeCapture } from '../capture/capture.js';
 import { redactFreeText, redactUrl } from '@core/snapshot/engine.js';
 
 export interface IpcDeps {
@@ -66,8 +66,12 @@ export function registerIpc(d: IpcDeps): void {
     const id = t.active;
     if (!id) return { destination: 'disk', location: '' };
     const info = t.info(id);
-    const bytes = await capturePage(t.webContents(id));
-    return routeCapture(bytes, {
+    // Auto-trim, always, with no lever: this button means "keep what I see",
+    // and stripping provably-empty margin is the only thing that preserves
+    // that meaning without a UI the transcript could never record. The human
+    // gets no narrowing parameter in this iteration (autocrop.md §2).
+    const cap = await captureForFiling(t.webContents(id), { kind: 'trim' });
+    return routeCapture(cap.bytes, {
       // THE THIRD PAGE-INFLUENCED ARGUMENT, AND THE ONE THE RECONCILIATION
       // MISSED — 2026-08-05, third gate (F-G).
       //
@@ -91,6 +95,7 @@ export function registerIpc(d: IpcDeps): void {
       openUrls: [info?.url ?? ''],
       title: redactFreeText(id, info?.title ?? ''),
       sourceUrl: redactUrl(id, info?.url ?? ''),
+      cropNote: cap.note,
     });
   });
 

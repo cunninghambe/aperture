@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>darkmode fixture — dark-native page, no color-scheme</title>
+<!--
+  THE INSTRUMENT. Do not restyle. docs/design/darkmode-contrast.md §6.3.
+
+  A page that ships its own dark theme and NEVER SAYS SO — no `color-scheme`
+  declaration, no `prefers-color-scheme` query. Extremely common, and the case
+  Blink cannot detect, so force-dark runs on it anyway: the dark regions are
+  left alone (nothing to invert) while the page's few LIGHT widgets get their
+  text flipped light and their mid-brightness fills kept light.
+
+  `applyToTab`'s auto-skip is what is supposed to catch this. Whether it runs
+  on a plain navigation — rather than only when the agent happens to call
+  `browser_theme` — is exactly what R2 measures.
+-->
+<style>
+  html, body {
+    margin: 0;
+    background: #1b1b1f;
+    color: #dddddd;
+    font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 15px; margin: 10px 12px 4px; font-weight: 600; }
+  .grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px 16px;
+  }
+  .patch {
+    position: relative;
+    width: 152px;
+    height: 64px;
+    flex: 0 0 auto;
+    overflow: hidden;
+  }
+  .patch .g {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    font-family: "Segoe UI Symbol", Consolas, "Courier New", monospace;
+    font-size: 26px;
+    line-height: 30px;
+    white-space: pre;
+  }
+  .patch .l {
+    position: absolute;
+    left: 8px;
+    bottom: 4px;
+    font-size: 9px;
+    line-height: 11px;
+    white-space: pre;
+  }
+</style>
+</head>
+<body>
+<h1>dark-native fixture</h1>
+<div class="grid" id="grid"></div>
+<script>
+  // name, fg, bg. The first three are the page's own dark surfaces: under a
+  // correct auto-skip they must paint EXACTLY as authored.
+  var PATCHES = [
+    ['dk-body-text',  '#dddddd', '#1b1b1f'],
+    ['dk-dim-text',   '#9a9aa8', '#1b1b1f'],
+    ['dk-card',       '#e6e6ea', '#26262e'],
+    ['dk-light-btn',  '#333333', '#e0e0e0'],
+    ['dk-white-card', '#333333', '#ffffff'],
+    ['dk-mid-badge',  '#333333', '#cccccc'],
+    ['dk-accent-btn', '#0b1220', '#6aa9ff'],
+  ];
+
+  var grid = document.getElementById('grid');
+  for (var i = 0; i < PATCHES.length; i++) {
+    var p = PATCHES[i];
+    var d = document.createElement('div');
+    d.className = 'patch';
+    d.setAttribute('data-name', p[0]);
+    d.setAttribute('data-fg', p[1]);
+    d.setAttribute('data-bg', p[2]);
+    d.style.background = p[2];
+    var g = document.createElement('span');
+    g.className = 'g';
+    g.style.color = p[1];
+    g.textContent = '████';
+    var l = document.createElement('span');
+    l.className = 'l';
+    l.style.color = p[1];
+    l.textContent = p[0];
+    d.appendChild(g);
+    d.appendChild(l);
+    grid.appendChild(d);
+  }
+
+  window.__patches = function () {
+    return [].slice.call(document.querySelectorAll('.patch')).map(function (el) {
+      var pr = el.getBoundingClientRect();
+      var gr = el.querySelector('.g').getBoundingClientRect();
+      return {
+        name: el.getAttribute('data-name'),
+        fg: el.getAttribute('data-fg'),
+        bg: el.getAttribute('data-bg'),
+        glyph: { x: Math.round(gr.left + gr.width / 2), y: Math.round(gr.top + gr.height / 2) },
+        corner: { x: Math.round(pr.right - 10), y: Math.round(pr.bottom - 10) },
+      };
+    });
+  };
+</script>
+</body>
+</html>

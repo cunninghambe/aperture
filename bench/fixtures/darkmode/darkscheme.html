@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>darkmode fixture — proper color-scheme page</title>
+<!--
+  THE INSTRUMENT. Do not restyle. docs/design/darkmode-contrast.md §6.3.
+
+  A page that does it properly: `color-scheme: light dark` plus a
+  `prefers-color-scheme: dark` block. Layer 1 of the design — tell the site the
+  truth and let it use its own dark theme, which always beats anything we could
+  synthesize. Blink skips force-dark on pages that declare a scheme, so this
+  fixture is the control: it must paint the page's own palette, untouched, both
+  before and after the fix.
+-->
+<style>
+  :root { color-scheme: light dark; }
+  html, body {
+    margin: 0;
+    background: #ffffff;
+    color: #333333;
+    font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 15px; margin: 10px 12px 4px; font-weight: 600; }
+  .grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px 16px; }
+  .patch {
+    position: relative;
+    width: 152px;
+    height: 64px;
+    flex: 0 0 auto;
+    overflow: hidden;
+    background: #f2f2f2;
+    color: #333333;
+  }
+  .patch .g {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    font-family: "Segoe UI Symbol", Consolas, "Courier New", monospace;
+    font-size: 26px;
+    line-height: 30px;
+    white-space: pre;
+    color: inherit;
+  }
+  .patch .l {
+    position: absolute;
+    left: 8px;
+    bottom: 4px;
+    font-size: 9px;
+    line-height: 11px;
+    white-space: pre;
+    color: inherit;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    html, body { background: #17171a; color: #d5d5da; }
+    .patch { background: #232329; color: #d5d5da; }
+  }
+</style>
+</head>
+<body>
+<h1>color-scheme fixture</h1>
+<div class="grid" id="grid">
+  <div class="patch" id="scheme-card" data-name="scheme-card">
+    <span class="g">████</span>
+    <span class="l">scheme-card</span>
+  </div>
+</div>
+<script>
+  // The AUTHORED pair is whichever branch of the stylesheet is in force. Read
+  // from computed style rather than hardcoded: computed style reports authored
+  // values (force-dark rewrites at paint time and never touches them), which is
+  // exactly what "authored" means here.
+  (function () {
+    var el = document.getElementById('scheme-card');
+    var cs = getComputedStyle(el);
+    var hex = function (c) {
+      var m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c);
+      if (!m) return '#000000';
+      return '#' + [1, 2, 3].map(function (i) {
+        return ('0' + (+m[i]).toString(16)).slice(-2);
+      }).join('');
+    };
+    el.setAttribute('data-fg', hex(cs.color));
+    el.setAttribute('data-bg', hex(cs.backgroundColor));
+  })();
+
+  window.__patches = function () {
+    return [].slice.call(document.querySelectorAll('.patch')).map(function (el) {
+      var pr = el.getBoundingClientRect();
+      var gr = el.querySelector('.g').getBoundingClientRect();
+      return {
+        name: el.getAttribute('data-name'),
+        fg: el.getAttribute('data-fg'),
+        bg: el.getAttribute('data-bg'),
+        glyph: { x: Math.round(gr.left + gr.width / 2), y: Math.round(gr.top + gr.height / 2) },
+        corner: { x: Math.round(pr.right - 10), y: Math.round(pr.bottom - 10) },
+      };
+    });
+  };
+</script>
+</body>
+</html>

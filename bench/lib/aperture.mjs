@@ -85,10 +85,17 @@ export async function tokenWorks(token, port = APERTURE_PORT) {
 /**
  * Start the Aperture this run owns, and do not return until it answers.
  *
- * @param {{root: string, stamp?: string, logDir?: string}} o
+ * `args` are extra argv for the Electron child, appended after `.`. Added for
+ * `bench/darkmode.mjs`, which needs `--remote-debugging-port=9333`: contrast has
+ * to be computed from PAINTED pixels (force-dark rewrites colours at paint time
+ * and `getComputedStyle` is blind to it), and a CDP screenshot of the tab target
+ * is the only way an external process can see them. Default `[]`, so every
+ * existing caller spawns byte-identically to before.
+ *
+ * @param {{root: string, stamp?: string, logDir?: string, args?: string[]}} o
  * @returns {Promise<{child: any, token: string, log: () => string, logPath: string, stamp: string}>}
  */
-export async function startAperture({ root, stamp = runStamp(), logDir = null }) {
+export async function startAperture({ root, stamp = runStamp(), logDir = null, args = [] }) {
   if (!existsSync(join(root, 'out', 'main', 'index.js'))) {
     throw new Error('out/main/index.js is missing — run `npx electron-vite build` first');
   }
@@ -102,7 +109,7 @@ export async function startAperture({ root, stamp = runStamp(), logDir = null })
     `# aperture child log — started ${new Date().toISOString()} from ${dirname(join(root, 'out'))}\n`,
   );
 
-  const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['electron', '.'], {
+  const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['electron', '.', ...args], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',

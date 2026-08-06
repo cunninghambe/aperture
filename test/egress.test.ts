@@ -461,6 +461,19 @@ const MEMBERS: Record<string, string> = {
     'listing\'s scrub, never anywhere else.',
   'src/main/tabs.ts :: WebContents#on': 'NO — load-state events.',
   'src/main/vaultWindow.ts :: WebContents#on': 'NO — will-navigate, denied unconditionally.',
+  'src/privacy/darkmode.ts :: WebContents#on':
+    'NO — `dom-ready` and `did-stop-loading`, the two moments the dark-mode ' +
+    'policy re-decides a tab (docs/design/darkmode-contrast.md §5-Fix 2). Both ' +
+    'are loader events carrying no payload, so nothing page-supplied is read ' +
+    'from either; what the handler does with them is choose between force-dark ' +
+    'and filter inversion for that tab, which is a rendering decision that ' +
+    'leaves no page.',
+  'src/privacy/darkmode.ts :: WebContents#getURL':
+    'NO — reads. The committed origin the site policy and the knownDark cache ' +
+    'are keyed by, through the same `originOf` every other keyed decision uses.',
+  'src/privacy/darkmode.ts :: WebContents#isDestroyed':
+    'NO — a boolean, read before touching a webContents on the navigation and ' +
+    'sweep paths so a tab closed mid-decision cannot throw.',
   'src/main/vaultWindow.ts :: WebContents#id': 'NO — an integer.',
   'src/main/tabs.ts :: WebContents#id':
     'NO — an integer, compared against the webContentsId onBeforeSendHeaders is ' +

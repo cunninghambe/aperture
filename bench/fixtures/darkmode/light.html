@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>darkmode fixture — plain light page</title>
+<!--
+  THE INSTRUMENT. Do not restyle. docs/design/darkmode-contrast.md §6.3.
+
+  A plain light page with NO `color-scheme` declaration and NO
+  `prefers-color-scheme` media query — the overwhelmingly common case, and the
+  one Chromium's force-dark classifier is aimed at.
+
+  Every patch renders its text colour as a run of U+2588 FULL BLOCK at 26px.
+  That is deliberate: a solid rectangle of pure painted text colour, immune to
+  antialiasing, so a pixel sample at its centre reads the colour the compositor
+  actually painted rather than a blend of it with the background. Contrast has
+  to be computed from PAINTED pixels here, because force-dark rewrites colours
+  at paint time and `getComputedStyle` still reports the authored values — it
+  is blind to the entire defect class.
+-->
+<style>
+  html, body {
+    margin: 0;
+    background: #ffffff;
+    color: #333333;
+    font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 15px; margin: 10px 12px 4px; font-weight: 600; }
+  .grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px 16px;
+  }
+  .patch {
+    position: relative;
+    width: 152px;
+    height: 64px;
+    flex: 0 0 auto;
+    overflow: hidden;
+  }
+  .patch .g {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    font-family: "Segoe UI Symbol", Consolas, "Courier New", monospace;
+    font-size: 26px;
+    line-height: 30px;
+    letter-spacing: 0;
+    white-space: pre;
+  }
+  .patch .l {
+    position: absolute;
+    left: 8px;
+    bottom: 4px;
+    font-size: 9px;
+    line-height: 11px;
+    white-space: pre;
+  }
+</style>
+</head>
+<body>
+<h1>light fixture</h1>
+<div class="grid" id="grid"></div>
+<script>
+  // name, fg, bg
+  var PATCHES = [
+    // -- background brightness sweep, dark text ------------------------------
+    ['bg-fff/333',      '#333333', '#ffffff'],
+    ['bg-f6f8fa/333',   '#333333', '#f6f8fa'],
+    ['bg-eee/333',      '#333333', '#eeeeee'],
+    ['bg-e0e0e0/333',   '#333333', '#e0e0e0'],
+    ['bg-d0d0d0/333',   '#333333', '#d0d0d0'],
+    ['bg-ccc/333',      '#333333', '#cccccc'],
+    ['bg-c0c0c0/333',   '#333333', '#c0c0c0'],
+    ['bg-b0b0b0/333',   '#333333', '#b0b0b0'],
+    ['bg-a0a0a0/333',   '#333333', '#a0a0a0'],
+    ['bg-909090/333',   '#333333', '#909090'],
+    // the last two rungs carry white text instead: below #808080 the dark-text
+    // pairing stops being something an author would ever ship.
+    ['bg-808080/fff',   '#ffffff', '#808080'],
+    ['bg-707070/fff',   '#ffffff', '#707070'],
+
+    // -- text brightness sweep on white --------------------------------------
+    ['fg-000/fff',      '#000000', '#ffffff'],
+    ['fg-555/fff',      '#555555', '#ffffff'],
+    ['fg-777/fff',      '#777777', '#ffffff'],
+    ['fg-888/fff',      '#888888', '#ffffff'],
+    ['fg-999/fff',      '#999999', '#ffffff'],
+    ['fg-aaa/fff',      '#aaaaaa', '#ffffff'],
+
+    // -- real-world patterns --------------------------------------------------
+    ['link',            '#0645ad', '#ffffff'],
+    ['btn-primary',     '#ffffff', '#1a73e8'],
+    ['alert-warning',   '#856404', '#fff3cd'],
+    ['alert-secondary', '#41464b', '#e2e3e5'],
+    ['badge-gray',      '#616161', '#e0e0e0'],
+    ['code-inline',     '#d63384', '#f5f5f5'],
+    ['wiki-infobox',    '#202122', '#eaecf0'],
+    ['zebra-row',       '#212529', '#f2f2f2'],
+    ['nav-pill',        '#495057', '#e9ecef'],
+    ['btn-light',       '#212529', '#f8f9fa'],
+    ['muted-on-white',  '#6c757d', '#ffffff'],
+    ['selected-item',   '#0b57d0', '#d3e3fd'],
+  ];
+
+  var grid = document.getElementById('grid');
+  for (var i = 0; i < PATCHES.length; i++) {
+    var p = PATCHES[i];
+    var d = document.createElement('div');
+    d.className = 'patch';
+    d.setAttribute('data-name', p[0]);
+    d.setAttribute('data-fg', p[1]);
+    d.setAttribute('data-bg', p[2]);
+    d.style.background = p[2];
+    var g = document.createElement('span');
+    g.className = 'g';
+    g.style.color = p[1];
+    g.textContent = '████';
+    var l = document.createElement('span');
+    l.className = 'l';
+    l.style.color = p[1];
+    l.textContent = p[0];
+    d.appendChild(g);
+    d.appendChild(l);
+    grid.appendChild(d);
+  }
+
+  /**
+   * Per-patch probe points, in CSS pixels, client coordinates.
+   *
+   * `glyph` is the centre of the FULL BLOCK run — solid painted text colour.
+   * `corner` is the patch's bottom-right, which no glyph and no label reaches,
+   * so it is painted background and nothing else.
+   */
+  window.__patches = function () {
+    return [].slice.call(document.querySelectorAll('.patch')).map(function (el) {
+      var pr = el.getBoundingClientRect();
+      var gr = el.querySelector('.g').getBoundingClientRect();
+      return {
+        name: el.getAttribute('data-name'),
+        fg: el.getAttribute('data-fg'),
+        bg: el.getAttribute('data-bg'),
+        glyph: { x: Math.round(gr.left + gr.width / 2), y: Math.round(gr.top + gr.height / 2) },
+        corner: { x: Math.round(pr.right - 10), y: Math.round(pr.bottom - 10) },
+      };
+    });
+  };
+</script>
+</body>
+</html>

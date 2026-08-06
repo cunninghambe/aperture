@@ -1,4 +1,12 @@
 :root {
+  /* Tell Chromium this document is dark, so its UA-styled internals stop
+     falling back to light-scheme defaults. Without it
+     `getComputedStyle(document.documentElement).colorScheme` is "normal"
+     (measured), and the omnibox placeholder rendered at Chromium's light-scheme
+     #757575 over a near-black input — 3.88:1 against a 4.5 bar. One declaration
+     also fixes scrollbars, <select> popups and autofill tints
+     (docs/design/darkmode-contrast.md §3-F5). */
+  color-scheme: dark;
   --bg: #16161a;
   --bg-raised: #1e1e24;
   --border: #2c2c35;
@@ -221,4 +229,15 @@ body {
 #agent-text {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* -- form internals -------------------------------------------------------- */
+
+/* Element-level, not per-input, so every field added later inherits the
+   treatment rather than needing its own rule. `color-scheme: dark` above
+   already moves Chromium's UA placeholder off the light-scheme value; pinning
+   it to the palette's dim token puts it at ≈ 6.4:1 over the omnibox fill
+   instead of leaving it to a UA default nobody here chose. */
+input::placeholder {
+  color: var(--fg-dim);
 }

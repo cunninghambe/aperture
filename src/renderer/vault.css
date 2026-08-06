@@ -1,4 +1,12 @@
 :root {
+  /* Same omission, same fix, same one declaration as style.css: without it this
+     document reports `color-scheme: normal` and Chromium styles its own
+     internals light — the passphrase placeholders measured 4.09:1, at the
+     light-scheme #757575 over the gate's #111114 input fill
+     (docs/design/darkmode-contrast.md §3-F5). CSS only: this window's
+     structural properties do not move — it stays TabManager-invisible,
+     content-protected and sender-checked. */
+  color-scheme: dark;
   --bg: #16161a;
   --raised: #1e1e24;
   --raised-2: #26262e;
@@ -302,4 +310,13 @@ dialog menu {
   gap: 8px;
   margin: 18px 0 0;
   padding: 0;
+}
+
+/* -- form internals -------------------------------------------------------- */
+
+/* Element-level, so every field added later inherits the treatment rather than
+   needing its own rule. Over the gate's input fill this measures ≈ 6.8:1,
+   against 4.09 for the light-scheme UA default it replaces. */
+input::placeholder {
+  color: var(--dim);
 }

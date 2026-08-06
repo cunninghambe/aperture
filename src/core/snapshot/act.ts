@@ -49,6 +49,18 @@ export interface Resolved {
   ok: true;
   x: number;
   y: number;
+  /**
+   * Live viewport geometry, for the capture path's detail crop.
+   *
+   * OPTIONAL, and that is load-bearing rather than tidiness: against a stale
+   * preload artifact these fields are simply absent, and the capture flow
+   * treats absence as a decline to the full frame instead of crashing or
+   * cropping the wrong pixels. Existing consumers read `ok`/`x`/`y`/
+   * `obstructed` and are unaffected.
+   */
+  rect?: [number, number, number, number];
+  vw?: number;
+  vh?: number;
   obstructed: boolean;
   obstructor: string | null;
   tag: string;

@@ -637,6 +637,13 @@ ipcRenderer.on(
         ok: true,
         x,
         y,
+        // Live geometry for the capture path's detail crop. Numbers from
+        // `getBoundingClientRect`/`innerWidth`, measured in the isolated world
+        // and flowing only into main-process crop math — this adds fields to an
+        // existing reply, not a channel, and no page-authored string rides it.
+        rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+        vw: window.innerWidth,
+        vh: window.innerHeight,
         obstructed,
         obstructor: obstructed
           ? (atPoint?.tagName ?? '') + (atPoint?.id ? `#${atPoint.id}` : '')

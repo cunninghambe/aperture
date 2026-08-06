@@ -13,7 +13,7 @@ import { revokeAllGrants } from './consent.js';
 import { clearAllNeedles, invalidate, setOriginScope } from '@core/snapshot/engine';
 import { installBotAuth, setAttributionResolver } from '../net/botAuth.js';
 import { flushTelemetry, initTelemetry, report } from '../telemetry/reporter.js';
-import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
+import { applyDarkMode, enableForceDark, installDarkModePolicy } from '@privacy/darkmode';
 
 /** Chromium switches applied before app-ready. */
 function applyCommandLineSwitches(): void {
@@ -183,6 +183,15 @@ app.whenReady().then(async () => {
   await installBlocker(containers.sessionFor(containers.defaultId()));
 
   await createWindow();
+
+  // THE DARK-MODE POLICY, GIVEN A NAVIGATION TO RUN ON.
+  //
+  // `applyToTab` — per-site Auto/On/Off, the already-dark auto-skip, the
+  // `knownDark` cache — documented itself as "called after each navigation" and
+  // had exactly one call site: the `browser_theme` MCP tool. No navigation event
+  // reached it, so a shipped protection had never executed for a human browsing
+  // (docs/design/darkmode-contrast.md §3-F2). This is the wire.
+  if (tabs) installDarkModePolicy(tabs);
 
   // Web Bot Auth (docs/design/webbotauth.md). Config read once, keys generated
   // or loaded, directory exports written, one handler registered into the mux.
