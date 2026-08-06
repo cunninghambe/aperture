@@ -844,17 +844,30 @@ security session, Web Bot Auth, and the owed h2h cohort — are all closed.
 
 ---
 
-## Thursday's backlog — closed 2026-08-06, HEAD 
+## Thursday's backlog — closed 2026-08-06, HEAD `6e919d6`
+
 | item | outcome |
 |---|---|
-| Screenshot autocrop | **Shipped.** Auto-trim default (cannot hide visible content by construction); detail crop declines to the full frame on a closed list including any open modal — even when the modal is the target. Eight decline paths demonstrated live.  |
-| Dark-mode contrast | **Shipped.** The reported defect was Chromium force-dark's band seam: 1.21:1 measured, 7.87:1 after. Diagnosis also found the dark-mode policy engine had ONE call site (the MCP tool) and had never run during normal browsing, and that theme  did not stop darkening while reporting that it had. Both fixed. , bench  |
-| Voice input | **Dropped by the owner.** Spec kept at , marked DROPPED, because the reasoning is the useful part: the honest design was that Aperture should never open the microphone at all. All code removed; seven files returned byte-identical to HEAD. |
+| Screenshot autocrop | **Shipped.** Auto-trim by default, which cannot hide visible content by construction; detail crop declines to the full frame on a closed list including any open modal — declined even when the modal *is* the target. Eight decline paths demonstrated live. `docs/design/autocrop.md` |
+| Dark-mode contrast | **Shipped.** The reported defect was Chromium force-dark's band seam — text flipped light below brightness 150, backgrounds darkened only above 205, so the ~98–205 band kept a light fill under light text. Measured 1.21:1, now 7.87:1. Diagnosis also found two defects nobody reported: the dark-mode policy engine had exactly ONE call site (the `browser_theme` MCP tool) so it had never run during normal browsing, and theme `light` did not stop darkening while reporting that it had. Both fixed. `docs/design/darkmode-contrast.md`, bench `npm run bench:darkmode` |
+| Voice input | **Dropped by the owner.** Spec kept at `docs/design/voice.md`, marked DROPPED, because the reasoning is the useful part: the honest design turned out to be that Aperture should never open the microphone at all. All code removed; seven files returned byte-identical to HEAD, which is the removal's own proof. |
 
-Two bench reds were **ruled, not waived**, and the distinction is the point:
- was the *bound* being wrong (it demanded 3.0:1 from a surface its
-author shipped at 2.32:1, which §6.1's own rationale forbids) — corrected, and
-verified to move exactly two rows and flip exactly one verdict.
- was closed by **measuring** a sweep of the live contrast
-tuning and taking the max-min point (110, worst margin +0.32), not by relaxing
-the 0.8 factor, which was not touched.
+Two dark-mode bench reds were **ruled, not waived**, and the distinction is the
+point of recording them:
+
+- `fg-aaa/fff` was the **bound** being wrong. `REQ = min(4.5, max(3.0, 0.8 ×
+  authored))` demanded 3.0:1 from a surface its author shipped at 2.32:1 —
+  which §6.1's own rationale forbids — and failed even though inversion had
+  *improved* it to 2.82. Corrected to never demand more than the author
+  shipped, then verified to move exactly two rows and flip exactly one verdict.
+- `bg-909090/333` was closed by **measurement**: a sweep of the live contrast
+  tuning found 110 is the max-min point (worst margin +0.32 against +0.14 at
+  105), with the two binding rows moving in opposite directions and every
+  dark-native row unaffected because auto-skip injects no filter. The 0.8
+  factor was not touched.
+
+One process note worth keeping: the removal pass **refused a coordinator
+instruction and was right to**. It was told to delete an `input::placeholder`
+rule as note-channel debris; that rule is dark mode's own omnibox fix (§3-F5,
+3.88 → 6.44), and deleting it would have silently reverted the repair the same
+session had just made.
