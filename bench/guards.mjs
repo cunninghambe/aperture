@@ -24,7 +24,7 @@
  *
  *   --phase=allow (default) — Aperture launched `--seed-vault --seed-profile
  *                             --e2e-consent=allow --e2e-consent-delay-ms=1500
- *                             --seed-botauth=bench/fixtures/botauth-dev-key.json`.
+ *                             --seed-botauth=bench/botauth-dev-key.json`.
  *                             Runs G1-G15, G16-G27a, G30-G32 and G33.
  *                             `--seed-botauth` is not optional since 2026-08-05:
  *                             the G33 block measures Web Bot Auth request
@@ -101,9 +101,23 @@ if (!['allow', 'deny', 'none'].includes(PHASE)) {
 // source after the last build", and mtime is exactly that question. A rebuild
 // that produces identical bytes still moves the artifact's mtime forward, so
 // the check has no false positives from a no-op rebuild.
+//
+// THE HASH COVERS out/preload/*.cjs TOO, AND THAT IS A REPAIR, NOT A FLOURISH
+// (docs/design/harness-debt.md, ride-along finding). It used to digest
+// `out/main/index.js` alone, so three separate PRELOAD sabotages — page.ts is
+// where a large share of the guards' subject matter lives — each reported the
+// IDENTICAL artifact hash. The staleness refusal still fired, because mtime is
+// checked against all of `src/`; what failed was the other half of the contract,
+// the one that makes a pasted tail self-describing. A recorded fingerprint that
+// cannot tell two builds apart identifies nothing, and it was being quoted as if
+// it did. The rule is now the one `bench/lib/store.mjs` and `h2hStore.mjs`
+// already use for `buildVersion` — out/main/index.js plus every
+// out/preload/*.cjs, path-sorted, digest over the table — so the same bytes get
+// the same answer everywhere in this repo.
 // ---------------------------------------------------------------------------
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ARTIFACT = join(ROOT, 'out', 'main', 'index.js');
+const PRELOAD_DIR = join(ROOT, 'out', 'preload');
 
 /** The most recently modified file under `dir`, recursively. */
 function newestUnder(dir) {
@@ -140,10 +154,29 @@ let ARTIFACT_HASH = '(unhashed)';
     );
     process.exit(3);
   }
-  ARTIFACT_HASH = createHash('sha256').update(readFileSync(ARTIFACT)).digest('hex');
+  const sha = (buf) => createHash('sha256').update(buf).digest('hex');
+  const table = [{ path: 'out/main/index.js', hash: sha(readFileSync(ARTIFACT)) }];
+  let preloadNames = [];
+  try {
+    preloadNames = readdirSync(PRELOAD_DIR).filter((n) => /\.cjs$/.test(n)).sort();
+  } catch {
+    preloadNames = [];
+  }
+  if (!preloadNames.length) {
+    // Not fatal — a main-only build is a legitimate state — but it must be
+    // SAID, because the whole value of the digest is knowing what it covers.
+    console.log('NOTE: out/preload holds no .cjs — the artifact hash covers out/main only.\n');
+  }
+  for (const n of preloadNames) {
+    table.push({ path: `out/preload/${n}`, hash: sha(readFileSync(join(PRELOAD_DIR, n))) });
+  }
+  table.sort((a, b) => (a.path < b.path ? -1 : 1));
+  ARTIFACT_HASH = sha(table.map((f) => `${f.path} ${f.hash}`).join('\n'));
   console.log(
-    `artifact  ${relative(ROOT, ARTIFACT).replace(/\\/g, '/')}  ` +
-      `sha256 ${ARTIFACT_HASH}  built ${new Date(built.mtimeMs).toISOString()}\n` +
+    `artifact  ${table.map((f) => f.path).join(' + ')}\n` +
+      `          sha256 ${ARTIFACT_HASH}  (digest over the file table — a preload-only ` +
+      'change moves it)\n' +
+      `          out/main/index.js built ${new Date(built.mtimeMs).toISOString()}\n` +
       `phase     ${PHASE}\n`,
   );
 }
@@ -294,7 +327,7 @@ function finish() {
   // the thing three stale-build incidents made unfalsifiable.
   console.log(
     `\nRESULT: ${failed.length ? 'RED — ' + failed.map((f) => f.id).join(', ') : 'GREEN'}` +
-      `  [out/main/index.js sha256 ${ARTIFACT_HASH.slice(0, 16)}…]`,
+      `  [out/main + out/preload sha256 ${ARTIFACT_HASH.slice(0, 16)}…]`,
   );
   process.exit(failed.length ? 1 : 0);
 }
@@ -2795,7 +2828,7 @@ const beta = refFor('Beta action', 'button');
 // G33: Web Bot Auth — signing happens where it should, and NOWHERE ELSE
 // ---------------------------------------------------------------------------
 //
-// `docs/design/webbotauth.md` §9. Needs `--seed-botauth=bench/fixtures/botauth-dev-key.json`
+// `docs/design/webbotauth.md` §9. Needs `--seed-botauth=bench/botauth-dev-key.json`
 // on the launch, alongside the flags the credential guards already need.
 //
 // THE INSTRUMENT IS AS MUCH ON TRIAL AS THE FEATURE. Everything below is judged
@@ -2823,7 +2856,7 @@ const beta = refFor('Beta action', 'button');
   // it, it is labelled TEST KEY — NEVER AN IDENTITY in its own first field, and
   // file config cannot reach it.
   const DEV_JWK = JSON.parse(
-    readFileSync(join(ROOT, 'bench', 'fixtures', 'botauth-dev-key.json'), 'utf8'),
+    readFileSync(join(ROOT, 'bench', 'botauth-dev-key.json'), 'utf8'),
   );
   const DEV_PUBLIC = { kty: 'OKP', crv: 'Ed25519', x: DEV_JWK.x };
   const DEV_THUMBPRINT = thumbprintOf(DEV_PUBLIC);
@@ -3014,7 +3047,7 @@ const beta = refFor('Beta action', 'button');
           `nonce#1 ${first.nonce.slice(0, 12)} nonce#2 ${(second?.nonce ?? '').slice(0, 12)}; ` +
           `page agrees: ${pageSaysSigned}`
         : 'NO DOCUMENT REQUEST REACHED THE VERIFIER at all. Is Aperture launched with ' +
-          '--seed-botauth=bench/fixtures/botauth-dev-key.json?',
+          '--seed-botauth=bench/botauth-dev-key.json?',
     );
 
     /**

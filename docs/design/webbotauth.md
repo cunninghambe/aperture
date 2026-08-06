@@ -424,11 +424,11 @@ with zero extra infrastructure.
 in-memory config for the guard run — default container, directoryUrl
 `http://127.0.0.1:8902`, allowlist `["http://127.0.0.1:8902"]`, private key
 read from `<path>`. Nothing written to `userData`. The keypair is a
-**committed test fixture**, `bench/fixtures/botauth-dev-key.json`, labeled
+**committed test fixture**, `bench/botauth-dev-key.json`, labeled
 `TEST KEY — NEVER AN IDENTITY` in the file itself; file config never reads
 it, only the dev flag does. Guards launch phase=allow gains this flag
 (`--seed-vault --seed-profile --e2e-consent=allow --e2e-consent-delay-ms=1500
---seed-botauth=bench/fixtures/botauth-dev-key.json`); no new phase — signing
+--seed-botauth=bench/botauth-dev-key.json`); no new phase — signing
 raises no consent dialog (§6: consent is the config file, a human edit).
 
 ### 7.5 Ownership partition
@@ -436,7 +436,7 @@ raises no consent dialog (§6: consent is the config file, a human edit).
 | path | who may touch it under this spec |
 |---|---|
 | `src/net/**` (three new files) | builder, fully |
-| `test/botauth.test.ts`, `bench/probes/webbotauth/**`, `bench/fixtures/botauth-dev-key.json` | builder, fully |
+| `test/botauth.test.ts`, `bench/probes/webbotauth/**`, `bench/botauth-dev-key.json` | builder, fully |
 | `src/main/tabs.ts`, `src/privacy/containers.ts`, `src/main/index.ts` | builder, ONLY the named minimal edits in §7.1 |
 | `bench/guards.mjs` | builder: the G33 block + the 8902 verifier startup; nothing existing changes |
 | `test/egress.test.ts` | builder: **ruling rows only** — `session.webRequest` and `.onBeforeSendHeaders` as newly accessed Electron surface members (page-supplied? no — the handler READS requests; the strings it writes are Aperture-built headers), and the two new `writeFile` sites (key file, directory export: paths Aperture builds under userData). The enumeration fails on these until ruled; that is the guard working. It is never weakened, and no regex is narrowed. |
@@ -823,7 +823,7 @@ npx electron-vite build                     # guards refuse to run against a sta
 # 2. GREEN — the real artifact, launched with the seed flag §7.4 specifies.
 npm start -- --seed-vault --seed-profile \
              --e2e-consent=allow --e2e-consent-delay-ms=1500 \
-             --seed-botauth=bench/fixtures/botauth-dev-key.json
+             --seed-botauth=bench/botauth-dev-key.json
 #    ...then, with the bearer token that launch printed:
 node bench/guards.mjs <token> http://127.0.0.1:8899 --phase=allow
 #    Expect G33-instrument, G33a, G33b, G33c-img, G33c-fetch, G33d, G33e-tamper

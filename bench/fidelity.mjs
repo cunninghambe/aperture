@@ -49,7 +49,7 @@
  * to deliver a label update, the next step cannot even resolve its target.
  *
  * Usage:
- *   node bench/fidelity.mjs <token> [form|rerender|widgets|biglist|selects|blindfields]
+ *   node bench/fidelity.mjs <token> [form|rerender|widgets|biglist|selects|blindfields|filterlist|modal]
  *
  * Exit codes — anything nonzero must never be read as "roughly green":
  *   0  GREEN
@@ -269,18 +269,31 @@ const SCENARIOS = {
       { do: 'select', label: 'Order status', option: 'Committed' },
       // Replace semantics: two options were selected, one is now.
       { do: 'select', label: 'Toppings', option: 'Olives' },
+      // WO-C2.2 — the dependent pair. Changing the parent REBUILDS the child's
+      // option list (7 -> 12), and the child's `[N options]` marker must be
+      // re-announced with the new count. A stale count is a model that believes
+      // a shorter list than the page has, on the marker that is an agent's only
+      // native-vs-custom discriminator.
+      { do: 'select', label: 'Region', option: 'Japan' },
       { do: 'click', label: 'Colour: none', expectState: ['expanded', true] },
       { do: 'click', label: 'Red', expectState: ['selected', true] },
       { do: 'click', label: 'Colour: Red' },
     ],
     expect: { minRefs: 7, minDiffs: 7 },
+    // Read off the believed model — built from the stream and nothing else —
+    // so a walker that agreed with itself could not launder it. 12 and 7 are
+    // unique counts on this page, so neither can be satisfied by another select.
+    independent: [{ label: 'City', optionCount: 12 }],
     // The marker contract, checked against the stream itself rather than
     // inferred: every native select says how many options it has, and the
     // custom combobox — which looks like a dropdown in every other respect —
     // must not, because that marker is the agent's only discriminator.
     checkInitial(text) {
       const problems = [];
-      for (const want of ['[4 options]', '[51 options]', '[3 options]', '[6 options]']) {
+      // '[7 options]' is the dependent child BEFORE the parent moves (WO-C2.2).
+      // Asserting it here as well as asserting 12 at the end is what makes the
+      // end assertion mean "it changed" rather than "it happened to be 12".
+      for (const want of ['[4 options]', '[51 options]', '[3 options]', '[6 options]', '[7 options]']) {
         // "[3 options]" appears twice on this page (Delivery slot, Order
         // status); one occurrence is enough to prove the marker is emitted.
         if (!text.includes(want)) {
@@ -360,6 +373,76 @@ const SCENARIOS = {
       { link: 'Continue to checkout', href: '/checkout-v2' },
       { anyLabel: 'Following' },
     ],
+  },
+
+  /**
+   * THE OBSTRUCTION GATE, INSIDE THE STANDING SET (harness-debt.md WO-C2.1).
+   *
+   * It was measured only by `bench:guards` G7a/G7b, which needs a consent-phase
+   * launch and a bearer token — so a regression in either gate would have left
+   * all six standing fidelity scenarios green while every covered element on the
+   * web became clickable again. A wrong GREEN on the standing set is the exact
+   * failure this whole bundle is about.
+   *
+   * Both gates, in the order the engine asks them (tier6 §4):
+   *   steps 2-4  REACHABILITY — a native `dialog.showModal()`. `blockedReason`
+   *              returns 'modal' and the refusal names the dialog. The hit-test
+   *              never runs; this gate is asked first precisely because the
+   *              hit-test gets modals wrong (an addressable ancestor of an open
+   *              dialog is excused by its containment test).
+   *   steps 5-8  HIT-TEST — an ordinary fixed overlay, no dialog semantics, so
+   *              `blockedReason` is null and the refusal can only come from
+   *              `obstructed`/`obstructor`. This is G7a/G7b's path.
+   *
+   * And in both halves the RECOVERY is asserted too, because a gate that refuses
+   * everything is not a gate. The witness is the `saved N` button: a refusal
+   * that silently let the click through would move it, and the model reads its
+   * label off the stream.
+   */
+  modal: {
+    url: `${BASE}/modal.html`,
+    stepDelayMs: 400,
+    steps: [
+      { do: 'click', label: 'Open settings' },
+      /**
+       * Refused by REACHABILITY, and the pattern is deliberately narrow.
+       *
+       * It was written as `/behind an open modal dialog|is covered by/` — accept
+       * either gate, since either refusal protects the user — and the sabotage
+       * row caught it: with `blockedReason`'s branch disabled the act falls
+       * through to the hit-test, which ALSO refuses (a top-layer dialog does
+       * cover the button's centre point) with `is covered by "DIALOG#settings"`,
+       * and the permissive pattern went green over a deleted gate. Two gates
+       * that happen to overlap on one fixture are not one gate, and a scenario
+       * that cannot tell them apart cannot report which one regressed.
+       *
+       * So each step pins the message of the gate it is measuring, exactly.
+       */
+      {
+        do: 'click',
+        label: 'Save draft',
+        expectRefusal: /behind an open modal dialog/,
+        refusalMustSay: 'behind an open modal dialog',
+      },
+      { do: 'click', label: 'Close settings' },
+      { do: 'click', label: 'Save draft' }, // lands: saved 1
+      { do: 'click', label: 'Show cookie banner' },
+      // Refused by the hit-test. `covered by` is G7a's exact signature.
+      {
+        do: 'click',
+        label: 'Save draft',
+        expectRefusal: /is covered by/,
+        refusalMustSay: 'covered by',
+      },
+      { do: 'click', label: 'Dismiss banner' },
+      { do: 'click', label: 'Save draft' }, // lands: saved 2
+    ],
+    expect: { minRefs: 4, minDiffs: 4 },
+    // Read from the stream alone: exactly two clicks landed on Save draft, so
+    // the counter says 2. If either refusal had leaked through it would say 3
+    // or 4, and if a recovery had failed it would say 0 or 1. One literal,
+    // both directions.
+    independent: [{ anyLabel: 'saved 2' }],
   },
 
   // The changed survivor inside a replaced subtree (docs/design/tier6.md §2.4).
@@ -507,6 +590,39 @@ for (const [i, step] of scenario.steps.entries()) {
         ? { action: 'select', ref, option: step.option }
         : { action: step.do, ref };
   const out = await call('browser_act', args);
+
+  /**
+   * A STEP THAT IS SUPPOSED TO BE REFUSED (WO-C2.1).
+   *
+   * `stepFailure` treats any `error:` as "this step never ran, do not score it"
+   * — correct for every other scenario and exactly wrong here, where the refusal
+   * IS the measurement. So a step carrying `expectRefusal` inverts the test: the
+   * error must arrive AND match, and an action that lands instead is the RED.
+   *
+   * No observation follows a refusal, so nothing is applied to the model and the
+   * step counts toward neither `diffSteps` nor `fullSteps`. The recovery steps
+   * that follow it carry the diff budget.
+   */
+  if (step.expectRefusal) {
+    const oneLine = out.trim().split('\n')[0];
+    if (!/^error:/m.test(out)) {
+      console.error(`\nRED: step ${i + 1} (${step.do} "${step.label}" -> ${ref}) was NOT refused.`);
+      console.error('     The obstruction gate let an action through to a covered element.');
+      console.error(`     ${oneLine.slice(0, 200)}\n`);
+      midRunReds.push(`step ${i + 1} (${step.do} "${step.label}") was not refused`);
+    } else if (!step.expectRefusal.test(out)) {
+      console.error(`\nRED: step ${i + 1} was refused for the WRONG reason.`);
+      console.error(`     expected /${step.expectRefusal.source}/, got: ${oneLine.slice(0, 200)}\n`);
+      midRunReds.push(`step ${i + 1} refused with the wrong error: ${oneLine.slice(0, 120)}`);
+    } else {
+      console.log(
+        `step ${String(i + 1).padStart(2)} ${step.do.padEnd(5)} "${step.label}" -> ${ref}  ` +
+          `REFUSED (${step.refusalMustSay})  model=${model.size} refs`,
+      );
+    }
+    if (scenario.stepDelayMs) await sleep(scenario.stepDelayMs);
+    continue;
+  }
 
   const failure = stepFailure(out);
   if (failure) {
@@ -773,6 +889,39 @@ for (const ind of scenario.independent ?? []) {
         `${lref} ("${ind.link}"): the bench set this link's target to ${ind.href} and the ` +
           `stream delivered ${link.href ?? '(no href at all)'} — a stable label over a ` +
           'mutated target is precisely the wrong-element action an agent cannot detect',
+      );
+    }
+    continue;
+  }
+  /**
+   * `[N options]` on a named element, read from the believed model (WO-C2.2).
+   *
+   * The count is the ONE token that tells an agent a control is a native select
+   * needing `action:"select"` rather than a custom combobox needing clicks, and
+   * the reader dropped it entirely once — so no scenario could ever turn red on
+   * a stale one, however wrong the belief. This is the STREAM-ONLY form of the
+   * marker comparison further up: the truth snapshot is never consulted, so a
+   * walker that agreed with itself cannot launder it.
+   *
+   * `undefined` (the marker never arrived at all) and a wrong number are
+   * reported differently, because they are different defects: one is a renderer
+   * that stopped emitting, the other a diff that failed to carry an update.
+   */
+  if (ind.optionCount !== undefined) {
+    const hits = [...model.entries()].filter(([, e]) => e.label === ind.label);
+    if (hits.length !== 1) {
+      wrongIndependent++;
+      problems.push(`independent check: "${ind.label}" resolves to ${hits.length} elements (need exactly 1)`);
+      continue;
+    }
+    const [cref, el] = hits[0];
+    if (el.optionCount !== ind.optionCount) {
+      wrongIndependent++;
+      problems.push(
+        `${cref} ("${ind.label}"): the bench rebuilt this select to ${ind.optionCount} options and the ` +
+          `stream's model holds ${el.optionCount === undefined ? 'NO [N options] marker at all' : el.optionCount} — ` +
+          'a stale option count tells an agent the list is shorter than it is, on the one ' +
+          'marker that distinguishes a native select from a custom combobox',
       );
     }
     continue;

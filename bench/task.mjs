@@ -1478,6 +1478,14 @@ function bailIntegrity(integrity, storePath) {
   console.log(`     which renames ${rel(storePath)} with a timestamp — the old`);
   console.log('     episodes are kept, they just stop being pooled with the new ones.');
   console.log('\nThere is deliberately no flag that pools them anyway.');
+  // And the sentence that stops "severed" from reading as "faulted"
+  // (harness-debt.md WO-B5). Every scored cohort in this programme is closed and
+  // severed at every post-programme tree, which means this refusal is the NORMAL
+  // state of a finished experiment, not a symptom of one. Without this line a
+  // reader meets a wall of red about a store that is perfectly sound.
+  console.log('\nA refused store is not a faulted store. If its cohort is closed and adjudicated');
+  console.log('(wave2/wave3-evaluation.md), the adjudication is its verdict of record; this refusal');
+  console.log('only says the CURRENT tree cannot re-score it.');
   console.log(`\nRESULT: INTEGRITY (exit ${EXIT.INTEGRITY})`);
   return EXIT.INTEGRITY;
 }

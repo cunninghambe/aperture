@@ -82,7 +82,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { startCollector, settle, COLLECTOR_PORT } from './lib/collector.mjs';
 import { startProxy, PROXY_PORT, ARM_DEFINITION } from './lib/proxy.mjs';
 import { mean, meanDiffCI, mulberry32 } from './lib/stats.mjs';
-import { buildIdentity, SUITE_VERSION } from './lib/store.mjs';
+import { buildIdentity, loadStore, SUITE_VERSION } from './lib/store.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SIZE_DIR = join(ROOT, 'bench', 'size');
@@ -204,9 +204,9 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/');
 
 function parseArgs(argv) {
   const out = {
-    makeFixtures: false, dry: false, selftest: false, sweep: false,
+    makeFixtures: false, dry: false, selftest: false, sweep: false, report: false,
     n: 6, model: 'claude-sonnet-5', keepAlive: false, forceBudget: false,
-    tiers: null,
+    tiers: null, run: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -214,6 +214,8 @@ function parseArgs(argv) {
     else if (a === '--dry') out.dry = true;
     else if (a === '--selftest') out.selftest = true;
     else if (a === '--sweep') out.sweep = true;
+    else if (a === '--report') out.report = true;
+    else if (a === '--run') out.run = argv[++i];
     else if (a === '--n') out.n = Number(argv[++i]);
     else if (a === '--model') out.model = argv[++i];
     else if (a === '--tiers') out.tiers = argv[++i].split(',').map((s) => s.trim());
@@ -841,6 +843,39 @@ function conversationInputChars(observationChars, prefixChars, promptChars) {
   return { convInputChars: total, turns: observationChars.length + 1, historyEnd: history };
 }
 
+/**
+ * The SDK's per-model usage table, flattened and summed (WO-B1).
+ *
+ * WHY THIS FIELD AND NOT ANOTHER. The input-vs-generation decomposition has now
+ * survived THREE cohorts unanswered: wave3-evaluation §4 item 2 named the field,
+ * the sweep ran without it, and sweep-evaluation §1.3's unidentified two-term
+ * fit is the same question resurfacing — the turn coefficient soaked up exactly
+ * the arm-level cost structure (cache-hit blend, output tokens) that this table
+ * would have shown directly. The head-to-head DID persist it and could therefore
+ * attribute its home premium to output tokens; the field's value is demonstrated
+ * by that contrast, not argued.
+ *
+ * MIRRORS h2h.mjs's working extraction field for field, INCLUDING the SDK's
+ * awkward names — `cacheReadInputTokens`, not `cacheRead`. Reading the short
+ * names would sum to 0 and print a zero that is indistinguishable from a
+ * measurement, which is the failure class this whole bundle is about. Pinned in
+ * `--dry`.
+ *
+ * Absent input degrades to zeros rather than throwing: an SDK result with no
+ * usage table is a fact about that episode, not a reason to lose the row.
+ */
+export function flattenModelUsage(mu) {
+  const usage = Object.values(mu ?? {});
+  const sum = (k) => usage.reduce((a, u) => a + (u?.[k] ?? 0), 0);
+  return {
+    modelKeys: Object.keys(mu ?? {}),
+    inputTokens: sum('inputTokens'),
+    outputTokens: sum('outputTokens'),
+    cacheRead: sum('cacheReadInputTokens'),
+    cacheCreation: sum('cacheCreationInputTokens'),
+  };
+}
+
 async function runEpisode({ proxy, collector, tier, arm, driver, runIndex }) {
   collector.reset();
   const ep = proxy.newEpisode({
@@ -912,6 +947,16 @@ async function runEpisode({ proxy, collector, tier, arm, driver, runIndex }) {
     costUsd: sdk?.costUsd ?? 0,
     sdkTurns: sdk?.turns ?? 0,
     sdkSubtype: sdk?.subtype ?? null,
+    // WO-B1. `modelUsage` is the raw table (so a later question nobody has asked
+    // yet can still be asked of it); the four sums are what `reportTierB` reads.
+    // The scripted Tier A driver returns null, so these are null/0 there — Tier A
+    // spends no API budget and has no usage to report.
+    modelUsage: sdk?.modelUsage ?? null,
+    modelKeys: sdk?.modelKeys ?? [],
+    inputTokens: sdk?.inputTokens ?? 0,
+    outputTokens: sdk?.outputTokens ?? 0,
+    cacheRead: sdk?.cacheRead ?? 0,
+    cacheCreation: sdk?.cacheCreation ?? 0,
     durationMs: Date.now() - t0,
   };
 }
@@ -987,6 +1032,8 @@ function agentDriver(proxy, opts) {
       costUsd: result?.total_cost_usd ?? 0,
       turns: result?.num_turns ?? 0,
       subtype: result?.subtype ?? null,
+      modelUsage: result?.modelUsage ?? null,
+      ...flattenModelUsage(result?.modelUsage),
     };
   };
 }
@@ -1402,10 +1449,52 @@ function tierATable(tiers) {
  * prices a re-sent prefix at a blend nobody can compute a priori; an a-priori
  * per-turn price would be a number with no foundation under it.
  */
-function fitCostModel(rows) {
+/**
+ * RECOVER THE PREFIX A STORED EPISODE WAS MEASURED WITH (WO-B3, cold path).
+ *
+ * `PREFIX_CHARS` is a module global set at RUN TIME from the live tool surface
+ * (system prompt + the exact tool bytes shown), so a cold report has no access
+ * to it and would silently use the initial value — the system prompt alone, 644
+ * chars against the 4,268 the sweep actually ran with. R², the char slope and
+ * the intercept are all invariant to that (the substitution is a linear
+ * reparametrisation of the same column space, so the fitted values do not move),
+ * but `perTurn` and the fitted prefix ARE NOT: reporting cold printed a fitted
+ * prefix of −16,897 where the record says −13,273. Both are negative and the
+ * identification verdict is the same either way, which is precisely what makes
+ * it dangerous — a diagnostic number that is off by the size of the tool surface
+ * and still looks like a measurement.
+ *
+ * It is exactly recoverable, because `conversationInputChars` is a closed form:
+ * convInputChars = T·P + Σ history_t, and every term but P is on the row
+ * (`obsCharSeq`, and the task prompt, which is in this file). Verified against
+ * the real store: all 54 rows recover 4,268, the value §1.3 records as measured.
+ *
+ * Rows that disagree get `null` and the caller falls back with a printed note —
+ * a store spanning two tool surfaces is not one fit.
+ */
+export function prefixCharsFrom(rows, promptChars = TASK.prompt.length) {
+  const seen = new Set();
+  for (const r of rows) {
+    if (!Array.isArray(r.obsCharSeq) || typeof r.convInputChars !== 'number') return null;
+    let history = promptChars;
+    let sum = 0;
+    for (const obs of r.obsCharSeq) {
+      sum += history;
+      history += TOOL_USE_CHARS + obs;
+    }
+    sum += history;
+    const p = (r.convInputChars - sum) / (r.obsCharSeq.length + 1);
+    if (!Number.isFinite(p)) return null;
+    seen.add(p);
+    if (seen.size > 1) return null;
+  }
+  return seen.size === 1 ? [...seen][0] : null;
+}
+
+function fitCostModel(rows, prefixChars = PREFIX_CHARS) {
   const n = rows.length;
   if (n < 4) return { ok: false, reason: `only ${n} episode(s) — need at least 4 to fit 3 parameters` };
-  const X = rows.map((r) => [r.modelTurns, r.convInputChars - r.modelTurns * PREFIX_CHARS, 1]);
+  const X = rows.map((r) => [r.modelTurns, r.convInputChars - r.modelTurns * prefixChars, 1]);
   const y = rows.map((r) => r.costUsd);
 
   // Normal equations, 3x3, solved by Gaussian elimination with partial pivoting.
@@ -1445,10 +1534,63 @@ function fitCostModel(rows) {
     perHistoryChar: coef[1],
     intercept: coef[2],
     prefixFitted: coef[1] === 0 ? null : coef[0] / coef[1],
-    prefixMeasured: PREFIX_CHARS,
+    prefixMeasured: prefixChars,
     r2,
     n,
   };
+}
+
+/**
+ * The one-regressor refit: cost on conversation-input chars alone (WO-B2).
+ *
+ * This is the model that MAY be cited when the two-term fit is unidentified.
+ * sweep-evaluation §1.3 computed it by hand — slope 8.125e-7 $/char, R² 0.908,
+ * consistent with the model's input list price — and the point of putting it
+ * here is that the harness should not need an adjudicator to produce the
+ * defensible number after printing the indefensible one.
+ */
+export function fitCostModelDescriptive(rows) {
+  const n = rows.length;
+  if (n < 2) return { ok: false, reason: `only ${n} episode(s)` };
+  const xs = rows.map((r) => r.convInputChars);
+  const ys = rows.map((r) => r.costUsd);
+  const mx = mean(xs);
+  const my = mean(ys);
+  let sxy = 0;
+  let sxx = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (xs[i] - mx) * (ys[i] - my);
+    sxx += (xs[i] - mx) ** 2;
+  }
+  if (sxx === 0) return { ok: false, reason: 'no variation in conversation-input chars' };
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < n; i++) {
+    ssRes += (ys[i] - (slope * xs[i] + intercept)) ** 2;
+    ssTot += (ys[i] - my) ** 2;
+  }
+  return { ok: true, slope, intercept, r2: ssTot === 0 ? 0 : 1 - ssRes / ssTot, n };
+}
+
+/**
+ * IS THE TWO-TERM FIT IDENTIFIED? (WO-B2 — sweep-evaluation §1.3, mechanised.)
+ *
+ * The tier2 §4.2 gate (cite iff R² ≥ 0.9) is necessary and NOT sufficient, and
+ * the sweep proved it: R² = 0.921 with a fitted prefix of −13,273 chars, which
+ * implies a per-turn cost of −$0.011/turn. That is not a price. The failure is
+ * IDENTIFICATION, not noise — `modelTurns` spanned only 5–7 and effectively
+ * encoded the arm, so the turn coefficient soaked up whatever arm-level cost
+ * structure the char model missed. The adjudicator caught it before publication;
+ * that is a near-miss, and near-misses are what this check converts into
+ * something the harness catches by itself.
+ *
+ * A negative or zero per-turn coefficient, or a negative fitted prefix, means
+ * turns are encoding the arm rather than pricing a round trip.
+ */
+export function identified(fit) {
+  return Boolean(fit?.ok) && fit.perTurn > 0 && fit.prefixFitted >= 0;
 }
 
 /**
@@ -1550,6 +1692,150 @@ function crossoverBand(perTier) {
       'NO CLOSED BAND — the sign pattern is non-monotone across the ladder; no band statement is ' +
       'licensed.',
   };
+}
+
+// ---------------------------------------------------------------------------
+// WO-B3 — reading the store back, with the runId trap turned into a guard
+// ---------------------------------------------------------------------------
+
+/**
+ * WHICH ROWS MAY BE SCORED TOGETHER? A machine answers it, not a footnote.
+ *
+ * `bench/size/results.jsonl` holds 58 episodes, not 54: four s1 episodes from an
+ * earlier same-day run the budget rule stopped at the pilot sit beside the
+ * 54-episode scored run (sweep-evaluation §0.3). The printed table was correct
+ * because the live run only ever saw its own rows — but a COLD reader sees all
+ * 58, and the only thing standing between it and a pooled average of two
+ * different experiments was a sentence in RESULTS.md saying "filter by runId".
+ * A per-human obligation is exactly the class of trap this repo distrusts.
+ *
+ * There is deliberately no `--all`. Two runs cannot be one result, and an
+ * escape hatch is how the obligation comes back.
+ *
+ * The second clause is subtler and is the one a hurried reader would omit: one
+ * runId spanning two stamps is a CORRUPTED run, not a poolable one. Nothing
+ * stops an operator rebuilding mid-sweep; the store would carry one runId and
+ * two buildVersions, and pooling them averages two products.
+ */
+export function selectRun(rows, runId = null) {
+  if (!rows.length) return { ok: false, reason: 'the store is empty — there is nothing to score.' };
+  const byRun = new Map();
+  for (const r of rows) {
+    const k = r.runId ?? '(unstamped)';
+    if (!byRun.has(k)) byRun.set(k, []);
+    byRun.get(k).push(r);
+  }
+  const roll = [...byRun].map(([id, rs]) => ({
+    runId: id,
+    n: rs.length,
+    usd: rs.reduce((a, r) => a + (r.costUsd ?? 0), 0),
+    stamps: [...new Set(rs.map((r) => `${r.codeVersion}/${r.buildVersion}`))],
+  }));
+
+  let selected;
+  if (runId) {
+    if (!byRun.has(runId)) {
+      return { ok: false, roll, reason: `no rows carry runId ${runId}. The store holds: ${[...byRun.keys()].join(', ')}` };
+    }
+    selected = { runId, rows: byRun.get(runId) };
+  } else if (byRun.size === 1) {
+    const [id, rs] = [...byRun][0];
+    selected = { runId: id, rows: rs };
+  } else {
+    return {
+      ok: false,
+      roll,
+      reason:
+        `this file holds ${byRun.size} runs; scoring them pooled would average different\n` +
+        '  experiments. Name one: --report --run <runId>. (The 2026-08-02 file holds a\n' +
+        '  4-episode aborted pilot beside the 54-episode scored run — sweep-evaluation §0.3.)',
+    };
+  }
+
+  const stamps = [...new Set(selected.rows.map((r) => `${r.codeVersion}/${r.buildVersion}`))];
+  if (stamps.length > 1) {
+    return {
+      ok: false,
+      roll,
+      reason:
+        `runId ${selected.runId} spans ${stamps.length} distinct codeVersion/buildVersion pairs\n` +
+        `  (${stamps.join(' · ')}). A run that spans two builds is a corrupted run, not a\n` +
+        '  poolable one — something was rebuilt underneath it.',
+    };
+  }
+  return { ok: true, roll, runId: selected.runId, rows: selected.rows, stamp: stamps[0] };
+}
+
+/**
+ * The per-tier aggregation, extracted from `reportTierB` so a COLD report needs
+ * nothing but the store (WO-B3.1).
+ *
+ * Tier order comes from each row's own `tierChars` ascending rather than from
+ * the fixtures manifest: the manifest is a live-run artifact and can move, while
+ * `tierChars` is stamped on every row at the moment it was measured. A reader
+ * that needed the manifest could not re-score an archived store after the
+ * fixtures were regenerated, which is most of the point of having a store.
+ */
+export function perTierFrom(rows) {
+  const ids = [...new Set(rows.map((r) => r.tier))];
+  const charsOf = (id) => {
+    const withChars = rows.find((r) => r.tier === id && typeof r.tierChars === 'number');
+    return withChars?.tierChars ?? 0;
+  };
+  ids.sort((a, b) => charsOf(a) - charsOf(b));
+
+  const perTier = [];
+  for (const id of ids) {
+    const d = rows.filter((r) => r.tier === id && r.arm === 'diff');
+    const u = rows.filter((r) => r.tier === id && r.arm === 'redump');
+    if (!d.length || !u.length) continue;
+    const sd = d.filter((r) => r.success).length / d.length;
+    const su = u.filter((r) => r.success).length / u.length;
+    perTier.push({
+      tier: id,
+      chars: charsOf(id),
+      nDiff: d.length,
+      nRedump: u.length,
+      costDiff: mean(d.map((r) => r.costUsd)),
+      costRedump: mean(u.map((r) => r.costUsd)),
+      turnsDiff: mean(d.map((r) => r.sdkTurns)),
+      turnsRedump: mean(u.map((r) => r.sdkTurns)),
+      volDiff: mean(d.map((r) => r.voluntaryObs)),
+      volRedump: mean(u.map((r) => r.voluntaryObs)),
+      successDiff: sd,
+      successRedump: su,
+      ci: meanDiffCI(d.map((r) => r.costUsd), u.map((r) => r.costUsd), { alpha: 0.1, seed: 20260801 }),
+      // Validity guard: a failing arm's episodes are not the same work, so their
+      // dollars are not comparable. Excluded from the band, not silently averaged.
+      confounded: Math.abs(sd - su) > 0.1,
+      rowsDiff: d,
+      rowsRedump: u,
+    });
+  }
+  return perTier;
+}
+
+function reportStore(opts) {
+  const { rows, malformed } = loadStore(RESULTS);
+  if (malformed.length) {
+    console.log(`\n${malformed.length} line(s) in ${rel(RESULTS)} could not be parsed.`);
+    console.log('An unreadable line is an episode that cannot be scored. Skipping it would quietly');
+    console.log('change the sample, so this refuses instead.');
+    for (const m of malformed.slice(0, 5)) console.log(`  line ${m.line}: ${m.err} :: ${m.text.slice(0, 120)}`);
+    return EXIT.INFRA;
+  }
+  const sel = selectRun(rows, opts.run);
+  console.log(`\n# Page-size sweep — cold report over ${rel(RESULTS)}\n`);
+  for (const r of (sel.roll ?? [])) {
+    console.log(`  ${r.runId}  n=${String(r.n).padStart(3)}  $${r.usd.toFixed(2).padStart(6)}  ${r.stamps.join(' · ')}`);
+  }
+  if (!sel.ok) {
+    console.log(`\nREFUSING: ${sel.reason}`);
+    return EXIT.INFRA;
+  }
+  console.log(`\nselected  runId ${sel.runId} · n=${sel.rows.length} · stamp ${sel.stamp}`);
+  console.log('          (provenance only — this sweep is not a poolable cohort and has no integrity guard)');
+  return reportTierB({ rows: sel.rows, opts, identity: { codeVersion: sel.stamp.split('/')[0] } });
 }
 
 // ---------------------------------------------------------------------------
@@ -1715,6 +2001,123 @@ function dryRun() {
   console.log(`  taskRegionOf strips exactly the pad block: ${taskRegionOf(fake) === '<body>\n<main>X</main>\n</body>'}`);
   if (taskRegionOf(fake) !== '<body>\n<main>X</main>\n</body>') problems.push('taskRegionOf does not strip the padding cleanly');
 
+  // ---- WO-B1: the token split wave 3 asked for and three cohorts went without
+  //
+  // The SDK-side shape is taken from bench/headtohead/h2h.mjs's working
+  // extraction against the same dependency, so what is testable here is the
+  // FLATTENING, not the population — the field's live confirmation is inherently
+  // first-sweep and is recorded as such in harness-debt.md §6.
+  console.log('\nmodelUsage flattening (WO-B1 — wave3-evaluation §4 item 2)');
+  {
+    const mu = {
+      'claude-sonnet-5': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 100, cacheCreationInputTokens: 7 },
+      'claude-haiku-4-5': { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 },
+    };
+    const f = flattenModelUsage(mu);
+    console.log(
+      `  two models: in ${f.inputTokens} out ${f.outputTokens} cacheRead ${f.cacheRead} ` +
+        `cacheCreation ${f.cacheCreation} keys [${f.modelKeys.join(', ')}]`,
+    );
+    if (f.inputTokens !== 11 || f.outputTokens !== 7 || f.cacheRead !== 103 || f.cacheCreation !== 11) {
+      problems.push('flattenModelUsage does not sum across models — the decomposition would be wrong');
+    }
+    if (f.modelKeys.length !== 2) problems.push('flattenModelUsage lost a model key');
+    // SABOTAGE: a missing field is 0, and a missing OBJECT is not a crash. An
+    // episode whose SDK result carried no modelUsage must record zeros and a
+    // empty key list, not throw and lose the row.
+    const empty = flattenModelUsage(undefined);
+    console.log(`  absent modelUsage: in ${empty.inputTokens} keys ${empty.modelKeys.length} (must not throw)`);
+    if (empty.inputTokens !== 0 || empty.modelKeys.length !== 0) problems.push('flattenModelUsage does not degrade to zeros on an absent field');
+    // SABOTAGE, the non-obvious one: the SDK's field names are
+    // cacheReadInputTokens / cacheCreationInputTokens. A flattener that reads
+    // `cacheRead` off the SDK object would silently produce 0 for the one term
+    // the h2h used to attribute its home premium — a zero indistinguishable from
+    // a measurement, which is this whole document's failure class.
+    const wrongNames = flattenModelUsage({ m: { inputTokens: 1, outputTokens: 1, cacheRead: 999, cacheCreation: 999 } });
+    console.log(`  SDK field names honoured (cacheRead* not cacheRead): ${wrongNames.cacheRead === 0 ? 'yes' : 'NO'}`);
+    if (wrongNames.cacheRead !== 0) problems.push('flattenModelUsage reads the wrong cache field names');
+  }
+
+  // ---- WO-B2: the identification check, made mechanical --------------------
+  console.log('\ncost-fit identification (WO-B2 — sweep-evaluation §1.3\'s near-miss)');
+  {
+    // The sweep's degenerate design, recreated: modelTurns takes two values that
+    // encode the arm, and the arm carries a binary cost offset. R² clears 0.9
+    // and the per-turn coefficient comes out NEGATIVE — which is not a price.
+    const degen = [];
+    for (let i = 0; i < 30; i++) {
+      const diffArm = i % 2 === 0;
+      const turns = diffArm ? 6 : 5;
+      const hist = 20000 + (i % 5) * 30000;
+      degen.push({
+        modelTurns: turns,
+        convInputChars: turns * PREFIX_CHARS + hist,
+        costUsd: 8.1e-7 * hist + (diffArm ? -0.02 : 0.02) + 0.05,
+      });
+    }
+    const dfit = fitCostModel(degen);
+    const dId = identified(dfit);
+    console.log(`  degenerate design: R² ${dfit.r2?.toFixed(3)} perTurn ${dfit.perTurn?.toExponential(2)} -> ${dId ? 'IDENTIFIED (bad)' : 'NOT IDENTIFIED'}`);
+    if (!dfit.ok || dfit.r2 < 0.9) problems.push('the degenerate case no longer clears the R² gate — it no longer reproduces the near-miss');
+    if (dId) problems.push('the identification check accepted a negative per-turn price');
+
+    // The noiseless synthetic from above must STAY on the identified branch: a
+    // check that refuses everything is not a check.
+    console.log(`  noiseless synthetic: perTurn ${fit.perTurn?.toExponential(2)} -> ${identified(fit) ? 'IDENTIFIED' : 'NOT IDENTIFIED (bad)'}`);
+    if (!identified(fit)) problems.push('the identification check rejects a well-identified fit');
+
+    // The descriptive one-regressor refit is what may be cited instead.
+    const desc = fitCostModelDescriptive(degen);
+    console.log(`  descriptive refit: ${desc.slope?.toExponential(3)} $/char  R² ${desc.r2?.toFixed(3)}  n=${desc.n}`);
+    if (!desc.ok || !(desc.slope > 0)) problems.push('the descriptive one-regressor refit did not produce a positive $/char slope');
+  }
+
+  // ---- WO-B3, cold path: the prefix a stored episode was measured with ------
+  console.log('\ncold-report prefix recovery (WO-B3 — the fit must reproduce the live run\'s numbers)');
+  {
+    const mkRow = (obsSeq, p) => ({
+      obsCharSeq: obsSeq,
+      convInputChars: conversationInputChars(obsSeq, p, TASK.prompt.length).convInputChars,
+      modelTurns: obsSeq.length + 1,
+    });
+    const got = prefixCharsFrom([mkRow([100, 200, 300], 4268), mkRow([50, 60], 4268)]);
+    console.log(`  two episodes measured at 4268: recovered ${got}`);
+    if (got !== 4268) problems.push(`prefixCharsFrom recovered ${got}, expected 4268 — the cold fit would print a wrong prefix`);
+    // SABOTAGE: rows from two different tool surfaces are not one fit. Averaging
+    // them would print a prefix nobody measured, which is worse than refusing.
+    const mixed = prefixCharsFrom([mkRow([100, 200], 4268), mkRow([100, 200], 644)]);
+    console.log(`  episodes from two surfaces:    recovered ${mixed} (must be null)`);
+    if (mixed !== null) problems.push('prefixCharsFrom pooled two tool surfaces into one prefix');
+    // SABOTAGE, the non-obvious one: a row with no obsCharSeq (an older store
+    // shape) must refuse rather than silently divide by a wrong turn count.
+    const truncated = prefixCharsFrom([{ convInputChars: 1000, modelTurns: 3 }]);
+    console.log(`  a row without obsCharSeq:      recovered ${truncated} (must be null)`);
+    if (truncated !== null) problems.push('prefixCharsFrom invented a prefix for a row that cannot supply one');
+  }
+
+  // ---- WO-B3: the runId pooling refusal ------------------------------------
+  console.log('\nrunId pooling refusal (WO-B3 — the results.jsonl trap becomes a guard)');
+  {
+    const row = (runId, codeVersion = 'aaa', buildVersion = 'bbb') => ({
+      runId, codeVersion, buildVersion, tier: 's1', tierChars: 1116, arm: 'diff', costUsd: 0.1,
+    });
+    const cases = [
+      ['two runIds, no --run', [row('A'), row('B')], null, false],
+      ['two runIds, --run names one', [row('A'), row('B')], 'A', true],
+      ['two runIds, --run names neither', [row('A'), row('B')], 'C', false],
+      ['one runId, no --run', [row('A'), row('A')], null, true],
+      ['one runId spanning two buildVersions', [row('A'), row('A', 'aaa', 'ccc')], null, false],
+      ['one runId spanning two codeVersions', [row('A'), row('A', 'zzz')], 'A', false],
+      ['empty store', [], null, false],
+    ];
+    for (const [name, rows2, run, wantOk] of cases) {
+      const sel = selectRun(rows2, run);
+      console.log(`  ${name.padEnd(38)} -> ${sel.ok ? `proceed n=${sel.rows.length}` : `REFUSE (${sel.reason.split('\n')[0].slice(0, 54)})`}`);
+      if (sel.ok !== wantOk) problems.push(`selectRun(${name}) returned ok=${sel.ok}, expected ${wantOk}`);
+      if (!sel.ok && !sel.reason) problems.push(`selectRun(${name}) refuses without saying why`);
+    }
+  }
+
   // ---- budget projection -------------------------------------------------
   console.log('\nbudget model (the rule is preregistered in tier1b.md §2, applied automatically)');
   if (fx.manifest) {
@@ -1744,6 +2147,17 @@ function dryRun() {
  * spend assuming per-episode cost scales linearly with page size (deliberately
  * pessimistic — the diff arm's observations do not scale at all). If the
  * projection exceeds $60, drop s5 to N=4 and s4 to N=5. Never drop tiers.
+ *
+ * MEASURED ~9x PESSIMISTIC, AND DELIBERATELY LEFT ALONE (harness-debt.md WO-B4).
+ * The 2026-08-02 sweep projected $88.52 and spent $9.88, because episode cost is
+ * dominated by the per-episode floor rather than by page weight; the rule cut
+ * s5 to N=4 for nothing, which is why s5's interval is the widest on the table.
+ * The replacement — a fitted char slope plus a measured per-episode floor
+ * (sweep-evaluation §2's ride-along note) — is NOT made here on purpose: this
+ * projection is preregistered in tier1b §2, its failure mode only mis-allocates
+ * N, and it cannot print a false claim. Re-opening a preregistered budget rule
+ * outside any live design is how preregistration stops meaning anything. It
+ * belongs in the next sweep's own design document, preregistered properly.
  */
 function projectSpend(sizes, n, perEpisodeAtS1) {
   const s1 = sizes[0];
@@ -1771,7 +2185,10 @@ function usage() {
   console.log('  --make-fixtures   regenerate bench/size/fixtures. No infra, no budget.');
   console.log('  --dry             wiring self-test. No infra, no budget.');
   console.log('  --selftest        P0-P5 preflight + Tier A, live. NO API budget.');
-  console.log('  --sweep [--n 6]   the above plus Tier B. SPENDS REAL MONEY.\n');
+  console.log('  --sweep [--n 6]   the above plus Tier B. SPENDS REAL MONEY.');
+  console.log('  --report [--run <runId>]');
+  console.log('                    score bench/size/results.jsonl cold. No infra, no budget.');
+  console.log('                    REFUSES to pool two runs; there is deliberately no --all.\n');
   console.log('  --tiers s1,s2     restrict the ladder (diagnosis only)');
   console.log('  --force-budget    proceed past the $60 projection rule');
   console.log('  --keep-alive      leave Aperture running after the run');
@@ -1782,6 +2199,7 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.makeFixtures) return makeFixtures();
   if (opts.dry) return dryRun();
+  if (opts.report) return reportStore(opts);
   if (!opts.selftest && !opts.sweep) return usage();
 
   console.log('# Page-size sweep — where does observing by DIFF stop paying?\n');
@@ -1952,7 +2370,7 @@ async function tierB({ proxy, collector, tiers, opts, identity, tierA }) {
     }
   }
 
-  return reportTierB({ rows, tiers, tierA, opts, identity });
+  return reportTierB({ rows, tierA, opts, identity });
 }
 
 function logLine(tier, arm, i, r) {
@@ -1965,41 +2383,19 @@ function logLine(tier, arm, i, r) {
   );
 }
 
-function reportTierB({ rows, tiers, tierA, opts, identity }) {
+function reportTierB({ rows, tierA = null, opts, identity }) {
   console.log('\n' + '='.repeat(78));
   console.log('TIER B RESULT');
   console.log('='.repeat(78));
 
-  const perTier = [];
+  // WO-B3.1: the aggregation is `perTierFrom(rows)` and nothing else, so the
+  // live path and the cold `--report` path compute the same table from the same
+  // code. A report that could disagree with the run it came from would be its
+  // own quiet lie.
+  const perTier = perTierFrom(rows);
   console.log('\n  tier   n(D/R)   $/ep D    $/ep R     Δ$        90% CI              success D/R   turns D/R');
   console.log('  ' + '-'.repeat(94));
-  for (const tier of tiers) {
-    const d = rows.filter((r) => r.tier === tier.id && r.arm === 'diff');
-    const u = rows.filter((r) => r.tier === tier.id && r.arm === 'redump');
-    if (!d.length || !u.length) continue;
-    const sd = d.filter((r) => r.success).length / d.length;
-    const su = u.filter((r) => r.success).length / u.length;
-    // Validity guard: a failing arm's episodes are not the same work, so their
-    // dollars are not comparable. Excluded from the band, not silently averaged.
-    const confounded = Math.abs(sd - su) > 0.1;
-    const ci = meanDiffCI(d.map((r) => r.costUsd), u.map((r) => r.costUsd), { alpha: 0.1, seed: 20260801 });
-    perTier.push({
-      tier: tier.id,
-      chars: tier.measuredChars,
-      nDiff: d.length,
-      nRedump: u.length,
-      costDiff: mean(d.map((r) => r.costUsd)),
-      costRedump: mean(u.map((r) => r.costUsd)),
-      turnsDiff: mean(d.map((r) => r.sdkTurns)),
-      turnsRedump: mean(u.map((r) => r.sdkTurns)),
-      volDiff: mean(d.map((r) => r.voluntaryObs)),
-      volRedump: mean(u.map((r) => r.voluntaryObs)),
-      successDiff: sd,
-      successRedump: su,
-      ci,
-      confounded,
-    });
-    const t = perTier[perTier.length - 1];
+  for (const t of perTier) {
     console.log(
       `  ${t.tier.padEnd(5)} ${String(t.nDiff)}/${String(t.nRedump).padEnd(5)} ` +
         `$${t.costDiff.toFixed(4)}  $${t.costRedump.toFixed(4)}  ${t.ci.delta >= 0 ? '+' : ''}$${t.ci.delta.toFixed(4)}  ` +
@@ -2022,17 +2418,45 @@ function reportTierB({ rows, tiers, tierA, opts, identity }) {
   console.log(`\n  ${band.text}`);
 
   // ---- the fitted cost model ---------------------------------------------
-  const fit = fitCostModel(rows.filter((r) => r.costUsd > 0));
+  const scorable = rows.filter((r) => r.costUsd > 0);
+  const recovered = prefixCharsFrom(scorable);
+  const fit = fitCostModel(scorable, recovered ?? PREFIX_CHARS);
+  const desc = fitCostModelDescriptive(scorable);
   console.log('\n  Cost model — fitted, never assumed (SDK prompt caching prices a re-sent prefix at a');
   console.log('  blend that cannot be computed a priori, so an a-priori per-turn price would be fiction).');
+  if (recovered === null) {
+    console.log(`    NOTE: the per-episode prefix could not be recovered from these rows; the fit uses`);
+    console.log(`    the live PREFIX_CHARS (${PREFIX_CHARS}). perTurn and the fitted prefix below are only`);
+    console.log('    meaningful if that is the surface these episodes ran under.');
+  }
   if (!fit.ok) {
     console.log(`    NOT FITTED: ${fit.reason}. Raw dollars above stand on their own.`);
+  } else if (fit.r2 >= 0.9 && !identified(fit)) {
+    // WO-B2. The R² gate is necessary and not sufficient, and this is the branch
+    // that says so out loud instead of leaving it to an adjudicator.
+    console.log(
+      `    R² = ${fit.r2.toFixed(3)} but the fit is NOT IDENTIFIED — the per-turn coefficient is\n` +
+        `    ${fit.perTurn.toExponential(3)} (a negative or zero "price"), i.e. turns encode the arm rather\n` +
+        '    than a cost. The two-term model is not citable (sweep-evaluation §1.3).',
+    );
+    if (desc.ok) {
+      console.log(
+        `    Descriptive only: cost ≈ ${desc.slope.toExponential(3)} $/char on conversation-input chars,\n` +
+          `    R² = ${desc.r2.toFixed(3)} — cite this or nothing; never "the prefix costs X".`,
+      );
+    }
+    console.log(`    (fitted prefix P = ${Math.round(fit.prefixFitted)} chars vs measured ${fit.prefixMeasured} chars)`);
   } else if (fit.r2 >= 0.9) {
     console.log(
       `    cost ≈ ${fit.perHistoryChar.toExponential(3)}·Σ(P + H_t) + ${fit.intercept.toFixed(4)}   ` +
         `R² = ${fit.r2.toFixed(3)} over n=${fit.n}`,
     );
     console.log(`    fitted prefix P = ${Math.round(fit.prefixFitted)} chars vs measured ${fit.prefixMeasured} chars`);
+    if (desc.ok) {
+      console.log(
+        `    Descriptive companion: cost ≈ ${desc.slope.toExponential(3)} $/char on conversation-input chars, R² = ${desc.r2.toFixed(3)}`,
+      );
+    }
   } else {
     console.log(`    R² = ${fit.r2.toFixed(3)} < 0.90 — THE MODEL FAILED. Raw dollars only; the model is not cited.`);
   }
@@ -2041,6 +2465,26 @@ function reportTierB({ rows, tiers, tierA, opts, identity }) {
   console.log('\n  Voluntary observations per episode (the behavioural input the reframing turns on):');
   for (const t of perTier) {
     console.log(`    ${t.tier}  diff ${t.volDiff.toFixed(2)} · re-dump ${t.volRedump.toFixed(2)}   (turns ${t.turnsDiff.toFixed(1)} vs ${t.turnsRedump.toFixed(1)})`);
+  }
+
+  /**
+   * WO-B1's payoff, printed per tier: the input-vs-generation split wave 3 asked
+   * for and three cohorts ran without. Descriptive only — no verdict rides on
+   * it — but it is what turns "the turn coefficient soaked up something" into a
+   * number somebody can look at.
+   */
+  const hasUsage = perTier.some((t) => [...t.rowsDiff, ...t.rowsRedump].some((r) => (r.modelKeys?.length ?? 0) > 0));
+  if (hasUsage) {
+    console.log('\n  Tokens per episode (WO-B1 — the decomposition wave 3 could not do):');
+    const line = (rs) => {
+      const m = (k) => Math.round(mean(rs.map((r) => r[k] ?? 0)));
+      return `in ${m('inputTokens')} out ${m('outputTokens')} cacheRead ${m('cacheRead')} cacheCreation ${m('cacheCreation')}`;
+    };
+    for (const t of perTier) {
+      console.log(`    ${t.tier}  D: ${line(t.rowsDiff)} · R: ${line(t.rowsRedump)}`);
+    }
+  } else {
+    console.log('\n  Tokens per episode: NOT RECORDED in these rows (episodes predate harness-debt.md WO-B1).');
   }
 
   // ---- what this licenses (sweep-evaluation.md §2B) -----------------------
@@ -2073,8 +2517,13 @@ function reportTierB({ rows, tiers, tierA, opts, identity }) {
   console.log(`     in summary — ${band.text.replace(/\n/g, ' ')}"`);
   console.log('    It says nothing about other tasks, other models, real websites, the truncation');
   console.log('    regime, or page sizes beyond the measured ladder.');
-  console.log(`\n  ${rows.length} episode(s) written to ${rel(RESULTS)} (codeVersion ${identity.codeVersion})`);
-  console.log(`  Tier A mechanism curve: ${tierA.rows.map((r) => `${r.tier} ${r.obsRatio.toFixed(2)}x`).join(' · ')}`);
+  console.log(`\n  ${rows.length} episode(s) in ${rel(RESULTS)} (codeVersion ${identity.codeVersion})`);
+  // Tier A is a LIVE artifact — the scripted mechanism curve is measured by the
+  // run, not stored per episode — so a cold report simply has not got it and
+  // says so by omission rather than inventing one.
+  if (tierA) {
+    console.log(`  Tier A mechanism curve: ${tierA.rows.map((r) => `${r.tier} ${r.obsRatio.toFixed(2)}x`).join(' · ')}`);
+  }
   return EXIT.OK;
 }
 

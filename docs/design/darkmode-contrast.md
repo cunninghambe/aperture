@@ -403,7 +403,7 @@ rows above is measuring something else — stop and find out what.
 
 ### 6.3 Fixtures
 
-Commit the three files under `bench/fixtures/darkmode/`. They are the
+Commit the three files under `bench/darkmode-fixtures/`. They are the
 measurement instrument; do not restyle them. Sources (verbatim, including the
 patch tables — the `__patches()` helper returns per-patch probe/background
 sample points):

@@ -164,9 +164,14 @@ arm per size class, plus a decomposition the harness must record to make the
 report non-misleading — per-call upstream latency (`upstreamMs`, measured at
 the proxy around the upstream call) so browser time and model+API time are
 separated. Wall-clock feeds no verdict, and the report must say in one
-sentence why: "at these episode lengths, wall-clock differences are
-dominated by API queueing noise; the attributable component is the token and
-turn deltas reported above."
+sentence why — **amended 2026-08-06 (harness-debt.md WO-A1.6)**, because the
+original wording ("at these episode lengths, wall-clock differences are
+dominated by API queueing noise") attributed to queueing a gap the report's
+own table shows is browser-side and measured, 42.4s vs 1.1s on home: "the
+browser-time medians above are measured per-call upstream latency
+(`upstreamMs`) and are attributable; only the remainder of wall-clock is API
+queueing noise. Where the medians diverge (e.g. ~40s vs ~1s browser-side on
+home), the gap is real felt latency, reported and never verdicted."
 
 ---
 

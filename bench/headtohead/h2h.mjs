@@ -25,6 +25,10 @@
  *   npm run bench:h2h -- --selftest    ALL preflights H0-H5 (+H2b). Live infra, $0 budget.
  *   npm run bench:h2h -- --phase 1     the $4 kill shot. SPENDS BUDGET.
  *   npm run bench:h2h -- --report      score the store, run nothing.
+ *   npm run bench:h2h -- --report --ruling docs/design/<doc>.md
+ *                                      acknowledge an INVESTIGATED SHIM-SUSPECT flag with the
+ *                                      ruling document that settled it. Nothing else is
+ *                                      acknowledgeable, ever (harness-debt.md WO-A2).
  *
  * PORTS (§8). Aperture 8817, fixtures 8899, collector 8898 — all hardcoded and
  * shared with the task suite, which is why this suite is port-gated behind it.
@@ -33,7 +37,7 @@
  */
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +89,10 @@ export const VERDICT_RULE = {
   reliability: 'success delta (aperture-diff − pw-sealed), Newcombe 95% CI, pooled over ALL tasks; non-inferiority bound −10pp',
   precision: 'wrong-element delta CI upper ≤ +0.2/run',
   economics: 'cost ratio aperture-diff/pw-sealed per size class, seeded-bootstrap 90% CI; headline requires the neutral-large CI entirely below 1.0',
-  mechanism: 'H10: MECHANISM CONFIRMED only if observation bytes explain ≥50% of the cost delta',
+  mechanism:
+    'H10: decomposition is advisory — printed pooled, minus-flagged-cells, per class and per task, ' +
+    'with the diff/redump isolation ratio; no binary mechanism verdict is printed ' +
+    '(harness-debt.md WO-A3)',
   ceiling: 'H12: both headline arms ≥98% pooled success ⇒ INCONCLUSIVE-by-ceiling; only economics survives',
   floor: 'H11: any (task,class) cell where BOTH headline arms succeed <50% is excluded from cost claims',
   contamination:
@@ -1902,16 +1909,29 @@ export function harnessFaultCheck(rows) {
       );
     }
   }
-  /**
-   * SHIM-SUSPECT, BOTH WAYS.
-   *
-   * It used to test one direction only — sealed dead where stock is alive —
-   * which encodes an assumption about which side breaks. The one that actually
-   * broke was the other one: pw-stock at 0% on every task while pw-sealed
-   * scored 17/23, and this check looked straight past it because it was only
-   * ever asked the opposite question. A detector that can only find the failure
-   * you already imagined is not a detector.
-   */
+  out.push(...shimSuspectScan(rows).map((x) => x.line));
+  return out;
+}
+
+/**
+ * SHIM-SUSPECT, BOTH WAYS.
+ *
+ * It used to test one direction only — sealed dead where stock is alive —
+ * which encodes an assumption about which side breaks. The one that actually
+ * broke was the other one: pw-stock at 0% on every task while pw-sealed
+ * scored 17/23, and this check looked straight past it because it was only
+ * ever asked the opposite question. A detector that can only find the failure
+ * you already imagined is not a detector.
+ *
+ * ONE SCAN, TWO CONSUMERS (harness-debt.md WO-A3). `harnessFaultCheck` turns it
+ * into refusal lines; H10 turns it into the set of cells whose contribution to
+ * the pooled decomposition must be shown separately. Those two must never be
+ * able to disagree about which cells are flagged — a report that names a cell in
+ * its refusal and silently keeps it inside its headline share is the shape of
+ * the defect this whole work order exists to remove.
+ */
+function shimSuspectScan(rows) {
+  const out = [];
   for (const task of ALL_TASKS) {
     const s = rows.filter((r) => r.task === task.id && r.arm === 'pw-sealed');
     const k = rows.filter((r) => r.task === task.id && r.arm === 'pw-stock');
@@ -1919,21 +1939,79 @@ export function harnessFaultCheck(rows) {
     const sr = s.filter((r) => r.success).length / s.length;
     const kr = k.filter((r) => r.success).length / k.length;
     if (sr === 0 && kr >= 0.8) {
-      out.push(
-        `SHIM-SUSPECT — ${task.id}: pw-sealed 0% while pw-stock ${(100 * kr).toFixed(0)}%. ` +
+      out.push({
+        id: task.id,
+        line:
+          `SHIM-SUSPECT — ${task.id}: pw-sealed 0% while pw-stock ${(100 * kr).toFixed(0)}%. ` +
           'Investigate before any verdict is printed.',
-      );
+      });
     }
     if (kr === 0 && sr >= 0.8) {
-      out.push(
-        `SHIM-SUSPECT — ${task.id}: pw-stock 0% while pw-sealed ${(100 * sr).toFixed(0)}%. ` +
+      out.push({
+        id: task.id,
+        line:
+          `SHIM-SUSPECT — ${task.id}: pw-stock 0% while pw-sealed ${(100 * sr).toFixed(0)}%. ` +
           'The two pw arms drive the SAME Playwright build; a total wipeout on one of them is a ' +
           'statement about the surface this harness built, not about the engine. ' +
           'Investigate before any verdict is printed.',
-      );
+      });
     }
   }
   return out;
+}
+
+/** The task ids the SHIM-SUSPECT detector flagged. Its ONLY definition. */
+export function shimSuspectTasks(rows) {
+  return [...new Set(shimSuspectScan(rows).map((x) => x.id))];
+}
+
+/**
+ * Does a ruling document acknowledge this problem set? (harness-debt.md WO-A2,
+ * the path h2h-evaluation §8.2 specified.)
+ *
+ * THE PROBLEM THIS SOLVES. Four scored stores, four correct nonzero exits, four
+ * hand adjudications — and not one of them could ever be fed back in band, so
+ * the suites' designed capability of printing their own verdict of record was
+ * never exercised once, and every verdict in RESULTS.md is a hand-transcribed
+ * recomputation. Hand transcription is where wrong published claims breed; the
+ * adjudications caught the coordinators' readings wrong six times in one brief.
+ * SHIM-SUSPECT is the one guard whose designed resolution is a HUMAN RULING
+ * rather than a code fix, and it re-fires deterministically (catalog-order
+ * tripped it in both scored cohorts and was ruled the same fair product
+ * difference twice), so without this every future cohort is hand-scored forever
+ * by construction.
+ *
+ * THE TEETH, WHICH ARE THE WHOLE POINT. A ruling can acknowledge ONLY a problem
+ * set that is entirely SHIM-SUSPECT. H7/H8/H9/contamination problems mean the
+ * APPARATUS, not the competitor, and no document waives an apparatus fault. The
+ * check is `startsWith`, not `includes`, so an H9 line that merely mentions the
+ * SHIM-SUSPECT scan cannot smuggle itself through — and both of those cases are
+ * pinned red in `dryRun`, permanently.
+ *
+ * Integrity outranks acknowledgement, deliberately: `main()` refuses a severed
+ * store before this function is ever reached.
+ */
+export function rulingAcknowledges({ problems, rulingPath, root }) {
+  const shim = problems.filter((p) => p.startsWith('SHIM-SUSPECT'));
+  const other = problems.filter((p) => !p.startsWith('SHIM-SUSPECT'));
+  if (!problems.length) return { ack: false, reason: 'nothing to acknowledge' };
+  if (other.length) {
+    return {
+      ack: false,
+      reason: `non-SHIM problems present (${other.length}) — a ruling cannot acknowledge ${other[0].split(' — ')[0]}`,
+    };
+  }
+  if (!rulingPath) return { ack: false, reason: 'no --ruling given' };
+  const abs = resolve(root, rulingPath);
+  if (!existsSync(abs)) return { ack: false, reason: `ruling document not found: ${rulingPath}` };
+  // Not in WO-A2's literal helper body, and found by the sabotage row that asked
+  // what `--ruling docs/design` does: `existsSync` says yes for a directory and
+  // `readFileSync` then throws EISDIR, so the runner would CRASH out at exit 3
+  // instead of refusing. A guard whose failure mode is a stack trace is a guard
+  // whose refusal nobody can read.
+  if (!statSync(abs).isFile()) return { ack: false, reason: `not a file: ${rulingPath}` };
+  const title = readFileSync(abs, 'utf8').split('\n')[0].trim();
+  return { ack: true, shim, title, rel: rulingPath };
 }
 
 /**
@@ -2005,8 +2083,17 @@ export function modelIdentityCheck(rows) {
  *
  * Splits the per-episode token delta into the named terms and computes what
  * share of the cost delta OBSERVATION BYTES — the claimed mechanism — explain.
- * `MECHANISM CONFIRMED` prints only at ≥50%. Below that the verdict still
- * stands but the report must lead with the actual explanation.
+ *
+ * IT NO LONGER PRINTS A BINARY, AND THAT IS THE HEADLINE REPAIR (harness-debt.md
+ * WO-A3). The `MECHANISM CONFIRMED` / `NOT CONFIRMED` pair printed a WRONG
+ * verdict in BOTH scored cohorts, in OPPOSITE directions, off the SAME single
+ * cell: 46.7% / 80.6% with catalog-order in, 62.7% / 33.3% with it out. Two
+ * adjudications each spent a section un-saying it. The share is task-mix
+ * arithmetic — a weighted average over whatever tasks happened to be in the
+ * pool — and a threshold on task-mix arithmetic is not a mechanism test. The
+ * numbers stay, the decomposition stays, the per-task table stays; the WORD
+ * goes, and the minus-flagged-cells share that pre-empts both wrong verdicts
+ * arithmetically is printed beside it.
  *
  * Printed per task as well as pooled, because wave 1's lesson is baked in as a
  * rule: pooling hid a sign change once already, and a number right about the
@@ -2030,12 +2117,21 @@ export function decompose(rows, a, b, surfaceOverheadChars = {}) {
   // Every term in TOKENS, at this repo's 4-chars-per-token rule, so the shares
   // are commensurable. The turn term is turns x mean per-turn context, which is
   // how extra round-trips turn into money under prompt caching.
+  //
+  // PRICED AT THE ARM THAT SPENT THE TURNS (harness-debt.md WO-A3.2). It used to
+  // price every excess turn at arm A's mean context, whichever arm actually took
+  // them — so pw's failure-loop turns, which are long because the loop re-reads a
+  // large page, were billed at Aperture's small diff context and undercounted
+  // (h2h-evaluation §3.2). Excess turns cost what they cost in the arm that
+  // spent them: B's context when B took more, A's when A did. The mirror case is
+  // pinned in `dryRun` precisely so nobody "simplifies" this back to one side.
   const meanCtxPerTurnA = m(A, (r) => (r.turns ? (r.inputTokens + r.cacheRead) / r.turns : 0));
+  const meanCtxPerTurnB = m(B, (r) => (r.turns ? (r.inputTokens + r.cacheRead) / r.turns : 0));
   const terms = {
     observationBytes: obsDelta / 4,
     codegenSection: codegenDelta / 4,
     toolSurface: (surfaceDelta / 4) * m(B, (r) => r.turns),
-    turnCount: turnsDelta * meanCtxPerTurnA,
+    turnCount: turnsDelta * (turnsDelta >= 0 ? meanCtxPerTurnB : meanCtxPerTurnA),
     outputTokens: outDelta,
   };
   const total = Object.values(terms).reduce((s, v) => s + Math.abs(v), 0);
@@ -2144,6 +2240,18 @@ async function runScoredPhase(ctx, phase, storePath, identity, stored, toolsHash
     maxMcpOutputTokens: identity.maxMcpOutputTokens,
     launchFlags: identity.launchFlags,
     pwBrowserOverride: opts.pwBrowser ?? null,
+    // §0.3 OF THE TRIAGE, AND THE REASON H10 RAN HALF-BLIND TWICE. `report()`'s
+    // cold path reads this from the sidecar — the comment at the call site says
+    // exactly that — and nothing ever wrote it. So every cold `--report` and
+    // every `--phase 4`, INCLUDING both printed verdicts of record, ran H10 with
+    // the `toolSurface` term silently 0. A metric that cannot see a field looks
+    // exactly like a metric that measured zero. Materially small on this cohort
+    // (H4 pins the sealed surfaces byte-identical, so the aperture-diff −
+    // pw-sealed surface delta is ~0 by construction; pw-stock is where it is
+    // nonzero), but small is not the point. Archived sidecars stay as they are:
+    // their adjudications reproduced the printed numbers exactly, so nothing
+    // published moves, and the fact is recorded rather than retro-repaired.
+    surfaceOverheadChars: ctx.surfaceOverheadChars ?? {},
   });
 
   const all = [...stored, ...fresh];
@@ -2179,7 +2287,7 @@ async function runScoredPhase(ctx, phase, storePath, identity, stored, toolsHash
 // The report (§7)
 // ---------------------------------------------------------------------------
 
-export function report(rows, surfaceOverheadChars = {}) {
+export function report(rows, surfaceOverheadChars = {}, cohort = null, opts = {}) {
   const problems = [];
   // All THREE harness classes are excluded, not just `tool_fault`: an episode
   // whose agent never reached the tool surface — or whose observations the SDK
@@ -2197,6 +2305,43 @@ export function report(rows, surfaceOverheadChars = {}) {
       (contaminated.length ? ` — ${contaminated.length} apparatus_contaminated` : ''),
   );
   console.log(`total spend $${rows.reduce((a, r) => a + (r.costUsd ?? 0), 0).toFixed(2)}\n`);
+
+  /**
+   * --- MANDATORY DISCLOSURES (h2h obligations 4, 8, 10) ---
+   *
+   * These travel with every quotation because the instrument prints them, not
+   * because a human remembered to. The demonstrated victim is the first one:
+   * the cohort identity records a chromium build that NEVER RAN — every pw
+   * episode of both scored cohorts ran under `--pw-browser chrome` — while the
+   * report stayed silent about it, so anyone quoting the identity was quoting an
+   * actively false record (h2h-evaluation §0.5). The warm-state disclosure
+   * pinned by tier5-ruling §7 was travelling "by hand" for the same reason
+   * (h2h-post-tier5 §4.2). A disclosure that depends on the reader having read
+   * the adjudication is not a disclosure.
+   */
+  console.log('PROVENANCE (mandatory — travels with every quotation)');
+  const rev = cohort?.chromium?.revision ?? rows[0]?.chromiumRevision ?? '(unrecorded)';
+  if (cohort && cohort.pwBrowserOverride) {
+    console.log(
+      `  pw browser: '--pw-browser ${cohort.pwBrowserOverride}' override — every pw episode ran the`,
+    );
+    console.log(
+      `  override browser; the identity's chromiumRevision (${rev}) records the PINNED build,`,
+    );
+    console.log('  which did not run. (h2h-evaluation §0.5)');
+  } else if (cohort && cohort.pwBrowserOverride === null) {
+    console.log(`  pw browser: pinned chromium ${rev} (no override)`);
+  } else {
+    console.log('  pw browser: NOT RECORDED in this cohort sidecar — treat the identity\'s');
+    console.log('  chromiumRevision as unverified.');
+  }
+  console.log(
+    '  tab policy: shared-tab-per-run — Aperture\'s engine carries warm ref state across a\n' +
+      '  run\'s episodes; the pw arms have no warm state to reuse. The asymmetry is real,\n' +
+      '  favors neither side uniformly, and is in the numbers rather than hidden from them\n' +
+      '  (it is what prices the warm-revisit expand against Aperture).',
+  );
+  console.log('');
 
   // --- C2/C4: the contamination roll, named episode by episode ---
   if (contaminated.length) {
@@ -2325,6 +2470,14 @@ export function report(rows, surfaceOverheadChars = {}) {
   console.log('\nPRECISION (primary) — wrong-element delta per run, bootstrap 95%');
   console.log(`  delta ${wCI.delta >= 0 ? '+' : ''}${wCI.delta.toFixed(3)}  CI [${wCI.lo.toFixed(3)}, ${wCI.hi.toFixed(3)}]  bound +0.2`);
   console.log(`  ${wCI.hi <= 0.2 ? 'BOUND HOLDS' : 'BOUND FAILS — §7.3\'s precision sentence is owed, with the attribution split'}`);
+  // Obligation 9's vocabulary note. Printed here rather than left to the reader
+  // because a zero in a column nobody can reach reads as a measurement.
+  console.log(
+    '  note: identity_mismatch cannot fire on identical-label rows (the detector compares\n' +
+      '  labels); on such fixtures wrong_choice bundles the rebind hazard and a zero\n' +
+      '  identity_mismatch count is evidence of nothing, in either direction.\n' +
+      '  (h2h-evaluation §0.6)',
+  );
 
   // --- §7.1 economics, per class, never pooled ---
   console.log('\nECONOMICS (primary) — cost ratio aperture-diff / pw-sealed, seeded bootstrap 90%');
@@ -2352,24 +2505,86 @@ export function report(rows, surfaceOverheadChars = {}) {
     console.log('  reliability comparison is INCONCLUSIVE-by-ceiling and only the economics claims survive.');
   }
 
-  // --- H10 decomposition, pooled and per task ---
-  console.log('\nH10 — WIN-REASON DECOMPOSITION (mandatory)');
+  // --- H10 decomposition, pooled and per task. ADVISORY — no binary. ---
+  console.log('\nH10 — WIN-REASON DECOMPOSITION (mandatory, advisory — no binary verdict)');
+  if (!surfaceOverheadChars || !Object.keys(surfaceOverheadChars).length) {
+    console.log('  toolSurface term: NOT AVAILABLE — this cohort\'s sidecar carries no');
+    console.log('  surfaceOverheadChars, so the term below is structurally 0 rather than measured');
+    console.log('  zero. Cohorts created before harness-debt.md WO-A3 are all in this state.');
+  }
   const pooled = decompose(costable, 'aperture-diff', 'pw-sealed', surfaceOverheadChars);
   if (pooled) {
     for (const [k, v] of Object.entries(pooled.terms)) {
       console.log(`  ${k.padEnd(20)} ${v >= 0 ? '+' : ''}${Math.round(v)} tokens/ep`);
     }
     console.log(`  observation-byte share of the delta: ${fmtPct(pooled.share)}`);
-    if (pooled.share >= 0.5) console.log('  MECHANISM CONFIRMED');
-    else {
-      console.log('  MECHANISM NOT CONFIRMED — the verdict stands, but the report MUST lead with the');
-      console.log('  actual explanation, not with the diff mechanism.');
+
+    /**
+     * THE LINE THAT PRE-EMPTS BOTH WRONG VERDICTS, ARITHMETICALLY.
+     *
+     * Flagged = every cell the report has already said something is wrong with:
+     * tasks named by the SHIM-SUSPECT detector, plus H11's <50% exclusions, plus
+     * the contaminated cells. Both scored cohorts' pooled shares crossed the old
+     * 50% bar in opposite directions off ONE such cell.
+     */
+    const flagged = [...new Set([
+      ...shimSuspectTasks(rows),
+      ...excludedCells,
+      ...contaminatedCells.keys(),
+    ])];
+    if (flagged.length) {
+      const minus = decompose(
+        costable.filter((r) => !flagged.includes(r.task)),
+        'aperture-diff', 'pw-sealed', surfaceOverheadChars,
+      );
+      console.log(
+        `  minus flagged cells (${flagged.join(', ')}): share ` +
+          (minus ? fmtPct(minus.share) : 'n/a — no cells left'),
+      );
+    } else {
+      console.log('  minus flagged cells (none): share ' + fmtPct(pooled.share) + ' — nothing is flagged');
     }
+
+    console.log('  per class (a share right about the pool and wrong about every class is not a finding):');
+    for (const cls of CLASSES) {
+      const d = decompose(costable.filter((r) => r.class === cls), 'aperture-diff', 'pw-sealed', surfaceOverheadChars);
+      if (d) console.log(`    ${cls.padEnd(18)} obs share ${fmtPct(d.share).padStart(6)}  Δ$ ${d.costDelta.toFixed(4)}  n=${d.nA}/${d.nB}`);
+    }
+
     console.log('  per task (pooling hid a sign change once already):');
     for (const t of ALL_TASKS) {
       const d = decompose(costable.filter((r) => r.task === t.id), 'aperture-diff', 'pw-sealed', surfaceOverheadChars);
-      if (d) console.log(`    ${t.id.padEnd(18)} obs share ${fmtPct(d.share).padStart(6)}  Δ$ ${d.costDelta.toFixed(4)}`);
+      if (d) {
+        console.log(
+          `    ${t.id.padEnd(18)} obs share ${fmtPct(d.share).padStart(6)}  Δ$ ${d.costDelta.toFixed(4)}` +
+            (flagged.includes(t.id) ? '  [FLAGGED]' : ''),
+        );
+      }
     }
+
+    /**
+     * THE CLEAN ISOLATION, which is what a mechanism question actually wants.
+     *
+     * aperture-diff vs aperture-redump is the same engine, the same dialect and
+     * the same tool surface, differing in ONE thing: whether the observation
+     * channel sends a diff or a re-dump. No cross-product confound can reach it.
+     * It is a ratio and not a share, so no threshold pretends to be a verdict.
+     */
+    const isoX = costable.filter((r) => r.arm === 'aperture-diff' && r.class === 'neutral-large').map((r) => r.costUsd);
+    const isoY = costable.filter((r) => r.arm === 'aperture-redump' && r.class === 'neutral-large').map((r) => r.costUsd);
+    if (isoX.length && isoY.length) {
+      const iso = meanRatioCI(isoX, isoY);
+      console.log(
+        '  clean observation-channel isolation (diff/redump, same engine, same dialect): ' +
+          `${iso.ratio.toFixed(3)}x on neutral-large  CI [${iso.lo.toFixed(3)}, ${iso.hi.toFixed(3)}]  n=${isoX.length}/${isoY.length}`,
+      );
+    }
+
+    console.log(
+      '  The pooled share is task-mix arithmetic — across the two scored cohorts it crossed\n' +
+        '  its own 50% bar in opposite directions off the same single cell. No binary mechanism\n' +
+        '  verdict is licensed by it; read the minus-flagged share and the diff/redump isolation.',
+    );
   }
 
   // --- §3.5's three-way decomposition ---
@@ -2418,12 +2633,44 @@ export function report(rows, surfaceOverheadChars = {}) {
       );
     }
   }
-  console.log('  At these episode lengths, wall-clock differences are dominated by API queueing');
-  console.log('  noise; the attributable component is the token and turn deltas reported above.');
+  // The old footer said the whole gap was "API queueing noise" above a table
+  // that shows 42.4s vs 1.1s BROWSER-side on home. upstreamMs is measured at the
+  // proxy around the upstream call; it is attributable by construction, and
+  // calling it noise was the report contradicting its own numbers.
+  console.log(
+    '  The browser-time medians above are measured per-call upstream latency (upstreamMs)\n' +
+      '  and are attributable; only the remainder of wall-clock is API queueing noise. Where\n' +
+      '  the medians diverge (e.g. ~40s vs ~1s browser-side on home), the gap is real felt\n' +
+      '  latency, reported and never verdicted.',
+  );
 
   problems.push(...armPurityProblems(rows), ...harnessFaultCheck(rows), ...modelIdentityCheck(rows));
   for (const p of problems) console.log(`\n  ${p}`);
-  return problems.length ? EXIT.HARNESS_FAULT : EXIT.MEASURED;
+
+  /**
+   * --- THE RULING ACKNOWLEDGEMENT (WO-A2) ---
+   *
+   * The flags STAND. Nothing is waived, nothing is suppressed, the problem lines
+   * print exactly as they always did — what changes is that a SHIM-SUSPECT trip
+   * with a ruling document behind it can now be closed IN BAND, inside the
+   * cohort's lifetime, before the tree moves. Any non-SHIM problem in the set
+   * makes the whole set unacknowledgeable; see `rulingAcknowledges`.
+   */
+  if (!problems.length) return EXIT.MEASURED;
+  const r = rulingAcknowledges({ problems, rulingPath: opts.ruling, root: opts.root ?? ROOT });
+  if (r.ack) {
+    console.log('\nACKNOWLEDGED — the flag(s) above stand, and are RULED, not waived:');
+    for (const line of r.shim) console.log(`  ${line}`);
+    console.log(`  ruling: ${r.rel} — "${r.title}"`);
+    console.log(
+      '  The ruling is the verdict of record for the flagged cell(s); this report\'s numbers\n' +
+        '  are printed under it. (Built per harness-debt.md WO-A2; the path h2h-evaluation\n' +
+        '  §8.2 specified.)',
+    );
+    return EXIT.MEASURED;
+  }
+  if (opts.ruling) console.log(`\n  --ruling did NOT acknowledge: ${r.reason}`);
+  return EXIT.HARNESS_FAULT;
 }
 
 // ---------------------------------------------------------------------------
@@ -2437,6 +2684,7 @@ function parseArgs(argv) {
     newCohort: false, store: null, verbose: false,
     pwObservation: 'inline', pwObservationExplicit: false,
     pwBrowser: null, forceBudget: false, keepAlive: false,
+    ruling: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2460,6 +2708,7 @@ function parseArgs(argv) {
       out.pwObservationExplicit = true;
     }
     else if (a === '--pw-browser') out.pwBrowser = argv[++i];
+    else if (a === '--ruling') out.ruling = argv[++i];
     else throw new Error(`unknown flag: ${a}`);
   }
   for (const arm of out.arms) if (!ARMS.includes(arm)) throw new Error(`unknown arm: ${arm}`);
@@ -2519,11 +2768,242 @@ function dryRun(opts) {
   console.log(`  §3.4 withheld   ${Object.keys(PW_STOCK_WITHHELD).join(', ')}`);
   console.log(`  §3.4 kept       ${PW_STOCK_KEPT.join(', ')}`);
   console.log('');
+
+  const problems = [];
+
+  // -------------------------------------------------------------------------
+  // WO-A2 — THE RULING ACKNOWLEDGEMENT, AND THE ROWS THAT MUST STAY RED FOREVER
+  //
+  // `--ruling` is the only thing in this file that can turn a nonzero exit into
+  // exit 0, so its cases are not "does the happy path work" — they are "can
+  // this become a waiver". Rows 3 and 6 are the sabotage rows: if either ever
+  // reports `ack: true`, the flag has stopped being an acknowledgement of one
+  // adjudicated competitor finding and become a general override, which is the
+  // exact thing `store.mjs` says there is deliberately no flag for.
+  // -------------------------------------------------------------------------
+  console.log('  WO-A2 — ruling acknowledgement (SHIM-SUSPECT only; H7/H8/H9/contamination never)');
+  const rulingDoc = 'docs/design/h2h-post-tier5-evaluation.md';
+  const shimLine = 'SHIM-SUSPECT — catalog-order: pw-sealed 0% while pw-stock 80%. Investigate before any verdict is printed.';
+  const ackCases = [
+    ['SHIM only + existing ruling doc', [shimLine], rulingDoc, true],
+    ['SHIM only + missing ruling doc', [shimLine], 'docs/design/no-such-ruling.md', false],
+    ['SABOTAGE: SHIM + H9 + existing doc', [shimLine, 'H9 — pw-stock: 6/10 episodes (60%) faulted in the shim.'], rulingDoc, false],
+    ['no problems at all + existing doc', [], rulingDoc, false],
+    ['SHIM only, no --ruling given', [shimLine], null, false],
+    [
+      'SABOTAGE: an H9 line that MENTIONS SHIM-SUSPECT',
+      ['H9 — pw-stock: 6/10 faulted; compare the SHIM-SUSPECT scan above.'],
+      rulingDoc,
+      false,
+    ],
+    ['SABOTAGE: --ruling points at a directory', [shimLine], 'docs/design', false],
+  ];
+  for (const [name, probs, path, want] of ackCases) {
+    const r = rulingAcknowledges({ problems: probs, rulingPath: path, root: ROOT });
+    console.log(`    ${name.padEnd(42)} -> ack ${String(r.ack).padEnd(5)} ${r.ack ? `"${r.title.slice(0, 40)}"` : `(${r.reason})`}`);
+    if (r.ack !== want) problems.push(`rulingAcknowledges(${name}) returned ack=${r.ack}, expected ${want}`);
+  }
+
+  // -------------------------------------------------------------------------
+  // WO-A3 — H10's two arithmetic repairs
+  // -------------------------------------------------------------------------
+  console.log('\n  WO-A3 — H10 decomposition: per-arm turn pricing and the flagged-cell split');
+  {
+    // Arm B spends 2x arm A's context per turn and takes one more turn. The
+    // excess turns are B's, so they cost B's context — pricing them at A's was
+    // h2h-evaluation §3.2's finding, and it undercounted pw's failure loops by
+    // exactly this factor.
+    const ep = (arm, turns, ctx, extra = {}) => ({
+      arm, turns, inputTokens: turns * ctx, cacheRead: 0, outputTokens: 0,
+      obsChars: 0, costUsd: 0, sectionChars: {}, class: 'neutral-large', ...extra,
+    });
+    const rows2 = [ep('A', 4, 1000), ep('A', 4, 1000), ep('B', 5, 2000), ep('B', 5, 2000)];
+    const d = decompose(rows2, 'A', 'B');
+    console.log(`    turnsDelta +1, ctx/turn A=1000 B=2000: turnCount term ${d.terms.turnCount} (expect 2000, B-priced)`);
+    if (d.terms.turnCount !== 2000) problems.push(`H10 turn term priced at ${d.terms.turnCount}, expected B's 2000`);
+
+    // The MIRROR, and the second sabotage row for this guard: when B takes
+    // FEWER turns the saved turns are A's, so they are priced at A. Always-B
+    // would be as wrong as always-A, in the other direction.
+    const rows3 = [ep('A', 5, 1000), ep('A', 5, 1000), ep('B', 4, 2000), ep('B', 4, 2000)];
+    const d3 = decompose(rows3, 'A', 'B');
+    console.log(`    turnsDelta −1, same contexts:            turnCount term ${d3.terms.turnCount} (expect −1000, A-priced)`);
+    if (d3.terms.turnCount !== -1000) problems.push(`H10 turn term priced at ${d3.terms.turnCount}, expected A's −1000`);
+  }
+  {
+    // One SHIM-SUSPECT cell carrying the observation delta: pooled crosses the
+    // old 50% bar, minus-flagged does not. Both cohorts' printed verdicts were
+    // this shape, in opposite directions, off the same single cell.
+    const t = (task, arm, success, obsChars, outputTokens = 0) => ({
+      task, arm, success, obsChars, outputTokens, turns: 4, inputTokens: 4000,
+      cacheRead: 0, costUsd: 0.1, sectionChars: {}, class: 'neutral-large',
+    });
+    const rows2 = [];
+    const flagged = ALL_TASKS[0].id;
+    const clean = ALL_TASKS[1].id;
+    for (let i = 0; i < 5; i++) {
+      // The flagged cell: pw-sealed dead while pw-stock is alive, and carrying
+      // a 90k-char observation that swamps everything else in the pool.
+      rows2.push(t(flagged, 'aperture-diff', true, 1000), t(flagged, 'pw-sealed', false, 90000));
+      rows2.push(t(flagged, 'pw-stock', true, 1000));
+      // The clean cells: both pw arms alive, and their cost delta is OUTPUT
+      // tokens, not observation bytes. This is the whole point — the pooled
+      // share is task-mix arithmetic, and one cell decides it.
+      rows2.push(t(clean, 'aperture-diff', true, 1000), t(clean, 'pw-sealed', true, 3000, 4000));
+      rows2.push(t(clean, 'pw-stock', true, 3000, 4000));
+    }
+    const named = shimSuspectTasks(rows2);
+    const pooled = decompose(rows2, 'aperture-diff', 'pw-sealed');
+    const minus = decompose(rows2.filter((r) => !named.includes(r.task)), 'aperture-diff', 'pw-sealed');
+    console.log(`    shimSuspectTasks names: [${named.join(', ')}] (expect [${flagged}])`);
+    console.log(`    pooled obs share ${fmtPct(pooled.share)} (crosses 50%) · minus-flagged ${fmtPct(minus.share)} (does not)`);
+    if (!named.includes(flagged) || named.length !== 1) problems.push(`shimSuspectTasks returned [${named}], expected [${flagged}]`);
+    if (!(pooled.share >= 0.5)) problems.push('the synthetic pooled share should cross 0.5 — the case no longer demonstrates the defect');
+    if (!(minus.share < 0.5)) problems.push('the minus-flagged share should NOT cross 0.5 — the split is not doing its work');
+
+    // SABOTAGE: the clean cell has BOTH pw arms alive at 100%, so no ruling and
+    // no flag applies to it. The flagged set is defined by ONE detector, not by
+    // "the task appears somewhere in a problem line".
+    if (named.includes(clean)) problems.push('shimSuspectTasks named a task with no SHIM-SUSPECT trip');
+  }
+
+  // -------------------------------------------------------------------------
+  // WO-A4 — the account-prefs predicate tolerates the page's own casing
+  // -------------------------------------------------------------------------
+  console.log('\n  WO-A4 — neutral predicate tolerance');
+  {
+    const prefs = NEUTRAL_TASKS.find((x) => x.id === 'account-prefs');
+    const rowsP = [
+      ['frequency "Weekly" (what the page reports)', { notifications: true, method: 'sms', frequency: 'Weekly' }, true],
+      ['frequency "weekly"', { notifications: true, method: 'sms', frequency: 'weekly' }, true],
+      ['frequency "daily" — the task was NOT done', { notifications: true, method: 'sms', frequency: 'daily' }, false],
+      ['notifications off', { notifications: false, method: 'sms', frequency: 'Weekly' }, false],
+      ['method email', { notifications: true, method: 'email', frequency: 'Weekly' }, false],
+      ['nothing saved at all', null, false],
+    ];
+    for (const [name, state, want] of rowsP) {
+      const got = prefs.success(state) === true;
+      console.log(`    ${name.padEnd(42)} -> ${got ? 'pass' : 'fail'}`);
+      if (got !== want) problems.push(`account-prefs(${name}) returned ${got}, expected ${want}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // WO-A1 + WO-A3 — the REPORT ITSELF, driven over synthetic rows.
+  //
+  // The scored stores are severed at every post-programme tree, so `--report`
+  // refuses on integrity before it can reach a single one of these lines. That
+  // is correct and stays correct — which means this is the only place the print
+  // path is exercised at all, and it therefore has to carry the assertions that
+  // matter, not just check that nothing throws.
+  //
+  // The load-bearing one is the last: the report must not print the word
+  // CONFIRMED even when the pooled share is 85%. That word printed a wrong
+  // verdict in both scored cohorts, in opposite directions, off one cell.
+  // -------------------------------------------------------------------------
+  console.log('\n  WO-A1/A3 — the report\'s mandatory disclosures and H10\'s deleted binary');
+  {
+    const ep = (task, arm, cls, success, obsChars, outputTokens = 0) => ({
+      task, arm, class: cls, success, obsChars, outputTokens, runIndex: 0,
+      turns: 4, inputTokens: 4000, cacheRead: 0, costUsd: 0.1, sectionChars: {},
+      wrongElement: 0, durationMs: 20000, upstreamMs: 1000, steps: 4, capHits: 0,
+      declaredDone: true, driverError: null, toolFaults: 0, modelKeys: ['claude-sonnet-5'],
+      kinds: { full: 1, diff: 3, nochange: 0, other: 0 }, nonRefTargeting: 0,
+      chromiumRevision: '1232',
+    });
+    const flagged = ALL_TASKS[0].id;
+    const clean = ALL_TASKS[1].id;
+    const synth = [];
+    for (let i = 0; i < 5; i++) {
+      synth.push(ep(flagged, 'aperture-diff', 'neutral-large', true, 1000));
+      synth.push(ep(flagged, 'pw-sealed', 'neutral-large', false, 90000));
+      synth.push(ep(flagged, 'pw-stock', 'neutral-large', true, 1000));
+      synth.push(ep(clean, 'aperture-diff', 'neutral-large', true, 1000));
+      synth.push(ep(clean, 'aperture-redump', 'neutral-large', true, 4000));
+      synth.push(ep(clean, 'pw-sealed', 'neutral-large', true, 3000, 4000));
+      synth.push(ep(clean, 'pw-stock', 'neutral-large', true, 3000, 4000));
+    }
+    const capture = (cohortArg) => {
+      const lines = [];
+      const real = console.log;
+      console.log = (...a) => lines.push(a.join(' '));
+      try {
+        report(synth, {}, cohortArg, {});
+      } finally {
+        console.log = real;
+      }
+      return lines.join('\n');
+    };
+    const override = capture({ pwBrowserOverride: 'chrome', chromium: { revision: '1232' } });
+    const pinned = capture({ pwBrowserOverride: null, chromium: { revision: '1232' } });
+    const absent = capture(null);
+
+    const must = [
+      ['override branch names the flag and says it did not run', override, /--pw-browser chrome' override/, true],
+      ['override branch says the PINNED build did not run', override, /which did not run/, true],
+      ['pinned branch names the revision', pinned, /pinned chromium 1232 \(no override\)/, true],
+      ['absent sidecar is never silent', absent, /NOT RECORDED in this cohort sidecar/, true],
+      ['tab policy disclosure (tier5-ruling §7)', override, /tab policy: shared-tab-per-run/, true],
+      ['identity_mismatch vocabulary note', override, /identity_mismatch cannot fire on identical-label rows/, true],
+      ['wall-clock says upstreamMs is attributable', override, /measured per-call upstream latency/, true],
+      ['the old "queueing noise" attribution is GONE', override, /dominated by API queueing/, false],
+      ['minus-flagged-cells share is printed', override, /minus flagged cells \(/, true],
+      ['diff\\/redump isolation ratio is printed', override, /clean observation-channel isolation/, true],
+      ['no binary verdict is licensed, said out loud', override, /No binary mechanism\n?\s*verdict is licensed/, true],
+      ['SABOTAGE: the word CONFIRMED is deleted', override, /MECHANISM (NOT )?CONFIRMED/, false],
+      ['toolSurface absence is disclosed, not passed off as zero', override, /toolSurface term: NOT AVAILABLE/, true],
+    ];
+    for (const [name, text, re, want] of must) {
+      const got = re.test(text);
+      console.log(`    ${name.padEnd(56)} ${got === want ? 'ok' : 'FAIL'}`);
+      if (got !== want) problems.push(`report(): ${name} — /${re.source}/ ${got ? 'present' : 'absent'}, expected ${want ? 'present' : 'absent'}`);
+    }
+
+    /**
+     * THE FULL LOOP, END TO END, WITH NO PORTS AND NO BUDGET.
+     *
+     * Same rows with the aperture-redump arm made H8-clean, so the ONLY problem
+     * left is the SHIM-SUSPECT trip. Without `--ruling` the store reads exit 7,
+     * exactly as today; with the ruling it reads exit 0 and prints the flag AND
+     * the reference. This pair is WO-A2's acceptance test — it is what replaces
+     * the optional rebuild-at-3828b64 demonstration, and it is cheap enough to
+     * run on every edit.
+     */
+    const clean2 = synth.map((r) =>
+      r.arm === 'aperture-redump' ? { ...r, kinds: { full: 4, diff: 0, nochange: 0, other: 0 } } : r,
+    );
+    const runQuiet = (o) => {
+      const lines = [];
+      const real = console.log;
+      console.log = (...a) => lines.push(a.join(' '));
+      let code;
+      try {
+        code = report(clean2, {}, null, o);
+      } finally {
+        console.log = real;
+      }
+      return { code, text: lines.join('\n') };
+    };
+    const unruled = runQuiet({});
+    const ruled = runQuiet({ ruling: rulingDoc, root: ROOT });
+    console.log(`    SHIM-SUSPECT alone, no --ruling                          exit ${unruled.code} (expect ${EXIT.HARNESS_FAULT})`);
+    console.log(`    SHIM-SUSPECT alone, --ruling ${rulingDoc.split('/').pop().padEnd(31)} exit ${ruled.code} (expect ${EXIT.MEASURED})`);
+    if (unruled.code !== EXIT.HARNESS_FAULT) problems.push(`an unruled SHIM-SUSPECT store exited ${unruled.code}, expected ${EXIT.HARNESS_FAULT}`);
+    if (ruled.code !== EXIT.MEASURED) problems.push(`a ruled SHIM-SUSPECT store exited ${ruled.code}, expected ${EXIT.MEASURED}`);
+    if (!/ACKNOWLEDGED — the flag\(s\) above stand, and are RULED, not waived/.test(ruled.text)) {
+      problems.push('the ruled report does not print the ACKNOWLEDGED block');
+    }
+    if (!/SHIM-SUSPECT — /.test(ruled.text)) problems.push('the ruled report suppressed the flag — it must still print');
+    if (!ruled.text.includes(rulingDoc)) problems.push('the ruled report does not name the ruling document');
+  }
+
+  console.log('');
   const lint = lintAll();
   for (const n of lint.notes) console.log(n);
-  if (lint.problems.length) {
-    console.log(`\n  ${lint.problems.length} LINT PROBLEM(S):`);
-    for (const p of lint.problems) console.log(`    - ${p}`);
+  problems.push(...lint.problems);
+  if (problems.length) {
+    console.log(`\n  ${problems.length} DRY PROBLEM(S):`);
+    for (const p of problems) console.log(`    - ${p}`);
     return EXIT.SELFTEST;
   }
   console.log('\n  DRY GREEN. Nothing here proves either engine works — that is H0-H5\'s job.');
@@ -2533,6 +3013,16 @@ function dryRun(opts) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   mkdirSync(RESULTS, { recursive: true });
+
+  // `--ruling` acknowledges a SCORED STORE'S flag after the fact. It is not a
+  // pre-authorisation, and a run that spends money must never be able to start
+  // with its own excuse already in hand.
+  if (opts.ruling && !(opts.report || opts.phase === 4)) {
+    return bail(EXIT.INFRA, '--ruling is an acknowledgement for --report / --phase 4; it gates no scored run.', [
+      '  Run the phase, read the flag, investigate it, write the ruling, then re-report',
+      '  with --ruling <doc>. In that order — the order is the point.',
+    ]);
+  }
 
   if (opts.lint) {
     const { problems, notes } = lintAll();
@@ -2581,6 +3071,10 @@ async function main() {
       console.log('');
     }
     console.log('There is no override. `--new-cohort` archives the old store and starts a fresh one.');
+    console.log('');
+    console.log('A refused store is not a faulted store. If its cohort is closed and adjudicated,');
+    console.log('the adjudication in docs/design/ is its verdict of record (HANDOFF reading order);');
+    console.log('this refusal only says the CURRENT tree cannot re-score it.');
     return EXIT.INTEGRITY;
   }
 
@@ -2591,7 +3085,10 @@ async function main() {
     // Surface overhead is a live measurement (it depends on what Playwright's
     // build registers), so a report over a cold store takes it from the cohort
     // sidecar rather than inventing it.
-    return report(stored, cohort?.surfaceOverheadChars ?? {});
+    return report(stored, cohort?.surfaceOverheadChars ?? {}, cohort, {
+      ruling: opts.ruling,
+      root: ROOT,
+    });
   }
 
   /**
@@ -2643,6 +3140,10 @@ async function main() {
       '  --selftest  ALL preflights H0-H5 (+H2b), live infra, $0 budget',
       '  --phase N   a scored phase. SPENDS BUDGET.',
       '  --report    score the store',
+      '',
+      '  --ruling <doc>  with --report / --phase 4 only: acknowledge an investigated',
+      '                  SHIM-SUSPECT flag with the ruling that settled it. The flag still',
+      '                  prints; nothing else is ever acknowledgeable.',
     ]);
   }
 

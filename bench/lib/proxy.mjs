@@ -88,8 +88,20 @@ export const ARM_DEFINITION = {
  * arm-neutrality check spelled out: in the re-dump arm the report is a full
  * snapshot, for which "anything it does not mention is unchanged" and "a
  * re-verifying snapshot returns nothing new" are also true — more obviously so.
- * Identical bytes to both arms can move the absolute level of voluntary
- * snapshotting; it cannot move the between-arm comparison.
+ *
+ * CORRECTED (tier2 §8.2, landed with harness-debt.md's bundle B — a comment
+ * edit that moves `codeVersion`, so it rides a commit that already does). This
+ * used to end "identical bytes to both arms can move the absolute level of
+ * voluntary snapshotting; it cannot move the between-arm comparison." That is
+ * the byte-symmetry argument tier1b §1's contamination flags explicitly
+ * corrected: the `browser_snapshot` sentence's antecedent is VACUOUS in the
+ * re-dump arm — there is no diff for a re-verifying snapshot to return nothing
+ * new against — so identical bytes CAN move the comparison. The right argument
+ * is about the estimand, not the bytes: the teaching is a COMPONENT OF THE
+ * SHIPPED DIFF PRODUCT, which is what the experiment is estimating; the
+ * contamination is asymmetric HANDLING, and handling is symmetric here. See
+ * tier1b.md §1, contamination flags — the re-dump-side hazard is monitored via
+ * per-task voluntary-observation rates.
  */
 const ACT_DESCRIPTION =
   'Click, type, hover, scroll, or press a key on the page, then observe what ' +
@@ -162,6 +174,16 @@ const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
  * `identity_mismatch` for every long label and bury the real ones. Containment
  * either way is the tolerant-but-still-discriminating rule — "Archive" vs
  * "Archive" agrees, "Archive" vs "Select Marcus Webb" does not.
+ *
+ * AND THAT CONTAINMENT RULE IS WHY THE BUCKET IT FEEDS IS UNREACHABLE ON THE
+ * FIXTURES THAT MATTER (tier6 §5.2 item 2, landed with harness-debt.md's bundle
+ * B). `identity_mismatch` is a LABEL-DIVERGENCE TRIPWIRE, not a rebind detector:
+ * it compares page-reported label to shadow-model label, so it cannot fire
+ * wherever the rows are identical by design — which is every fixture built to
+ * stress positional rebinding, because "Archive" contains "Archive". On those
+ * fixtures a rebound ref that LANDS is counted in `wrong_choice`, and a zero in
+ * this column is a statement about label diversity, never about the hazard. Do
+ * not cite the zero, in either direction.
  */
 export function labelsAgree(pageLabel, modelLabel) {
   const a = norm(pageLabel).replace(/…$/, '');
@@ -204,6 +226,17 @@ export const INPUT_LOSS = /input was dispatched but never reached the page/;
  * function never needs the shadow label itself — `doAct` binds it, and a test
  * can bind whatever it wants to. Default: nothing to contradict, which is
  * `labelsAgree`'s own rule for an unknown label.
+ *
+ * ON `identity_mismatch`, THE BUCKET THIS ROUTES INTO (tier6 §5.2 item 2). Its
+ * claim retires; the bucket stays. It is a label-divergence tripwire and is
+ * unreachable by construction on identical-label families (see `labelsAgree`),
+ * so a zero here is evidence of nothing. The rebind hazard's detectors of record
+ * are `wrong_choice` (page ground truth, via the `allowed` set) and the
+ * refused-stale counts; post-tier5 the engine retires positional families on
+ * membership change, so the landing route is closed and measured closed
+ * (h2h-post-tier5-evaluation §2). The residual P2 equal-size same-walk churn
+ * route is undetectable in principle at the key level (tier4 §1.4) and is not
+ * claimed to be covered by anything.
  */
 export function attributeAct({
   errored,

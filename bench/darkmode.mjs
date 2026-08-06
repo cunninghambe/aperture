@@ -38,9 +38,16 @@ import { dirname, extname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { APERTURE_PORT, killTree, portIsOpen, startAperture } from './lib/aperture.mjs';
+import { buildIdentity } from './lib/store.mjs';
+import { hashTree } from './headtohead/lib/h2hStore.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const FIXTURE_DIR = join(ROOT, 'bench', 'fixtures', 'darkmode');
+/**
+ * NOT `bench/fixtures/darkmode` — that directory is inside BOTH scored suites'
+ * content hash, and this bench is under active development. See
+ * `assertFixturesAreUnwatched` below and docs/design/harness-debt.md WO-C1.
+ */
+const FIXTURE_DIR = join(ROOT, 'bench', 'darkmode-fixtures');
 const FIXTURE_PORT = 8991;
 const FIXTURE_BASE = `http://127.0.0.1:${FIXTURE_PORT}`;
 const CDP_PORT = 9333;
@@ -93,6 +100,58 @@ let ARTIFACT_HASH = '(unhashed)';
   console.log(
     `artifact  ${relative(ROOT, ARTIFACT).replace(/\\/g, '/')}\n` +
       `          sha256 ${ARTIFACT_HASH}  built ${new Date(built.mtimeMs).toISOString()}\n`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// THIS BENCH MAY NOT MOVE A SCORED SUITE'S codeVersion.
+//
+// The precedent is `bench/size.mjs`, which asserts the same invariant about
+// itself on every `--dry` (size.mjs, "integrity separation"). Darkmode never
+// had it, and the omission cost exactly what the size sweep's version was built
+// to prevent: three fixtures were parked in `bench/fixtures/darkmode/`, which is
+// inside the head-to-head identity's RECURSIVE hash of `bench/fixtures`, and
+// they silently moved its `codeVersion` from `dfa962c3f89b4d53` to
+// `8d282bdbf37a6bfa`. No cohort was in flight, so it cost nothing; a contrast
+// tweak during a live cohort would have severed it mid-run.
+//
+// BOTH identities are built, not one. The two scored suites watch
+// `bench/fixtures` with DIFFERENT RECURSION — `hashTree` (h2h) descends,
+// `hashFileSet` (task) does not — so a fixture one directory deep severs one
+// suite and not the other. A guard that checked only one would re-create the
+// exact asymmetry it exists to close. The at-rest form of this invariant is
+// `test/watchedSet.test.ts`; this is the live half, because a bench that refuses
+// to start is louder than a test nobody ran.
+// ---------------------------------------------------------------------------
+const OWN_FIXTURES = relative(ROOT, FIXTURE_DIR).replace(/\\/g, '/') + '/';
+{
+  const taskWatched = buildIdentity({
+    root: ROOT,
+    model: '(darkmode separation check)',
+    systemPrompt: '',
+    tasks: [],
+    verdictRule: {},
+  }).files.map((f) => f.path);
+  const h2hWatched = hashTree(ROOT, join(ROOT, 'bench', 'fixtures')).map((f) => f.path);
+
+  const leaked = [
+    ...taskWatched.filter((p) => p.startsWith(OWN_FIXTURES)).map((p) => `task  ${p}`),
+    ...h2hWatched.filter((p) => p.startsWith(OWN_FIXTURES)).map((p) => `h2h   ${p}`),
+  ];
+  if (leaked.length) {
+    console.error(
+      `REFUSING TO RUN: this bench's fixtures (${OWN_FIXTURES}) are inside a scored\n` +
+        'suite\'s watched set. Editing one would move that suite\'s codeVersion and sever\n' +
+        'its cohort — silently, because a severed store prints a confident refusal only\n' +
+        'the next time somebody runs it.\n' +
+        leaked.map((l) => `  ${l}`).join('\n') +
+        '\nMove them back out of bench/fixtures/ (harness-debt.md WO-C1).',
+    );
+    process.exit(3);
+  }
+  console.log(
+    `watched   ${OWN_FIXTURES} is outside both scored suites' content hash ` +
+      `(task ${taskWatched.length} files, h2h/bench-fixtures ${h2hWatched.length})\n`,
   );
 }
 

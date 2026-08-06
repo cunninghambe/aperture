@@ -27,7 +27,9 @@ SERVER=$!
 sleep 1
 
 FAILED=0
-for scenario in form rerender widgets biglist selects blindfields filterlist; do
+# `modal` is new (harness-debt.md WO-C2.1): the obstruction gate was exercised
+# only by bench:guards, so a hit-test regression slipped the standing set.
+for scenario in form rerender widgets biglist selects blindfields filterlist modal; do
   taskkill //F //IM electron.exe >/dev/null 2>&1
   sleep 3
   npx electron . > /tmp/ap-$scenario.log 2>&1 &

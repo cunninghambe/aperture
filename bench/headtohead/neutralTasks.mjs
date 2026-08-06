@@ -108,8 +108,26 @@ export const NEUTRAL_TASKS = [
     // Unsaved edits are not state: the witness reports the SAVED object, so a
     // run that sets every control and never presses Save scores false. That is
     // the dependent-controls shape doing its job.
+    //
+    // CASE-NORMALISED AT THE PREDICATE (h2h obligation 6; harness-debt.md WO-A4).
+    // The page's select reports `Weekly`, so `=== 'weekly'` failed a task every
+    // arm had completed — a fixture defect that read as a capability finding
+    // until it was struck by hand (h2h-evaluation §0.4), and that came within a
+    // three-ground sub-ruling of firing tier5's economics-failure clause
+    // literally (h2h-post-tier5-evaluation §1.3).
+    //
+    // Normalised HERE and not in the fixture's state fn — a deliberate deviation
+    // from h2h-evaluation §8.3's parenthetical — so the witness keeps recording
+    // the raw page state and the tolerance stays visible at the point where the
+    // judgment is made. Same effect, better evidence trail.
+    //
+    // The other five neutral predicates are deliberately NOT touched: only this
+    // one is ruled. Inspection found no sibling of this class among them (the
+    // rest compare booleans, numbers, or strings the agent types itself rather
+    // than strings the page chooses).
     success: (s) =>
-      !!s && s.notifications === true && s.method === 'sms' && s.frequency === 'weekly',
+      !!s && s.notifications === true && s.method === 'sms' &&
+      String(s.frequency).toLowerCase() === 'weekly',
     mustObserve: /SMS|Digest frequency/,
     solve: [
       click('Enable notifications'),

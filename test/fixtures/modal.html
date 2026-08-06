@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Obstruction lab</title>
+    <style>
+      #overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(20, 20, 20, 0.55);
+        z-index: 50;
+      }
+      #overlay[hidden] {
+        display: none;
+      }
+      #banner {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 24px;
+        background: #fff;
+        border-top: 2px solid #333;
+        z-index: 60;
+      }
+      #banner[hidden] {
+        display: none;
+      }
+      #tray {
+        margin-top: 320px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Obstruction lab</h1>
+
+      <!-- THE POINT OF THIS FIXTURE (docs/design/harness-debt.md WO-C2.1).
+           The obstruction gate was exercised only by `bench:guards` G7a/G7b,
+           which needs a live consent-phase launch and a token. That put a
+           hit-test regression outside the standing fidelity set entirely: the
+           six scenarios would all have gone green while every covered element
+           on the web became clickable again.
+
+           TWO GATES, NOT ONE, because they are different code on different
+           evidence and only one of them is the hit-test:
+
+             REACHABILITY (`blockedReason`, src/preload/page.ts) answers
+             questions the hit-test CANNOT — `dialog:modal`, `inert`,
+             `pointer-events: none`. A native modal renders in the top layer and
+             an addressable ancestor of it is excused by the containment test,
+             so this gate is asked FIRST (tier6 §4).
+
+             HIT-TEST (`obstructed`/`obstructor`, same file) answers "is
+             something else at this element's centre point" — the ordinary
+             cookie-banner and overlay case, and the one G7a/G7b measure.
+
+           A scenario that exercised only the dialog would leave the hit-test
+           exactly as uncovered as it was before. So the page carries both, and
+           the scenario walks both, in that order. -->
+
+      <!-- Gate 1: a native modal dialog. Everything outside it is unreachable
+           while it is open, and `blockedReason` says so by name. -->
+      <button id="open-settings">Open settings</button>
+      <dialog id="settings">
+        <p>Settings are open. Nothing behind this is reachable.</p>
+        <button id="close-settings">Close settings</button>
+      </dialog>
+
+      <!-- Gate 2: a plain positioned overlay with a banner on top of it. No
+           dialog semantics at all, so `blockedReason` returns null and the
+           refusal has to come from the hit-test or not at all. -->
+      <button id="show-banner">Show cookie banner</button>
+
+      <!-- The victim. Far enough down the page that the fixed overlay covers
+           its centre point, which is the only thing the hit-test looks at. -->
+      <div id="tray">
+        <button id="save-draft">Save draft</button>
+        <!-- The witness is a BUTTON and not an <output>, and that is not a
+             style choice. `output` is not in the walker's addressable set, so it
+             is elided from the stream — measured: the truth snapshot held
+             `generic "Save draft saved 2"` while the agent model held nothing at
+             all, and the scenario went red for the wrong reason. A button is
+             addressable, its accessible name is its text, and the count
+             therefore travels on the wire where the assertion can read it.
+             It is never clicked. -->
+        <button id="saves" type="button">saved 0</button>
+      </div>
+
+      <div id="overlay" hidden></div>
+      <div id="banner" hidden>
+        <p>We use cookies.</p>
+        <button id="dismiss-banner">Dismiss banner</button>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        var dialog = document.getElementById('settings');
+        var overlay = document.getElementById('overlay');
+        var banner = document.getElementById('banner');
+        var saves = document.getElementById('saves');
+        var n = 0;
+
+        document.getElementById('open-settings').addEventListener('click', function () {
+          dialog.showModal();
+        });
+        document.getElementById('close-settings').addEventListener('click', function () {
+          dialog.close();
+        });
+        document.getElementById('show-banner').addEventListener('click', function () {
+          overlay.hidden = false;
+          banner.hidden = false;
+        });
+        document.getElementById('dismiss-banner').addEventListener('click', function () {
+          overlay.hidden = true;
+          banner.hidden = true;
+        });
+
+        // The witness for "the refusal actually refused". A refusal that still
+        // let the click through would be worse than no gate at all, so the
+        // counter is asserted from the STREAM — it is an addressable output
+        // whose label changes, so a landed click cannot hide.
+        document.getElementById('save-draft').addEventListener('click', function () {
+          n += 1;
+          saves.textContent = 'saved ' + n;
+        });
+      })();
+    </script>
+  </body>
+</html>

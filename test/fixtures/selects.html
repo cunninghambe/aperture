@@ -162,6 +162,38 @@
         </select>
       </p>
 
+      <!-- 5b. A DEPENDENT PAIR — the `[N options]` staleness case
+           (docs/design/harness-debt.md WO-C2.2).
+
+           The marker was measurable only on the guard fixture, which needs a
+           consent-phase launch and a token. That left the standing fidelity set
+           unable to see a stale count — and a stale count is not a cosmetic
+           defect: `[N options]` is the ONLY thing distinguishing a native
+           <select> (which needs action:"select") from a custom ARIA combobox
+           (which needs clicks), and the reader dropped it on the floor once
+           already. The historical victim is on record.
+
+           Choosing a REBUILT child rather than a filtered one is the point:
+           changing Region tears down every <option> under City and builds a new
+           set, which is what a real dependent select does and what a diff of an
+           element whose children are synthetic has to survive.
+
+           THE COUNTS ARE UNIQUE ON THIS PAGE ON PURPOSE — 7 and 12, where the
+           rest of the ladder uses 4, 51, 3, 3 and 6. An assertion on a count
+           that appears twice could be satisfied by the wrong element. -->
+      <p>
+        <label for="region">Region</label>
+        <select id="region" name="region">
+          <option value="au" selected>Australia</option>
+          <option value="jp">Japan</option>
+          <option value="is">Iceland</option>
+        </select>
+      </p>
+      <p>
+        <label for="city">City</label>
+        <select id="city" name="city"></select>
+      </p>
+
       <!-- 6. A custom ARIA combobox: no <select> anywhere, so no "[N options]"
            marker, and it is driven by ordinary clicks. Its role="option"
            elements are REAL, visible, clickable nodes — the reason `option` is
@@ -183,6 +215,36 @@
     </main>
 
     <script>
+      // -- 5b. The dependent pair --------------------------------------------
+      //
+      // Australia 7 cities, Japan 12, Iceland 2. The bench drives au -> jp, so
+      // the child's marker must go [7 options] -> [12 options]. A model that
+      // kept 7 would tell an agent the list is shorter than it is, and the agent
+      // would never look for the option it needs.
+      (() => {
+        const CITIES = {
+          au: ['Adelaide', 'Brisbane', 'Canberra', 'Darwin', 'Hobart', 'Melbourne', 'Perth'],
+          jp: [
+            'Fukuoka', 'Hiroshima', 'Kobe', 'Kyoto', 'Nagoya', 'Naha',
+            'Osaka', 'Sapporo', 'Sendai', 'Tokyo', 'Yokohama', 'Kanazawa',
+          ],
+          is: ['Akureyri', 'Reykjavik'],
+        };
+        const region = document.getElementById('region');
+        const city = document.getElementById('city');
+        function rebuild() {
+          city.textContent = '';
+          for (const name of CITIES[region.value] ?? []) {
+            const o = document.createElement('option');
+            o.value = name.toLowerCase();
+            o.textContent = name;
+            city.append(o);
+          }
+        }
+        region.addEventListener('change', rebuild);
+        rebuild();
+      })();
+
       // -- 3. React-shaped controlled select ---------------------------------
       (() => {
         const sel = document.getElementById('status');

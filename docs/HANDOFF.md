@@ -671,7 +671,7 @@ reaching the same server (it is a third *origin*, not a third binding).
 
 ```bash
 npx electron . --seed-vault --seed-profile \
-  --seed-botauth=bench/fixtures/botauth-dev-key.json \
+  --seed-botauth=bench/botauth-dev-key.json \
   --e2e-consent=allow --e2e-consent-delay-ms=1500 > /tmp/ap.log 2>&1 &
 ```
 
