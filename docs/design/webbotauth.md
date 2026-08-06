@@ -652,3 +652,318 @@ signed-agents concept + policy pages; blog.cloudflare.com/web-bot-auth and
 /signed-agents; RFC 7638 §3.2 and RFC 8037 A.3 (thumbprints); RFC 8032
 (Ed25519 determinism). Fetched 2026-08-05; quoted normative fragments are in
 §4 and §1.
+
+---
+
+## 12. Implementation report
+
+Appended by the builder per §7.5, against the tree at `9798260` (worktree
+`aperture-wba`; the main checkout was holding a scored bench cohort on
+8817/8894/8896/8898/8899 for the whole of this work, and nothing here touched
+it). §7.5 asks for four things — the pinned library version and draft revision,
+which `Signature-Agent` form and component list shipped, the queue #7
+measurement, and every sabotage row's observed RED with the runner's artifact
+hash. All four are below, including the one that is **owed rather than
+recorded**, which is said as plainly as the ones that are done.
+
+Worktree artifact this report is about: `out/main/index.js`
+`sha256 4115dd9f517787676b87b433ce4ac8025d7a3ca3c22b9c07890c47af28fa6f6b`,
+built 2026-08-06T02:56:40Z. `package.json` and `package-lock.json` are
+byte-unchanged; Cloudflare's library is a dependency of
+`bench/probes/webbotauth/`'s own `package.json` and of nothing else.
+
+### 12.1 Item one — the pinned library version and draft revision
+
+| | |
+|---|---|
+| `web-bot-auth` npm | **0.1.3** (latest; published 2026-03-09) |
+| architecture draft | **draft-meunier-web-bot-auth-architecture-05**, 2026-03-02 |
+| transitive canonicalizer | `http-message-sig` 0.2.x, read rather than assumed |
+| probe | `node --experimental-strip-types bench/probes/webbotauth/probe.mjs` → **13/13 GREEN** |
+
+The probe imports the SHIPPED leaf (node strips its types) rather than a
+transcription of it. A probe comparing a copy of our canonicalization against
+the library would compare two things neither of which is in the product.
+
+### 12.2 Item two — which `Signature-Agent` form and component list shipped
+
+**Shipped: the legacy sf-string form.**
+
+```
+Signature-Agent: "http://127.0.0.1:8902"
+Signature-Input: sig1=("@authority" "@method" "@path" "signature-agent")
+                 ;created=…;expires=…;keyid="…";tag="web-bot-auth";nonce="…"
+Signature:       sig1=:…:
+```
+
+Component list `("@authority" "@method" "@path" "signature-agent")` — **§4's
+ordered fallback did not fire**: Cloudflare's verifier accepts the
+four-component list (probe D7, D8). Parameters are §4's enumeration in §4's
+order — `created, expires, keyid, tag, nonce` — with **no `alg`**: §4 does not
+list it, the algorithm is determined by the key the directory publishes, RFC
+9421 §7.3.7 warns against a verifier trusting it, and the probe measures that
+Cloudflare's verifier does not require it.
+
+**§4 said to adopt the form the library emits. It does, and three independent
+measurements say the same thing — the third being one this document could not
+have anticipated:**
+
+1. **The library emits sf-string and cannot verify sf-dict.** Its
+   `REQUEST_COMPONENTS` is `["@authority", "signature-agent"]` — bare, no
+   `;key=`. Worse, for a component that DOES carry parameters its base builder
+   hands over the whole header value (`sig1="https://…"`) instead of the named
+   member (`"https://…"`), so it computes a base nobody else computes. Probe
+   D10 asserts that rejection, and goes RED the day the library is fixed.
+2. **draft-05 prefers sf-dict and marks sf-string LEGACY** ("THIS IS A LEGACY
+   EXAMPLE. IF YOU ARE AN IMPLEMENTER, PLEASE UPDATE TO THE ABOVE"). v04's
+   changelog is where the header became an sf-dictionary.
+3. **draft-05's own Ed25519 vector for the preferred form is internally
+   inconsistent, and that is a finding about the draft rather than about us.**
+   Appendix A.2.2 prints a base whose signature-agent line is
+   `"signature-agent";key="agent2": "https://signature-agent.test"` and
+   publishes a signature that **does not verify against it**. Re-signing the
+   printed base with the draft's own key (RFC 9421 B.1.4) gives different
+   bytes. The signature DOES verify against the same base with the member value
+   **unquoted** — measured, probe row D2b. Appendix A.2.1 (no signature-agent)
+   and A.2.3 (legacy sf-string) are both self-consistent and both reproduced by
+   our leaf byte for byte, base and signature.
+
+So the draft-preferred spelling currently has **three readings in the wild** —
+the draft's printed base, the draft's published signature, and the reference
+library — and no vector that settles which is right. Shipping it would be
+choosing one of three and hoping. **Both forms are implemented** in
+`botAuthCore.ts` behind `SHIPPED_SIGNATURE_AGENT_FORM`, each with its own
+external vector in the probe, so moving is a one-constant change with a
+measurement on either side of it. D10 and D2b are the tripwires: either goes
+RED when the ecosystem moves, and that is when §4's decision procedure gets
+re-run.
+
+**One divergence recorded rather than fixed.** The draft (§4.2.2) specifies a
+base64url nonce and Aperture emits one. The library's `validateNonce` decodes
+with `atob`, which is standard base64 and rejects `-` and `_`; roughly 93% of
+64 random bytes produce at least one. It bites only on THEIR signing path —
+their verifier never inspects the nonce — which is why D7 passes with a
+base64url nonce end to end. Recorded as probe row D11.
+
+**Verification vectors reproduced, all from primary sources rather than from
+this file:** RFC 9421 B.2.6 base byte-exact and signature bytes exact (Ed25519
+is deterministic, so this is an equality, not a roundtrip); RFC 8037 A.3
+thumbprint exact; draft-05 A.2.3 base and signature exact; A.2.2 base exact.
+Our thumbprint equals the library's `keyid` for the same key, our
+`@signature-params` line is byte-identical to the library's for the same
+ordered parameters, and our signature bytes are identical to the library's for
+the same request (probe D1–D6).
+
+### 12.3 Item three — the queue #7 measurement: **OWED, NOT RECORDED**
+
+Header order and casing under a registered `onBeforeSendHeaders` **has not been
+measured**, and this section says so rather than reasoning about it. The
+measurement needs two live launches of the built browser, which needs ports a
+scored cohort was holding for the whole of this work. §9's rule applies to this
+document too: an unmeasured thing is not a favourable answer.
+
+What IS known without a launch, and is stated because it bounds the residual
+rather than closing it: the mux returns `requestHeaders` **unchanged** when no
+handler contributes, so the no-op path is as close to the no-listener path as
+an installed listener can be; and it only ever ADDS names, because a handler
+receives a frozen copy and returns additions rather than holding the map. What
+is NOT known is whether Chromium re-serializes order or casing merely because a
+listener returned an object at all. `security.md`'s queue row now says exactly
+this. The command is in §12.5.
+
+### 12.4 Item four — sabotage rows, observed
+
+**Ten rows applied to the tree, run, observed RED, and reverted.** The tree was
+restored and re-run green after every one. Rows against the pure leaf, the
+config validator, the source guards and the bench verifier are all runnable
+without a browser and were run; rows whose only detector is a live guard leg
+are listed in §12.5 as owed, and are NOT presented here as if they had been.
+
+Unit and source rows — `npx vitest run test/botauth.test.ts`, baseline
+**63/63 green**:
+
+| row | the substitution | observed |
+|---|---|---|
+| **S-W1** *(mux singleton, obvious)* | a second literal `.onBeforeSendHeaders(` in `botAuth.ts` | **RED** — *there is exactly one `.onBeforeSendHeaders(` call site in src/* |
+| **S-W2** *(mux singleton, author-independent)* | the same registration through an ALIAS in a scratch file — `const wr = s.webRequest; wr.onBeforeSendHeaders(…)` | **RED**, and red *only* because the pattern is receiver-independent. The S-E3 lesson applied before it could be paid for twice: a lexical receiver check caught the identical act in one file and missed it in another |
+| **S-W3** *(predicate, obvious)* | S3 dropped — a human tab signs | **RED** on two assertions: the `S3=no` matrix row and the named human-tab trap |
+| **S-W4** *(predicate, author-independent)* | duplicate `directoryUrl` resolved LAST-WRITER-WINS instead of both-off | **RED** — *a duplicate directoryUrl disables BOTH containers* |
+| **S-W5** *(G33c's author-independent row, at unit level)* | S2 spelled as a denylist, `resourceType === 'subFrame'` | **RED** on the matrix row and on the exhaustive resourceType trap |
+| **S-W5b** *(the halfway form)* | `subFrame` **and** `image` denied, everything else signed | **RED** — the exhaustive enumeration is what makes the halfway spellings fail too, where a two-value check would have passed one of them |
+| **S-W6** *(G33b's author-independent row, SUBSTITUTED — see §12.6)* | exact-origin entries routed through `registrableDomain()` "for uniformity" | **RED** — *an exact-origin entry matches on scheme, host AND port* |
+| **S-W7** *(G33a's obvious row, at source level)* | `installMux(s)` deleted from `containers.harden()` | **RED** — *the mux is installed from containers.harden, on the CONTAINER session* |
+| **S-W8** *(G33a's author-independent row, at source level)* | `installMux(session.defaultSession)` | **RED**, same assertion. A source guard cannot see which session an expression evaluates to; this catches the *spelling*, and G33a is what catches the *behaviour*. Both are owed, and only one is done |
+
+Bench-verifier rows — the G33e legs, extracted and run without a browser
+because they need only the verifier and the committed fixture key:
+
+| row | the substitution | observed |
+|---|---|---|
+| **S-W9** *(G33e, obvious)* | the bench verifier stubbed to `ok: true` | **RED — `G33e-tamper`.** Note what did NOT catch it: the verifier's own acceptance (`selfTest`) still passed, because it calls `crypto.verify` directly rather than through `verifyRequest`. An instrument's self-test is not a test of the path the instrument is used through, and this row is the measurement of that |
+| **S-W10** *(G33e, author-independent)* | the verifier checks the signature math and the `keyid` lookup and **never reads `expires`** | **RED — `G33e-stale`**, while `G33e-tamper` stayed green. Exactly the split the row exists for: staleness is not tampering, an instrument that only detects forgery accepts every replay, and nothing about "check the signature" reminds its author to check the clock |
+
+### 12.5 Ready for live verification — the commands, and the RED-first order
+
+Everything below needs a build and Aperture on 8817, and is **owed**. §9's
+ordering rule is not relaxed by the delay: **no green counts until its red has
+been observed**, so the pre-feature run comes first.
+
+```bash
+# 0. Once the cohort has cleared 8817/8894/8896/8898/8899.
+cd <checkout>
+npx tsc --noEmit && npx vitest run          # must be green before anything below
+npx electron-vite build                     # guards refuse to run against a stale artifact
+
+# 1. RED FIRST — the G33 block against a PRE-FEATURE artifact.
+#    Stash the three src/net files and containers.ts's installMux call, rebuild,
+#    launch, run. Expected: G33a RED (no signature anywhere), and G33b/c/d RED
+#    ON THE VACUITY TRAP rather than passing quietly — that is the trap working.
+#    Record the artifact hash the runner prints for this run.
+
+# 2. GREEN — the real artifact, launched with the seed flag §7.4 specifies.
+npm start -- --seed-vault --seed-profile \
+             --e2e-consent=allow --e2e-consent-delay-ms=1500 \
+             --seed-botauth=bench/fixtures/botauth-dev-key.json
+#    ...then, with the bearer token that launch printed:
+node bench/guards.mjs <token> http://127.0.0.1:8899 --phase=allow
+#    Expect G33-instrument, G33a, G33b, G33c-img, G33c-fetch, G33d, G33e-tamper
+#    and G33e-stale to PASS, alongside the existing G1-G32.
+
+# 3. The two G33-block sabotage rows only a live leg can observe.
+#    Apply, rebuild, relaunch, run, record the runner's artifact hash, revert:
+#      G33a-live-b : installMux(session.defaultSession) in containers.harden()
+#                    -> every unit test still green, NO header on the wire, G33a RED
+#      G33d-live-b : window-open children inherit agentOwned from their opener in
+#                    tabs.ts -> the popup signs, G33d RED (and browser_capture's
+#                    refusal boundary silently widens in the same keystroke, which
+#                    is why the row exists: that refactor must fail twice)
+
+# 4. QUEUE #7 — the header-order measurement, which is a DIFF of two launches.
+#    Control: comment out installMux(s), rebuild, launch, capture one request at
+#    the 8902 probe. Treatment: restore, rebuild, launch, capture one SIGNED and
+#    one UNSIGNED request. Diff header order and casing across the three, and
+#    write the result into docs/design/security.md's queue row WHATEVER IT SHOWS.
+
+# 5. The differential probe, re-run on the machine that ships (already GREEN here):
+node --experimental-strip-types bench/probes/webbotauth/probe.mjs
+
+# 6. git diff --stat package.json package-lock.json   # must be empty
+```
+
+### 12.6 Amendments — three, all narrowing, none of them silent
+
+§7.5 requires deviations to be written HERE before the code lands. Three, and
+the first is a factual correction to a premise this document states twice.
+
+**1. `registrableDomain()` does not return `null` for IP literals and
+single-label hosts. It returns the HOST.** §3 S1 says exact-origin entries exist
+"because `registrableDomain()` correctly returns `null` for IP literals and
+single-label hosts". Measured against `src/vault/vault.ts` at this tree:
+
+```
+http://127.0.0.1:8902  ->  "127.0.0.1"     http://localhost:8902    ->  "localhost"
+http://[::1]:8902      ->  "[::1]"         https://a.b.notarealtld  ->  null
+```
+
+The vault's own comment says why — *"literal addresses have no registrable
+domain; they are their own identity."* Two consequences, one repaired and one
+recorded:
+
+- **Repaired, failing closed.** A bare `127.0.0.1` in `sign` would have passed
+  §6's "must equal its own `registrableDomain()`" check and then matched at
+  DOMAIN granularity — every port and BOTH schemes on that address, strictly
+  wider than the exact-origin entry the human meant and wider than anything §3
+  sanctions. The config validator now refuses an address literal or a
+  single-label host as a domain entry, naming the exact-origin spelling to use
+  instead. This narrows; it never widens.
+- **Recorded: §9's G33b author-independent sabotage row cannot be built as
+  written.** The row is "route exact-origin entries through
+  `registrableDomain()` for uniformity: both `127.0.0.1` and `localhost` yield
+  `null`, a null-equality or null-bucket fallback matches them to each other,
+  localhost signs → RED." Under that exact refactor `127.0.0.1` and `localhost`
+  yield `"127.0.0.1"` and `"localhost"` — **distinct, so the guard's control
+  stays GREEN and the row proves nothing.** That inability is itself the
+  finding, and it is reported rather than papered over.
+
+  **The CLASS still bites, one granularity up, and is guarded.** The same
+  tidiness refactor throws away the SCHEME and the PORT, so an exact-origin
+  entry starts matching `http://127.0.0.1:9999` and `https://127.0.0.1:8902`.
+  That instance is constructible, is in the matrix, and was measured RED as
+  **S-W6**. And the genuine null-pooling hazard the row was reaching for is
+  real for a different input class — two unknown-suffix hosts both yield `null`
+  — so `matchesAllowlist` refuses a `null` on every path and the matrix asserts
+  it with `a.b.notarealtld` against `c.d.alsonotreal`.
+
+**2. Config validation lives in the pure leaf, not in `botAuth.ts`.** §7.1 puts
+"config load/validation" in `botAuth.ts`; §7.2 item 5 requires the suite to
+exercise every §6 failure mode, and the suite cannot import `botAuth.ts`
+because it imports `electron`. The two clauses cannot both hold. Resolved in
+favour of the testable one: `parseBotAuthConfig` (pure, in `botAuthCore.ts`)
+makes every §5/§6 decision and returns `{config, errors}`; `botAuth.ts` does
+the I/O and the logging. No ruling changed — only which file it can be executed
+in.
+
+**3. `test/egress.test.ts` gained a third receiver class, `WebRequest`.** §7.5
+scopes the builder to "ruling rows only" there. A ruling row for
+`.onBeforeSendHeaders` would have been STALE the moment it was written, because
+that member is reached through the `Session#webRequest` accessor and the
+guard's two receiver patterns (annotation, direct binding) cannot follow an
+accessor. So the enumeration was **widened** — `Session` and `WebContents`
+became `Session`, `WebContents` and `WebRequest` — and nothing was narrowed, no
+existing regex was touched, and no existing ruling changed. The alternative was
+a table that claimed to rule on something it could not see, which is the failure
+mode that file's guard section exists to prevent.
+
+### 12.7 What is not verifiable from here, restated honestly
+
+- **Every G33 leg.** They need Aperture on 8817 and were not run. The unit and
+  source guards cover the predicate, the canonicalization, the config rulings,
+  the mux singleton and the bench verifier's own acceptance; they cover **none**
+  of the wiring — whether Electron populates `webContentsId` and `resourceType`
+  as expected for `WebContentsView` main-frame requests, whether the attribution
+  lookup resolves, whether the mux is installed on the session the traffic
+  actually uses. §9's whole point is that this is the part that has broken
+  before.
+- **Queue #7**, per §12.3.
+- **Whether `--seed-botauth`'s in-memory path behaves under a real launch.** It
+  is exercised by no test here; `loadSeedConfig` is a code path only a live
+  guard run reaches.
+- **The 0o600 mode on the key file.** Written, and stated as symbolic on
+  Windows (§2.4) — not relied on, and not measured.
+- **The health of the bench cohort.** Nothing here read its store or touched
+  its ports, by design, and nothing here was built into the checkout it is
+  running from.
+
+---
+
+## 13. Live verification — the owed §12.5 run, performed 2026-08-06
+
+Ports freed when the post-tier5 h2h cohort completed. Fixtures on
+127.0.0.1/127.0.0.2/127.0.0.3:8899 per the HANDOFF runbook; launch exactly as
+§12.5 step 2 specifies.
+
+| run | artifact | result |
+|---|---|---|
+| feature present | `4115dd9f51778767…` | **72/72 GREEN** |
+| `installMux(` commented out in `containers.harden()` (§12.5's pre-feature form) | `aa8749f1288475e5…` | **66/72 RED — G33a, G33b, G33c-img, G33c-fetch, G33d, G33e-tamper**, and nothing else |
+| restored | `4115dd9f51778767…` | **72/72 GREEN**, hash identical to the first run |
+
+**The vacuity trap did its job and is the reason this record is worth
+anything.** G33b/c/d are *absence* guards — "a non-allowlisted origin gets no
+signature". With the mux uninstalled, nothing signs anywhere, so all three
+would have passed trivially and a reader would have concluded the absence
+property was verified. They went RED instead, exactly as §9 predicted, because
+an absence guard hard-fails unless its presence guard is green in the same run.
+
+**Ordering deviation, stated.** §12.5 requires the red before the green. I ran
+green first, because a red observed before the harness was known-good could not
+be distinguished from a mis-launch — and it would have been one: the first
+attempt used a bare `--seed-botauth` where the flag takes a path, and produced
+a six-leg RED that meant nothing. The green run established the harness; the
+red then established discrimination against a differently-hashed artifact. Both
+hashes are recorded above, which is what the rule actually protects.
+
+**Still owed** (§12.5 step 3): the two live-only sabotage rows —
+`installMux(session.defaultSession)` and window-open children inheriting
+`agentOwned` — plus queue #7's header-order measurement. The first of those is
+the sharper one: every unit test stays green while nothing reaches the wire.

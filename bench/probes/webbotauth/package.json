@@ -1,0 +1,10 @@
+{
+  "name": "aperture-probe-webbotauth",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "PROBE-LOCAL ONLY. Cloudflare's web-bot-auth is depended on HERE and nowhere else; the product dependency set does not change.",
+  "dependencies": {
+    "web-bot-auth": "0.1.3"
+  }
+}

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { session, type Session } from 'electron';
 import type { Container, ContainerId } from '@shared/types';
 import { safeDownloadName } from '@shared/download.js';
+import { installMux } from '../net/webRequestMux.js';
 import { buildUaProfile } from './useragent.js';
 
 /**
@@ -132,6 +133,26 @@ class ContainerRegistry {
     s.on('will-download', (_event, item) => {
       item.setSaveDialogOptions({ defaultPath: safeDownloadName(item.getFilename()) });
     });
+
+    // THE ONE `onBeforeSendHeaders` REGISTRATION, INSTALLED HERE.
+    //
+    // Electron keeps one listener per event per session, so a second registrant
+    // silently evicts the first — verification-queue item #4, closed by
+    // construction rather than answered. `webRequestMux.ts` argues the rest at
+    // its own header; what belongs here is WHY THIS SESSION.
+    //
+    // A container session, not `session.defaultSession`. Every tab is created
+    // on a container session (`sessionFor`); the default session carries only
+    // the two trusted windows, which is E5. Installing on the default session
+    // instead would leave every unit test green — the leaf is correct, the
+    // wiring is plausible — and put no header anywhere on the wire, because no
+    // tab ever loads there. That is G33a's second sabotage row, and this
+    // sentence is the thing it is sabotaging.
+    //
+    // Per-session-once for the same reason as `will-download` above: `harden`
+    // runs once per container in `sessionFor`, so this cannot double-register
+    // as tabs come and go, and there is no tab whose requests it misses.
+    installMux(s);
 
     // Strip the Electron/Chrome version skew from the UA. A stock Electron UA
     // announces "Electron/43.0.0" and is trivially fingerprintable.

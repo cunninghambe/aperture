@@ -45,10 +45,14 @@ import { sources } from './lib/source.js';
  *     (`clipboard`, `net`, `protocol`, `powerMonitor`) fails by name, and so
  *     does a new FILE reaching for one that is already ruled.
  *   · `MEMBERS` freezes every member accessed on one of those symbols, and on
- *     the two Electron objects this codebase holds by reference rather than by
- *     import — `Session` and `WebContents`. Every member is ruled on one
- *     question: *can a page choose the bytes this acts on?* `shell.openPath`
- *     next to a ruled `shell.openExternal` is an unruled row, not a near-miss.
+ *     the THREE Electron objects this codebase holds by reference rather than by
+ *     import — `Session`, `WebContents` and (since the mux, 2026-08-05)
+ *     `WebRequest`. Every member is ruled on one question: *can a page choose
+ *     the bytes this acts on?* `shell.openPath` next to a ruled
+ *     `shell.openExternal` is an unruled row, not a near-miss — and by the same
+ *     reasoning `webRequest.onHeadersReceived` next to a ruled
+ *     `webRequest.onBeforeSendHeaders` is one too, which is why `WebRequest`
+ *     joined the list rather than the one member being special-cased.
  *   · `PRIMITIVES` stays on top, unchanged, because it covers the platform
  *     surfaces that are NOT electron-module members: node's `fetch`,
  *     `createServer`, `writeFile`, `child_process`, and the three event names.
@@ -66,7 +70,8 @@ import { sources } from './lib/source.js';
  *      `completeness.test.ts` cannot falsify a `not-page-text` claim. What it
  *      guarantees is that no affordance exists without one, which is the
  *      failure that actually happened — twice.
- *   2. **`Session` and `WebContents` are found lexically, not by type.**
+ *   2. **`Session`, `WebContents` and `WebRequest` are found lexically, not by
+ *      type.**
  *      `test/lib/source.ts` is a lexer. It finds a receiver by its annotation
  *      (`s: Session`, `wc: WebContents`) or by a direct binding
  *      (`const wc = rec.view.webContents;`). A WebContents obtained through an
@@ -196,6 +201,16 @@ const RULED: Record<string, string> = {
     'NO — the encrypted profile store, under userData.',
   'src/vault/attachments.ts :: write to disk':
     'NO — the attachment index, under userData.',
+  'src/net/botAuth.ts :: write to disk':
+    'NO — TWO sites, both paths Aperture builds under userData: the per-container ' +
+    'Ed25519 private JWK (botauth/<containerId>.key.json, mode 0600) and the ' +
+    'ready-to-publish JWKS export (botauth/<containerId>.directory.json). The ' +
+    'container id is agent- or human-chosen, never page-chosen — the same ' +
+    'ruling session.fromPartition carries. The key file is deliberately OUTSIDE ' +
+    'the vault (docs/design/webbotauth.md §2.4): vault coupling would make the ' +
+    'identity flicker with the five-minute idle lock, and an intermittent ' +
+    'identity assertion is a louder anomaly than a key file the out-of-envelope ' +
+    'adversary could read anyway.',
   'src/mcp/server.ts :: inbound listener':
     'NO, and it is inbound rather than egress — bound to 127.0.0.1 only, ' +
     'behind a per-launch bearer, with Host and Origin validated BEFORE auth so ' +
@@ -217,6 +232,7 @@ const ELECTRON_SURFACE: Record<string, { files: string[]; ruling: string }> = {
       'src/main/consent.ts',
       'src/main/index.ts',
       'src/mcp/server.ts',
+      'src/net/botAuth.ts',
       'src/privacy/blocker.ts',
       'src/privacy/darkmode.ts',
       'src/telemetry/reporter.ts',
@@ -382,6 +398,31 @@ const MEMBERS: Record<string, string> = {
     'NO — derived from process.versions.chrome. Never page-influenced, and ' +
     'privacy/useragent.ts asserts the two spellings agree.',
 
+  // --- app, in the signing module -------------------------------------------
+  'src/net/botAuth.ts :: app.getPath': 'NO — userData, for botauth.json and botauth/.',
+  'src/net/botAuth.ts :: app.isPackaged':
+    'NO — a boolean; gates --seed-botauth\'s dev-only key seed, checked inside ' +
+    'the function rather than at the call site (the --seed-vault pattern).',
+
+  // --- webRequest — THE MUX -------------------------------------------------
+  'src/net/webRequestMux.ts :: Session#webRequest':
+    'NO on the accessor — it takes no argument. What it reaches is the member ' +
+    'below, and this row exists so a SECOND webRequest member here fails.',
+  'src/net/webRequestMux.ts :: WebRequest#onBeforeSendHeaders':
+    'The handler READS every request, including page-initiated ones, so the ' +
+    'INPUT is page-influenced and the answer to the class question is about the ' +
+    'OUTPUT: no. The only strings written are three headers Aperture builds — ' +
+    'Signature-Agent (the human\'s configured directory URL), Signature-Input ' +
+    'and Signature (bytes over a base of Aperture\'s own components). No page ' +
+    'string is copied into a header, no request is redirected, cancelled or ' +
+    'retargeted, and the mux is ADDITIVE-ONLY BY CONSTRUCTION: a handler is ' +
+    'handed a frozen copy and returns headers to ADD, so it never holds the map ' +
+    'it would have to hold in order to delete or rewrite one. It is also THE ' +
+    'ONE registration of this event in src/ — Electron keeps one listener per ' +
+    'event per session, so a second registrant silently evicts the first ' +
+    '(verification-queue #4, closed by construction). test/botauth.test.ts ' +
+    'asserts the singleton receiver-independently.',
+
   // --- WebContents ----------------------------------------------------------
   'src/core/snapshot/act.ts :: WebContents#send': 'NO — Aperture\'s act channels.',
   'src/core/snapshot/engine.ts :: WebContents#send':
@@ -421,6 +462,14 @@ const MEMBERS: Record<string, string> = {
   'src/main/tabs.ts :: WebContents#on': 'NO — load-state events.',
   'src/main/vaultWindow.ts :: WebContents#on': 'NO — will-navigate, denied unconditionally.',
   'src/main/vaultWindow.ts :: WebContents#id': 'NO — an integer.',
+  'src/main/tabs.ts :: WebContents#id':
+    'NO — an integer, compared against the webContentsId onBeforeSendHeaders is ' +
+    'handed. That comparison is `TabManager.attribution`, the one answer to ' +
+    '"is this an agent tab" the webRequest layer cannot work out for itself ' +
+    '(docs/design/webbotauth.md §3 S3).',
+  'src/main/tabs.ts :: WebContents#isDestroyed':
+    'NO — a boolean, read before touching a webContents in the attribution ' +
+    'scan so a closed tab cannot throw on the request path.',
   'src/main/tabs.ts :: WebContents#close': 'NO — no argument.',
   'src/main/tabs.ts :: WebContents#stop': 'NO — no argument.',
   'src/main/tabs.ts :: WebContents#reload': 'NO — no argument.',
@@ -493,6 +542,27 @@ function observedMembers(): Set<string> {
         out.add(`${f.rel} :: WebContents#${x[1]}`);
       }
     }
+    // `WebRequest` — the third object held by reference rather than by import,
+    // added 2026-08-05 with the mux. It is reached through `Session#webRequest`,
+    // which is an ACCESSOR the two clauses above cannot follow: they find
+    // receivers by annotation or by a direct binding, and `s.webRequest.foo()`
+    // is neither. Without this the whole webRequest surface would be outside
+    // the enumeration — `onBeforeRequest`, `onHeadersReceived`, `onCompleted`
+    // and the rest — which is `shell.openPath` beside a ruled
+    // `shell.openExternal` all over again, one object further out. Widening the
+    // enumeration, never narrowing it: nothing previously ruled changes.
+    const wrs = receivers(f.code, 'WebRequest', [
+      /\b(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*(?::[^=;]*)?=\s*[A-Za-z0-9_$.!?[\]]*\.webRequest\s*;/g,
+    ]);
+    for (const id of wrs) {
+      for (const x of f.code.matchAll(new RegExp(`\\b${id}\\.([A-Za-z0-9_$]+)`, 'g'))) {
+        out.add(`${f.rel} :: WebRequest#${x[1]}`);
+      }
+    }
+    for (const x of f.code.matchAll(/\.webRequest\s*\.([A-Za-z0-9_$]+)/g)) {
+      out.add(`${f.rel} :: WebRequest#${x[1]}`);
+    }
+
     // The receiver spelled INLINE, with or without an intervening call:
     // `rec.view.webContents.getURL()` and `t.webContents(id).downloadURL(…)`.
     //

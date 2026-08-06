@@ -975,7 +975,8 @@ receiver-independent row.
 | `shell.openExternal` from the vault window | no — allowlisted to Notion HTTPS | OK |
 | `fetch` to api.notion.com (`notion.ts`, `vaultWindow.ts`) | no — fixed host; the caption and source URL it carries are scrubbed at both call sites | OK |
 | filter-list fetch and cache (`blocker.ts`) | no — the vendor's own endpoints | OK |
-| every `writeFile` (vault, profiles, attachments, telemetry, capture, mcp.json) | no — paths Aperture builds, under `userData` | OK |
+| **`onBeforeSendHeaders` (`net/webRequestMux.ts`)** | **the INPUT is, the OUTPUT is not** | **ruled 2026-08-05.** The handler READS every request in the browser, page-initiated ones included. What it WRITES is three headers Aperture builds — `Signature-Agent` (the human's configured directory URL), `Signature-Input`, `Signature` — over a base of Aperture's own component values. No page string is copied into a header; no request is redirected, cancelled or retargeted. See the paragraph below on why the mux is a door rather than an affordance |
+| every `writeFile` (vault, profiles, attachments, telemetry, capture, mcp.json, **botauth key + directory export**) | no — paths Aperture builds, under `userData` | OK |
 | native dialogs (`consent.ts`, `vaultWindow.ts`) | no — human-facing, no agent-reachable parameter | OK |
 | the MCP listener (`server.ts`) | no, and it is inbound | loopback-bound, per-launch bearer, Host and Origin validated before auth |
 
@@ -992,6 +993,45 @@ and `will-navigate` outright, and the shell window has no link and no
 `innerHTML` sink. That is a true statement about today's tree rather than a
 structural guarantee, and it is the third consequence of E5 rather than a new
 one.
+
+### The mux is a DOOR, not an affordance (2026-08-05)
+
+`src/net/webRequestMux.ts` is the one `onBeforeSendHeaders` registration in
+`src/`, and it is in this section for two reasons that pull in opposite
+directions.
+
+**It is the widest READ surface in the codebase.** Every request in the browser
+passes through it, including every request a page initiates, so its input is
+page-influenced in a way nothing else here is. That is why it carries a ruling
+in `test/egress.test.ts` at all: the class question is about the OUTPUT, and
+the answer is no. The only strings it writes are three headers Aperture builds
+from Aperture's own values — a directory URL a human typed into a config file,
+and bytes over a signature base whose every component is derived by
+`botAuthCore.ts` from the request line. No page string is copied into a header,
+and nothing here redirects, cancels or retargets a request; blocking lives in
+`onBeforeRequest`, which is Ghostery's and stays library-internal.
+
+**And it is additive-only by construction rather than by contract.** A handler
+does not receive the header map. It receives a frozen copy of the request and
+RETURNS the names it wants added; the mux merges them and drops any name
+already present, loudly. So "a mux handler may add headers, never delete or
+replace one" is not a rule a handler could break by forgetting it — there is no
+expression a handler can write that removes a header, because it never holds
+the map that has them. That matters here for the same reason the download row
+does: the failure this section keeps finding is *a helper wired to some of the
+places its sentence applies*, and the repair that survives is the one where the
+wrong thing is unspellable.
+
+**Why it exists at all is verification-queue item #4**, and the mux answers it
+by refusing to depend on the answer. Electron keeps one listener per event per
+session — a setter, not a subscription — so a second registrant silently evicts
+the first, with no error, no warning, and no log line: the previous handler
+simply stops being called. Ghostery registers `onBeforeRequest` and
+`onHeadersReceived` and nothing else (read from the installed package, not
+assumed), so there is no eviction interaction today. The mux is what keeps that
+sentence true the day somebody adds a second thing that wants a request header,
+and `test/botauth.test.ts` asserts the singleton **receiver-independently** —
+the S-E3 lesson, applied before it could be paid for a second time.
 
 ## Finding: a link's href could change under a stable label with no report (2026-08-01)
 
@@ -1150,10 +1190,11 @@ Ordered by how much collapses if the answer is unfavorable.
 | 1 | ~~Does overriding the UA keep `Sec-CH-UA` coherent?~~ | **RESOLVED — NO.** See below |
 | 2 | Can Electron host a WebAuthn platform authenticator? | Passkeys become a Chromium-patch project; passwords stay primary |
 | 3 | Is `webContents.debugger` attach detectable from page JS? **Still open as of 2026-08-05**, and the fill path still depends on CDP for submit (`pressKey`) and for file attachment | Fill path must prefer the isolated-world fallback on detection-sensitive origins |
-| 4 | Only one `webRequest` listener per event per session? | Blocker can be silently evicted; must multiplex through one listener |
+| 4 | ~~Only one `webRequest` listener per event per session?~~ | **CLOSED BY CONSTRUCTION (2026-08-05) — `src/net/webRequestMux.ts`.** The question is not answered and does not need to be: there is ONE `onBeforeSendHeaders` registration in `src/`, every registrant goes through `registerBeforeSendHeaders`, and `test/botauth.test.ts` asserts the singleton **receiver-independently** (the S-E3 lesson — a lexical receiver check was defeated by an inline spelling). Read from the installed package rather than assumed: Ghostery's blocker registers `onBeforeRequest` and `onHeadersReceived` only, so this event is unclaimed today; the mux is what keeps that sentence true tomorrow |
 | 5 | Does `setContentProtection` block `BitBlt` / DXGI duplication? | Consent windows become screenshot-readable |
 | 6 | `Input.insertText` fidelity for React/Vue controlled inputs | Fall back to isolated-world native setter + synthetic events |
-| 7 | Header order/casing controllable via `onBeforeSendHeaders`? | Documented fingerprint residual |
+| 8 | ~~Which `Signature-Agent` structured-field form does the deployed ecosystem actually speak, and does it accept our component set?~~ | **RESOLVED 2026-08-05 by the §4 differential probe** (`bench/probes/webbotauth/probe.mjs`, 13/13). Pinned: `web-bot-auth` npm **0.1.3**, draft-meunier-web-bot-auth-architecture-**05** (2026-03-02). **Shipped: the legacy sf-string form** — `Signature-Agent: "https://…"`, covered as `"signature-agent"` — with the four-component list `("@authority" "@method" "@path" "signature-agent")` and parameters `created, expires, keyid, tag, nonce` (no `alg`). §4's fallback did NOT fire: Cloudflare's verifier accepts the four-component list. Three measurements decided the form, and the third is the one nobody would have guessed: (a) the library emits and can only verify the sf-string spelling — for a component with parameters it hands the WHOLE header value to the base builder instead of the named member; (b) draft-05 marks sf-string LEGACY and prefers `Signature-Agent: sig1="https://…"` covered as `"signature-agent";key="sig1"`; (c) **draft-05's own Ed25519 vector for the preferred form, Appendix A.2.2, is internally inconsistent** — its published signature does not verify against the base it prints, and does verify against the same base with the member value UNQUOTED. A.2.1 and A.2.3, the two vectors with no dictionary member in them, are both self-consistent and both match our bytes exactly. So the draft-preferred form has three readings in the wild and no vector that settles which is right. Both forms are implemented in `botAuthCore.ts` behind one constant; the probe's D10 and D2b rows go RED the day either the library or the draft is corrected, which is when the decision should be re-run |
+| 7 | Header order/casing controllable via `onBeforeSendHeaders`? **Still open as of 2026-08-05, and now MEASURABLE for the first time** — until the mux there was no listener anywhere in `src/` to measure it against. What is known without a launch: the mux returns `requestHeaders` UNCHANGED when no handler contributes, so the no-op path is as close to the no-listener path as an installed listener can be, and it only ever ADDS names (a handler receives a frozen copy and returns additions, so it cannot hold the map it would need in order to delete or rewrite one). What is NOT known is whether Chromium re-serializes order or casing merely because a listener returned an object at all. The measurement is one launch with the listener and one without, capturing a request server-side at the probe on 8902 and diffing; it is owed and the command is in `docs/design/webbotauth.md`'s implementation report | Documented fingerprint residual, scoped to origins the human already chose to identify to (`webbotauth.md` §8.2) — which is why it is disclosable rather than blocking |
 
 None of these are asserted in the implementation. Where a behavior is unverified,
 the code either does not depend on it or says so in a comment.

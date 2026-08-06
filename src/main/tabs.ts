@@ -380,6 +380,34 @@ export class TabManager extends EventEmitter {
     return { here, carried };
   }
 
+  /**
+   * Which tab a raw `webContents` id belongs to, and what it is.
+   *
+   * The one question `onBeforeSendHeaders` can ask and cannot answer: it is
+   * handed a `webContentsId` and nothing else, and only this manager knows
+   * whether that renderer is an agent's tab or a human's, and which container
+   * it is in. `docs/design/webbotauth.md` §3 S3 is what needs it — a Web Bot
+   * Auth signature asserts "automated agent traffic", and asserting that over a
+   * human's tab is the anti-detect lie inverted.
+   *
+   * `null` for anything not a tab. Every caller reads null as "do not sign",
+   * so a request from the chrome renderer, from the vault window, or from a
+   * webContents that has already gone away is unsigned by the same path that
+   * makes an unwired resolver unsigned.
+   *
+   * Deliberately NOT on `TabInfo`. `agentOwned` is already there for the tab
+   * strip; this is a main-process lookup by a main-process id, and neither the
+   * renderer nor the agent has any business resolving one.
+   */
+  attribution(webContentsId: number): { tabId: TabId; agentOwned: boolean; container: ContainerId } | null {
+    for (const rec of this.tabs.values()) {
+      if (rec.view.webContents.isDestroyed()) continue;
+      if (rec.view.webContents.id !== webContentsId) continue;
+      return { tabId: rec.id, agentOwned: rec.agentOwned, container: rec.container };
+    }
+    return null;
+  }
+
   // -- internals ------------------------------------------------------------
 
   private wire(rec: TabRecord): void {

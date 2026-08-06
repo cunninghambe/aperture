@@ -1397,3 +1397,53 @@ the tier4 engine, not the shipped one**, and one of them is known to move:
 Until that ruling and the owed cohort, **no economics claim above may be
 restated as describing current `master`.** The precision claim is unchanged and
 still failing — tier5 is the attempted fix, not evidence of one.
+
+## Web Bot Auth — the §4 differential probe (2026-08-05)
+
+`node --experimental-strip-types bench/probes/webbotauth/probe.mjs` — **13/13
+GREEN**. Cloudflare's `web-bot-auth` package is depended on by that directory's
+own `package.json` and by nothing else; the product dependency set is unchanged
+and the acceptance battery diffs `package.json` to prove it.
+
+```
+web-bot-auth npm         0.1.3
+draft revision           draft-meunier-web-bot-auth-architecture-05 (2026-03-02)
+Signature-Agent form     sf-string (legacy)  —  Signature-Agent: "https://…"
+covered components       ("@authority" "@method" "@path" "signature-agent")
+parameters               created, expires, keyid, tag, nonce   (no alg)
+```
+
+What the thirteen rows establish, in the order they matter:
+
+- **Our leaf reproduces RFC 9421 B.2.6 byte for byte** — the signature base and
+  then the exact signature bytes. Ed25519 is deterministic (RFC 8032), so this
+  is an equality rather than a verify-roundtrip: a roundtrip shows a pair
+  agrees, byte equality shows what it agrees *on*. Same for the RFC 8037 A.3
+  thumbprint, and the library's `keyid` for the same key is the same string.
+- **Byte-identical to Cloudflare's signer** on the same request with the same
+  ordered parameter list: identical `@signature-params` line, identical
+  signature bytes.
+- **Interop measured in both directions.** Cloudflare's verifier accepts
+  Aperture's shipped wire form, so §4's ordered fallback to
+  `("@authority" "signature-agent")` did **not** fire; and our independently
+  written bench verifier accepts a signature Cloudflare's library produced.
+- **Why the legacy form ships, measured three ways.** The library emits it and
+  cannot verify the draft-preferred sf-dictionary form (for a component with
+  parameters it covers the whole header value instead of the named member).
+  draft-05 marks sf-string legacy. And **draft-05's own Ed25519 vector for the
+  preferred form, Appendix A.2.2, does not verify against the base it prints**
+  — it verifies against the same base with the dictionary member value
+  unquoted, while A.2.1 and A.2.3 are both self-consistent and both match our
+  bytes. Three readings of that form are in the wild and no vector settles it.
+  Both forms are implemented behind one constant, and rows D10 and D2b go RED
+  the day either the library or the draft is corrected, which is when §4's
+  decision procedure should be re-run.
+- **One divergence recorded rather than fixed:** the library's `validateNonce`
+  decodes with `atob`, so it refuses the base64url nonce the draft itself
+  specifies. It bites only on their SIGNING path — their verifier never reads
+  the nonce, which is why our base64url nonce is accepted end to end.
+
+**Not yet run, and owed:** the live legs. G33a-e and the queue #7 header-order
+measurement need a build and Aperture on 8817, which a scored cohort was
+holding. Commands are in `docs/design/webbotauth.md`'s implementation report;
+every leg's RED must be recorded before its green counts.

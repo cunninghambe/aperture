@@ -284,20 +284,35 @@ done — the size sweep ran):
   **`setContentProtection` vs capture on Windows 11** (the vault window
   currently asserts the favourable answer in a comment, which is exactly the
   class of claim this project's method section exists because of). Item #6
-  (`Input.insertText` fidelity) is closed by inspection; item #4 (webRequest
-  listener eviction) is moot until §7 lands and is then handled by
-  construction; item #3 (debugger detectability) is queued behind a trigger
+  (`Input.insertText` fidelity) is closed by inspection; **item #4 (webRequest
+  listener eviction) is CLOSED BY CONSTRUCTION** — `src/net/webRequestMux.ts`
+  is the one `onBeforeSendHeaders` registration in `src/` and
+  `test/botauth.test.ts` asserts that receiver-independently; item #7 (header
+  order/casing) now has a listener to measure it against and is owed one live
+  launch; item #3 (debugger detectability) is queued behind a trigger
   condition.
-- **§7 — Web Bot Auth.** Part 3 (`docs/design/webbotauth.md` + the Cloudflare
-  enrollment investigation) was marked LANDS NOW and has **not** been written.
-  Part 2 is the stage-C implementation: `src/net/botAuth.ts` (per-install
-  Ed25519, RFC 9421 signature base, `Signature`/`Signature-Input`/
-  `Signature-Agent`) routed through one multiplexed
-  `src/net/webRequestMux.ts`, signing only agent-attributable requests, off by
-  default. **The "register as a signed agent before 2026-09-15" goal is
-  killed** — that is Cloudflare's rollout date, not a registration cutoff, and
-  there is no sound custody story for a project key shipped inside every
-  install. The README now says this.
+- **§7 — Web Bot Auth. Part 3 written (`docs/design/webbotauth.md`), part 2
+  BUILT.** `src/net/botAuthCore.ts` (pure leaf: RFC 9421 canonicalization, RFC
+  7638/8037 thumbprints, config validation, the signing predicate),
+  `src/net/botAuth.ts` (keys, directory export, one mux handler) and
+  `src/net/webRequestMux.ts` (THE one `onBeforeSendHeaders` registration).
+  Two corrections to the wording this bullet used to carry, both decisions
+  rather than drift — `docs/design/webbotauth.md` §11 is the record. The
+  keypair is **per CONTAINER, not per install**: one key across containers
+  hands every allowlisted origin a cross-container correlator, which is the
+  exact thing the container work exists to prevent. The scope is **main-frame
+  documents in `agentOwned` tabs only, not subresources**: a subresource clause
+  re-opens a `fetch()` signature-minting oracle for page script on an
+  allowlisted origin. Signing is off unless a human writes
+  `userData/botauth.json`, and with no directory URL it is structurally off
+  rather than defaulted off, because an unverifiable `keyid` is a supercookie.
+  The agent surface is zero — no tool reads, writes or reports any of it, and
+  the allowlist is withheld as a targeting map. **The "register as a signed
+  agent before 2026-09-15" goal stays killed**, now corroborated against
+  Cloudflare's published policy rather than inferred: signed-agent enrollment
+  requires widespread-zone use, which one install per human fails per key.
+  Live verification (guards G33a-e, and queue #7's measurement) is the one part
+  still owed — it needs the ports a bench cohort is holding.
 - **§8 — two hygiene comments** (engine.ts's inert diff-seq burn; proxy.mjs's
   byte-symmetry argument, which tier1b §1 corrected). Ride-alongs on the first
   stage-C commit touching each file.
@@ -500,10 +515,17 @@ small job for whoever resumes.
 ### Next, in the owner's stated order
 1. Security & hardening session (Opus runs it from inside the repo; the
    built-in review needs a git root, which this checkout is).
-2. Web Bot Auth — RFC 9421 per-agent-session signing. `docs/design/tier2.md`
-   §7 killed the 2026-09-15 deadline framing (it is hosted operators', and
-   there is no custody story for a signing key in a client-distributed
-   browser); the capability is still worth building on its own terms.
+2. ~~Web Bot Auth — RFC 9421 signing.~~ **Built.** Scoped to what a client
+   browser can honestly claim: main-frame documents in agent-owned tabs, to
+   registrable domains and exact origins a human listed in
+   `userData/botauth.json`, with a per-container key. `docs/design/tier2.md`
+   §7 killed the 2026-09-15 deadline framing and `docs/design/webbotauth.md` §1
+   corroborated the kill against Cloudflare's published policy. **What is owed
+   is live verification, not code:** the G33a-e legs and queue #7's
+   header-order measurement need Aperture on 8817 and a build, and both were
+   held off while a scored cohort was running. The exact commands are in
+   `docs/design/webbotauth.md`'s implementation report, and every leg's RED
+   must be recorded before its green counts.
 3. The removal-side ordinal rebinding hazard (open-defects above) — it cost a
    preregistered primary in the head-to-head and has wire-level evidence.
 

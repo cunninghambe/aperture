@@ -23,8 +23,19 @@
  * guards are split by which launch they need:
  *
  *   --phase=allow (default) — Aperture launched `--seed-vault --seed-profile
- *                             --e2e-consent=allow --e2e-consent-delay-ms=1500`.
- *                             Runs G1-G15, G16-G27a, and G30-G32.
+ *                             --e2e-consent=allow --e2e-consent-delay-ms=1500
+ *                             --seed-botauth=bench/fixtures/botauth-dev-key.json`.
+ *                             Runs G1-G15, G16-G27a, G30-G32 and G33.
+ *                             `--seed-botauth` is not optional since 2026-08-05:
+ *                             the G33 block measures Web Bot Auth request
+ *                             signing, and G33b/c/d assert the ABSENCE of
+ *                             signatures — vacuously true against a build or a
+ *                             launch with no signing configured. They hard-fail
+ *                             when G33a (presence) is not green in the same run,
+ *                             so a forgotten flag reads as REDs rather than as a
+ *                             block of quiet passes. Signing raises no consent
+ *                             dialog, so this needs no new phase: its consent is
+ *                             a human editing a config file.
  *                             `--seed-profile` is not optional since 2026-08-05:
  *                             the G30 block exercises the PROFILE fill path,
  *                             which had none of the credential path's redaction
@@ -2405,6 +2416,411 @@ const beta = refFor('Beta action', 'button');
         ? `${tookLineD.trim()}   <-- LANDED ONE ROW OFF on the full-snapshot path`
         : '(no log line on the page — nothing landed)'),
   );
+}
+
+// ---------------------------------------------------------------------------
+// G33: Web Bot Auth — signing happens where it should, and NOWHERE ELSE
+// ---------------------------------------------------------------------------
+//
+// `docs/design/webbotauth.md` §9. Needs `--seed-botauth=bench/fixtures/botauth-dev-key.json`
+// on the launch, alongside the flags the credential guards already need.
+//
+// THE INSTRUMENT IS AS MUCH ON TRIAL AS THE FEATURE. Everything below is judged
+// by `bench/probes/webbotauth/verify.mjs` — a verifier written from RFC 9421
+// that shares no code with `src/net/`, because an implementation verified only
+// by itself has been verified of nothing. That verifier passes its own
+// acceptance (RFC 9421 B.2.6, plus three mutations rejected) before it may
+// judge anything, and G33e is the leg that proves it can still say no on the
+// two axes that matter: a tampered signature AND a stale one.
+//
+// THE VACUITY TRAP, HANDLED STRUCTURALLY. G33b, G33c and G33d assert the
+// ABSENCE of signatures, so against a pre-feature build — or a build whose
+// launch was missing the seed flag — they would all pass while measuring
+// nothing. Every one of them therefore hard-fails when G33a (presence) is not
+// green IN THIS RUN. That is the `G30-seed` pattern: a missing precondition
+// reads as RED, never as a block of quiet passes.
+{
+  const { createServer } = await import('node:http');
+  const { createPrivateKey, sign: edSign, randomBytes: rnd } = await import('node:crypto');
+  const { directoryIndex, selfTest, thumbprintOf, verifyRequest } = await import(
+    './probes/webbotauth/verify.mjs'
+  );
+
+  // The committed dev fixture. `--seed-botauth` is the only thing that reads
+  // it, it is labelled TEST KEY — NEVER AN IDENTITY in its own first field, and
+  // file config cannot reach it.
+  const DEV_JWK = JSON.parse(
+    readFileSync(join(ROOT, 'bench', 'fixtures', 'botauth-dev-key.json'), 'utf8'),
+  );
+  const DEV_PUBLIC = { kty: 'OKP', crv: 'Ed25519', x: DEV_JWK.x };
+  const DEV_THUMBPRINT = thumbprintOf(DEV_PUBLIC);
+  const KEYS = directoryIndex({ keys: [DEV_PUBLIC] });
+
+  // Deliberately a COPY of the shipped component list rather than an import,
+  // for the same reason `stripFormat` above is a copy: the bench must be able
+  // to fail when the product's copy changes.
+  const EXPECTED_COMPONENTS = '("@authority" "@method" "@path" "signature-agent")';
+  const EXPECTED_WINDOW = 300;
+
+  const seen = [];
+  let botSeq = 0;
+
+  function kindOf(path) {
+    if (path.startsWith('/page')) return 'document';
+    if (path.startsWith('/img')) return 'image';
+    if (path.startsWith('/api')) return 'fetch';
+    return 'other';
+  }
+
+  function handle(req, res) {
+    const path = req.url.split('?')[0];
+    const headers = Object.fromEntries(
+      Object.entries(req.headers).map(([k, v]) => [
+        k.toLowerCase(),
+        Array.isArray(v) ? v.join(', ') : v,
+      ]),
+    );
+
+    if (path === '/.well-known/http-message-signatures-directory') {
+      res.writeHead(200, {
+        'content-type': 'application/http-message-signatures-directory+json',
+      });
+      res.end(JSON.stringify({ keys: [DEV_PUBLIC] }));
+      return;
+    }
+
+    const signed = Boolean(headers['signature'] && headers['signature-input']);
+    const verdict = signed
+      ? verifyRequest({ method: req.method, target: req.url, scheme: 'http', headers }, KEYS)
+      : { ok: false, reason: 'no signature headers' };
+    const entry = {
+      seq: ++botSeq,
+      path,
+      host: headers['host'] ?? '',
+      kind: kindOf(path),
+      signed,
+      ok: Boolean(verdict.ok),
+      reason: verdict.reason ?? '',
+      keyid: verdict.keyid ?? '',
+      created: verdict.created ?? 0,
+      expires: verdict.expires ?? 0,
+      nonce: verdict.nonce ?? '',
+      components: (verdict.components ?? []).length ? `(${verdict.components.join(' ')})` : '',
+      agent: headers['signature-agent'] ?? '',
+      rawInput: headers['signature-input'] ?? '',
+      rawSig: headers['signature'] ?? '',
+    };
+    seen.push(entry);
+
+    if (path === '/img.png') {
+      // A 1x1 transparent GIF. The bytes are irrelevant; the REQUEST is the
+      // measurement.
+      res.writeHead(200, { 'content-type': 'image/gif' });
+      res.end(
+        Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'),
+      );
+      return;
+    }
+    if (path === '/api/ping') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+
+    // Every fixture page renders the WHOLE log, current request included, one
+    // line per request. The subresource legs need it: an <img> and a fetch()
+    // land after their document does, so their verdicts are read on the NEXT
+    // page load — which is what makes a `browser_snapshot` able to see them at
+    // all.
+    const lines = seen
+      .map(
+        (e) =>
+          `botauth: seq=${e.seq} path=${e.path} host=${e.host} kind=${e.kind} ` +
+          `signed=${e.signed ? 'yes' : 'no'} verified=${e.ok ? 'yes' : 'no'} ` +
+          `keyid=${e.keyid || '-'} window=${e.expires && e.created ? e.expires - e.created : '-'} ` +
+          `nonce=${e.nonce ? e.nonce.slice(0, 16) : '-'} comps=${e.components || '-'} ` +
+          `agent=${e.agent || '-'} reason=${e.reason.replace(/\s+/g, '_') || '-'}`,
+      )
+      .join('\n');
+
+    const extras =
+      path === '/page'
+        ? '<img src="/img.png" alt="subresource probe">' +
+          '<script>fetch("/api/ping").catch(function(){});' +
+          'window.__pop=function(){window.open("http://127.0.0.1:8902/page2");};</script>' +
+          '<button onclick="__pop()">Open the popup</button>'
+        : '';
+
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(
+      `<!doctype html><meta charset="utf-8"><title>botauth ${path}</title>` +
+        `<h1>botauth fixture ${path}</h1><pre>${lines}</pre>${extras}`,
+    );
+  }
+
+  // TWO LOOPBACK SOCKETS, ONE HANDLER. G33b's control is `http://localhost:8902`,
+  // and on Windows `localhost` resolves to ::1 before 127.0.0.1 — a server bound
+  // only to the IPv4 address would make G33b pass because the request never
+  // arrived, which is a vacuous green wearing the right colour. Binding both
+  // loopback addresses (and NOT 0.0.0.0, which would put this on the LAN) is
+  // what makes the control a real request that really carried no signature.
+  const servers = [];
+  for (const host of ['127.0.0.1', '::1']) {
+    try {
+      const s = createServer(handle);
+      await new Promise((resolve, reject) => {
+        s.once('error', reject);
+        s.listen(8902, host, resolve);
+      });
+      servers.push(s);
+    } catch (err) {
+      if (host === '127.0.0.1') {
+        check('G33-server', 'the bench verifier can listen on 127.0.0.1:8902', false, String(err));
+      }
+    }
+  }
+
+  try {
+    check(
+      'G33-instrument',
+      'the bench verifier passes its own acceptance before it judges anything',
+      (() => {
+        try {
+          return selfTest();
+        } catch {
+          return false;
+        }
+      })(),
+      'RFC 9421 B.2.6 rebuilt byte-exact from the wire, and three mutations rejected',
+    );
+
+    const opened = await call('browser_tabs', {
+      action: 'open',
+      url: 'http://127.0.0.1:8902/page',
+    });
+    const agentTab = (/opened (t\d+)/.exec(opened) ?? [, null])[1];
+    await sleep(1500);
+
+    // --- G33a: the presence leg, and the precondition for every leg below ----
+    const first = seen.find((e) => e.path === '/page' && e.kind === 'document');
+    await call('browser_navigate', {
+      action: 'goto',
+      url: 'http://127.0.0.1:8902/page?again=1',
+      tabId: agentTab,
+    });
+    await sleep(1200);
+    const second = seen.filter((e) => e.path === '/page' && e.kind === 'document')[1];
+
+    // Read the verdict off the PAGE as well as out of the server, because the
+    // guard must be able to fail when Aperture and the server disagree about
+    // what arrived.
+    const pageText = await call('browser_read', { tabId: agentTab });
+    const pageSaysSigned = /botauth: .*path=\/page .*signed=yes verified=yes/.test(pageText);
+
+    const g33a =
+      Boolean(first && second) &&
+      first.signed &&
+      first.ok &&
+      first.keyid === DEV_THUMBPRINT &&
+      first.expires - first.created === EXPECTED_WINDOW &&
+      first.components === EXPECTED_COMPONENTS &&
+      first.agent === '"http://127.0.0.1:8902"' &&
+      second.signed &&
+      second.ok &&
+      second.nonce !== '' &&
+      second.nonce !== first.nonce &&
+      pageSaysSigned;
+    check(
+      'G33a',
+      "an agent tab's main-frame request to an allowlisted origin is signed, verifies, and carries a fresh nonce each time",
+      g33a,
+      first
+        ? `keyid ${first.keyid} (fixture thumbprint ${DEV_THUMBPRINT}); ` +
+          `window ${first.expires - first.created}s; comps ${first.components || '(none)'}; ` +
+          `agent ${first.agent || '(none)'}; verdict ${first.reason}; ` +
+          `nonce#1 ${first.nonce.slice(0, 12)} nonce#2 ${(second?.nonce ?? '').slice(0, 12)}; ` +
+          `page agrees: ${pageSaysSigned}`
+        : 'NO DOCUMENT REQUEST REACHED THE VERIFIER at all. Is Aperture launched with ' +
+          '--seed-botauth=bench/fixtures/botauth-dev-key.json?',
+    );
+
+    /**
+     * The vacuity trap, as one function.
+     *
+     * An absence leg is only evidence when the presence leg is green in the
+     * SAME run: against a pre-feature build, or a launch missing the seed flag,
+     * "no signature headers arrived" is true of every request in the browser
+     * and says nothing at all about the predicate.
+     */
+    const requiresPresence = (id, claim, ok, detail) =>
+      check(
+        id,
+        claim,
+        g33a && ok,
+        g33a
+          ? detail
+          : 'HARD FAIL: G33a is not green in this run, so an ABSENCE assertion here would ' +
+              `be vacuous. ${detail}`,
+      );
+
+    // --- G33b: the same server, an origin that is NOT allowlisted -----------
+    await call('browser_navigate', {
+      action: 'goto',
+      url: 'http://localhost:8902/page',
+      tabId: agentTab,
+    });
+    await sleep(1200);
+    const control = seen.filter((e) => e.kind === 'document' && e.host.startsWith('localhost'));
+    requiresPresence(
+      'G33b',
+      'the SAME server on a non-allowlisted origin (localhost, not 127.0.0.1) gets no signature headers',
+      control.length > 0 && control.every((e) => !e.signed),
+      control.length === 0
+        ? 'NO REQUEST ARRIVED on the localhost origin — the control did not run, so it proves nothing'
+        : `${control.length} document request(s) on localhost: ` +
+          control.map((e) => `seq=${e.seq} signed=${e.signed ? 'YES' : 'no'}`).join(', '),
+    );
+
+    // --- G33c: subresources of an allowlisted page, asserted PER LEG --------
+    //
+    // Per leg, not in aggregate. A denylist spelling of the resourceType gate
+    // (`!== 'subFrame'`) signs both; the halfway forms (`!== 'image'`) sign one,
+    // and an aggregate assertion would report the same red for either.
+    const imgs = seen.filter((e) => e.kind === 'image');
+    const fetches = seen.filter((e) => e.kind === 'fetch');
+    requiresPresence(
+      'G33c-img',
+      'an <img> subresource request back to the allowlisted origin is UNSIGNED',
+      imgs.length > 0 && imgs.every((e) => !e.signed),
+      imgs.length === 0
+        ? 'NO IMAGE REQUEST ARRIVED — the leg did not run'
+        : `${imgs.length} image request(s): ` +
+          imgs.map((e) => `seq=${e.seq} signed=${e.signed ? 'YES' : 'no'}`).join(', '),
+    );
+    requiresPresence(
+      'G33c-fetch',
+      'a fetch() back to the allowlisted origin is UNSIGNED — the minting oracle stays closed',
+      fetches.length > 0 && fetches.every((e) => !e.signed),
+      fetches.length === 0
+        ? 'NO FETCH REQUEST ARRIVED — the leg did not run'
+        : `${fetches.length} fetch request(s): ` +
+          fetches.map((e) => `seq=${e.seq} signed=${e.signed ? 'YES' : 'no'}`).join(', '),
+    );
+
+    // --- G33d: a page-initiated popup is not the agent's tab ----------------
+    await call('browser_navigate', {
+      action: 'goto',
+      url: 'http://127.0.0.1:8902/page?pop=1',
+      tabId: agentTab,
+    });
+    await sleep(1200);
+    const beforePop = seen.length;
+    const popRef = refIn(
+      await call('browser_snapshot', { mode: 'full', tabId: agentTab }),
+      'Open the popup',
+      'button',
+    );
+    if (popRef) await call('browser_act', { action: 'click', ref: popRef });
+    await sleep(1500);
+    const popups = seen.slice(beforePop).filter((e) => e.path === '/page2');
+    requiresPresence(
+      'G33d',
+      'a window.open popup from an allowlisted page is UNSIGNED — agentOwned does not inherit',
+      popups.length > 0 && popups.every((e) => !e.signed),
+      popups.length === 0
+        ? `NO /page2 REQUEST ARRIVED (popRef ${popRef ?? 'not resolved'}) — the leg did not run`
+        : `${popups.length} popup document request(s): ` +
+          popups.map((e) => `seq=${e.seq} signed=${e.signed ? 'YES' : 'no'}`).join(', '),
+    );
+
+    // --- G33e: the verifier can say no, BOTH ways --------------------------
+    //
+    // Without this, G33a is a green of unknown value. Two legs, because an
+    // instrument can fail to reject in two independent ways and only one of
+    // them is about cryptography:
+    //
+    //   · TAMPERING — a mutated signature. Caught by the maths.
+    //   · STALENESS — a signature made with the REAL key an hour ago. Nothing
+    //     about "check the signature" reminds its author to read a clock, and a
+    //     verifier that only detects forgery accepts every replay.
+    {
+      let tamperRejected = false;
+      if (first?.rawSig) {
+        const bytes = Buffer.from(/=:(.*):$/.exec(first.rawSig)[1], 'base64');
+        bytes[0] ^= 0x01;
+        const verdict = verifyRequest(
+          {
+            method: 'GET',
+            target: '/page',
+            scheme: 'http',
+            headers: {
+              host: first.host,
+              'signature-agent': first.agent,
+              'signature-input': first.rawInput,
+              signature: `sig1=:${bytes.toString('base64')}:`,
+            },
+          },
+          KEYS,
+          first.created,
+        );
+        tamperRejected = !verdict.ok;
+      }
+
+      // A signature over the REAL key, correct in every way except its clock.
+      const devPrivate = createPrivateKey({ key: DEV_JWK, format: 'jwk' });
+      const agentValue = '"http://127.0.0.1:8902"';
+      const nonce = rnd(64).toString('base64url');
+      const mint = (created) => {
+        const paramsValue =
+          '("@authority" "@method" "@path" "signature-agent")' +
+          `;created=${created};expires=${created + 300}` +
+          `;keyid="${DEV_THUMBPRINT}";tag="web-bot-auth";nonce="${nonce}"`;
+        const base =
+          '"@authority": 127.0.0.1:8902\n"@method": GET\n"@path": /page\n' +
+          `"signature-agent": ${agentValue}\n"@signature-params": ${paramsValue}`;
+        const sig = edSign(null, Buffer.from(base, 'ascii'), devPrivate);
+        return {
+          method: 'GET',
+          target: '/page',
+          scheme: 'http',
+          headers: {
+            host: '127.0.0.1:8902',
+            'signature-agent': agentValue,
+            'signature-input': `sig1=${paramsValue}`,
+            signature: `sig1=:${sig.toString('base64')}:`,
+          },
+        };
+      };
+      const now = Math.floor(Date.now() / 1000);
+      const staleVerdict = verifyRequest(mint(now - 3600), KEYS);
+      // A CONTROL, so a verifier stubbed to reject everything cannot pass this
+      // leg. Same key, same components, same nonce, current window.
+      const freshVerdict = verifyRequest(mint(now), KEYS);
+
+      check(
+        'G33e-tamper',
+        'the bench verifier REJECTS a mutated copy of a signature it just accepted',
+        tamperRejected,
+        first?.rawSig
+          ? 'one bit flipped in the signature bytes'
+          : 'NO CAPTURED SIGNATURE to mutate — G33a did not produce one',
+      );
+      check(
+        'G33e-stale',
+        'the bench verifier REJECTS a REAL-key signature whose window closed an hour ago, and still accepts a fresh one',
+        !staleVerdict.ok && freshVerdict.ok,
+        `stale: ${staleVerdict.reason}; fresh control: ${freshVerdict.reason}`,
+      );
+    }
+
+    // Leave the browser as we found it.
+    for (const line of (await call('browser_tabs', { action: 'list' })).split('\n')) {
+      const m = /(t\d+)/.exec(line);
+      if (m && /8902/.test(line)) await call('browser_tabs', { action: 'close', tabId: m[1] });
+    }
+  } finally {
+    servers.forEach((s) => s.close());
+  }
 }
 
 // ---------------------------------------------------------------------------

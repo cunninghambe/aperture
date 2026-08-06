@@ -11,6 +11,7 @@ import { profiles } from '@vault/profileStore';
 import { vault } from '@vault/vault';
 import { revokeAllGrants } from './consent.js';
 import { clearAllNeedles, invalidate, setOriginScope } from '@core/snapshot/engine';
+import { installBotAuth, setAttributionResolver } from '../net/botAuth.js';
 import { flushTelemetry, initTelemetry, report } from '../telemetry/reporter.js';
 import { applyDarkMode, enableForceDark } from '@privacy/darkmode';
 
@@ -80,6 +81,16 @@ async function createWindow(): Promise<void> {
   // which redacts nothing, so it must not be reachable from a tool call.
   const manager = tabs;
   setOriginScope({ forTab: (tabId: string) => manager.originScope(tabId) });
+
+  // WHO OWNS THIS REQUEST — the same injection shape, with the asymmetry
+  // stated rather than left to be inferred.
+  //
+  // An unwired origin scope redacts NOTHING, which is catastrophic and is why
+  // the line above sits at construction. An unwired attribution resolver signs
+  // NOTHING, which is merely off. Signing fails SAFE unwired, and "the resolver
+  // answered null, so the request goes unsigned" is the rule on every path in
+  // `net/botAuth.ts` rather than a special case at this seam.
+  setAttributionResolver({ forWebContents: (id: number) => manager.attribution(id) });
 
   // Refs are invalidated on any navigation, including same-document ones,
   // because a pushState can rewrite the whole view.
@@ -172,6 +183,21 @@ app.whenReady().then(async () => {
   await installBlocker(containers.sessionFor(containers.defaultId()));
 
   await createWindow();
+
+  // Web Bot Auth (docs/design/webbotauth.md). Config read once, keys generated
+  // or loaded, directory exports written, one handler registered into the mux.
+  //
+  // HERE, and not earlier: the attribution resolver is wired inside
+  // `createWindow`, and keys must exist before the first request that could be
+  // signed rather than being made lazily on one. Before `startMcpServer`,
+  // because no agent-owned tab can exist until that is listening, and an
+  // agent-owned tab is the only kind whose traffic S3 lets us sign.
+  //
+  // Every failure inside is loud and none of them stop the browser: a config
+  // error must never be quieter than the feature it disables (§6).
+  await installBotAuth({
+    isEphemeral: (id: string) => containers.get(id)?.ephemeral ?? false,
+  });
 
   const mcp = await startMcpServer(() => tabs, () => win);
   await publishMcpConfig(mcp);
