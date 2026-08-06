@@ -1447,3 +1447,129 @@ What the thirteen rows establish, in the order they matter:
 measurement need a build and Aperture on 8817, which a scored cohort was
 holding. Commands are in `docs/design/webbotauth.md`'s implementation report;
 every leg's RED must be recorded before its green counts.
+
+
+---
+
+# Head-to-head, post-tier5 — 385 episodes, Sonnet 5 (2026-08-06)
+
+The cohort `tier5-ruling.md` §7 owed: does the positional-rebind fix work?
+`@playwright/mcp@0.0.78` pinned · 4 arms · 11 tasks · $97.17 · 0 harness
+faults · adjudication: `docs/design/h2h-post-tier5-evaluation.md`.
+
+Replaces the head-to-head block and the "Pending re-measurement" section
+(whose restatement ban this adjudication discharges).
+
+**Head-to-head vs Playwright MCP 0.0.78, post-tier5 — scored 2026-08-05/06,
+adjudicated in docs/design/h2h-post-tier5-evaluation.md (385 episodes,
+$97.17, harness `dfa962c3f89b4d53` byte-identical to the archived cohort,
+build `0916e30fb90b1c02` = tier5 + the 2026-08-05 security hardening, git
+`3828b64`, claude-sonnet-5).** This is the fresh cohort preregistered by
+tier5-ruling §7 (inheriting tier5.md §9), measured on the unchanged task
+set with the unchanged harness; the only treatment between the two cohorts
+is the engine build. The shipped report exits 7 (SHIM-SUSPECT:
+catalog-order — re-investigated, same fair-product-difference ruling as
+h2h-evaluation §1); the verdict is computed out of band with the suite's
+own stats code, the established precedent. **tier5 passed every clause of
+its preregistration; the tier5.1 remediation is not triggered; the §9.4
+claims freeze is lifted.**
+
+**Precision (the primary we lost, re-measured): the +0.2/run bound HOLDS
+and the sign reversed.** Pooled wrong-element delta −0.109 [−0.200,
+−0.036] (was +0.173 [0.018, 0.345] FAIL). **Zero landed wrong-element
+actions in all 220 Aperture episodes** — home wrong-el/run 0.540 → 0.000
+(diff), 0.760 → 0.000 (redump) — vs 0.240/run for sealed Playwright and
+0.320 for stock on the same home set (12 and 8 landed wrong clicks, the
+one-row-off signature formerly ours). The hazard did not disappear; its
+currency changed, as tier5 designed: agents still acted on stale refs 90
+times in 50 diff-arm home episodes (was 27 landed + 8 refused) and every
+one was refused loudly with a restatement, followed by recovery
+(queue-resync success 40% → 70%, twin-queues 50% → 90%). Mechanism
+predictions preregistered in tier5-ruling §7: wrong_choice at least halves
+— measured 27 → 0; refused-stale rises from 8 toward ~75 — measured 90;
+redump improves in step — measured. Caveats that travel with the number:
+the negative sign is partly the incumbent's own sampled wrong clicks
+(8 → 12 across cohorts); and zero landed-wrong is a measured result on
+fixtures purpose-built to stress re-rendering identical-row lists, not a
+structural guarantee.
+
+**Reliability (primary): the −10pp non-inferiority bound HOLDS — and now
+holds without the ruled cell.** +10.0pp [−0.3, +20.2] pooled; the CI
+touches zero, so non-inferiority only, no superiority claim. Sensitivity,
+mandatory beside any citation: the delta is carried by catalog-order
+(sealed 0/10, both aperture arms 10/10, +9.1pp of the +10.0); excluding it,
++1.0pp [−9.2, +11.2] — parity, with the bound still holding (the archived
+cohort straddled it there). Home set: 90% vs 88% (the incumbent's prior
+82-vs-76 lead on our own adversarial set is retired by measurement).
+Attribution, mandatory: diff − redump +0.0pp [−9.2, +9.2]; redump − sealed
++10.0pp [−0.3, +20.2] — **the product gap is engine/dialect (compact
+rendering; the catalog-order conversion), and no share of it may be
+attributed to the diff mechanism.** account-prefs remains at 0% in three
+arms and 1/10 in the fourth (case-sensitive predicate defect, deliberately
+unfixed to keep the task set byte-identical per §9.1.2; in the reliability
+pool intention-to-treat, excluded from cost claims by H11).
+
+**Economics (primary): the realistic-page claim stays licensed at its new,
+honestly worse number — and the small-page premium is gone.** Neutral-large
+**0.390× sealed Playwright's cost [0.338, 0.455]** (was 0.313× on the
+pre-tier5 engine) — worsened exactly as preregistered (predicted band
+~0.31–0.46×; failure was CI upper ≥ 0.5, measured 0.455). The entire
+worsening is journal-comment's warm-revisit expand, priced at exactly one
+extra full snapshot in 10/10 episodes (+$0.066/ep, +64% obs chars; per-task
+ratio still 0.660× [0.646, 0.674]). Home, reported beside it as always:
+**0.823× [0.693, 0.975] CHEAPER** (was 1.295× [1.043, 1.594] DEARER). The
+reversal is the death of the bookkeeping tax: aperture output tokens
+collapsed 6,285 → 2,131/ep (redump in step, 6,020 → 2,284), confined to the
+three queue tasks (all flipped to 0.73–0.86×; wizard/ledger flat at ~1.0×),
+with turns slightly up and obs bytes +3% — the generation-side re-derivation
+that silent wrong landings used to force is no longer generated; about a
+quarter of the ratio movement is the incumbent drifting +7.8% dearer,
+unattributed. Neutral-small null (0.977× [0.937, 1.019]), unchanged.
+Diff-vs-redump held diff-cheaper on every cost-claimable neutral fixture
+(H3\G7 in the wild). Disclosure pinned by the preregistration: both cohorts
+run a shared-tab-per-run protocol — Aperture's engine carries warm ref
+state across a run's episodes, the pw arms have none; journal-comment's
+expand cost is that asymmetry being paid for rather than hidden.
+
+**H10 (mechanism): printed CONFIRMED at 62.7% observation-byte share; the
+reading the rule cannot give: the pooled share crosses 50% only because of
+catalog-order** — the same cell that held it under 50% last cohort, from
+the other side (minus the cell: 33.3% pooled; neutral-large 43.4%, 49.1%
+without it). Where both arms solve the page, observation bytes are ~half
+the delta, the turn term runs modestly against Aperture (refusal recoveries
+and the warm-revisit expand buy real round-trips), and the clean isolation
+of the observation channel is diff/redump: 0.46× on neutral-large.
+
+**Affordance:** pw-stock 81.8% vs pw-sealed 76.4% pooled (Δ +5.5pp — under
+this cohort's CI half-width, so §7.4's demotion sentence is not triggered
+on this store; the archived cohort's +15.5pp finding stands on its own
+store and the direction is consistent). The catalog-order dividend repeats:
+stock 5/5 where sealed is 0/10 — the deployment-relevant incumbent number
+on that task is stock's 100%. Non-ref targeting in pw-stock: 0.04/episode.
+Any pw-stock claim carries "with code-execution, network-inspection and
+screenshot tools disabled" (§3.4, preregistered).
+
+**Scope, all mandatory:** one model (claude-sonnet-5, undated alias, with
+the SDK's haiku-4-5 auxiliary present identically in all four arms;
+cross-cohort behavioral drift in the pw cells — refused-stale 75 → 24,
+wrong clicks 8 → 12 — is visible and unattributable, which is why every
+primary is a within-cohort contrast); our fixtures (5 disclosed-adversarial
+home + 6 preregistered-neutral, synthetic, not live web; the older "13-task"
+label is 11 prompts, hash-unchanged across both cohorts); MCP mode only;
+`--pw-observation inline`; pw arms on branded Chrome 150 under
+`--pw-browser chrome` (pinned chromium-1232 cannot spawn on this machine;
+stamped in the cohort, still not printed by report() — obligation open);
+sealed pw arms `--codegen none` (C5-disclosed); `budgetTokens: 20000`
+injected on neutral-large for aperture arms (H6) while sealed pw
+advertises-and-refuses it (C3 — and the catalog cell again shows the model
+reaching for it, 10/10 episodes); `MAX_MCP_OUTPUT_TOKENS=50000` in all arms
+(C1), delivered-bytes witness fired zero times (C2b); shared-tab-per-run
+warm-state protocol, disclosed above; the measured build is tier5 plus the
+2026-08-05 security hardening — tier5's mechanism files are byte-unchanged
+since its landing and the result carries tier5's exact designed signature,
+but the build hash on every claim is `0916e30f…`, not the tier5 landing's.
+Wall-clock reported, never verdicted: sealed pw's browser-side time on home
+is 42.4s/ep median vs Aperture's 1.1s (upstreamMs), a real felt-latency gap
+the §2 boilerplate understates. Programme lineage: five archived cohorts
+precede this one; this is the second consecutive clean cohort (0 harness
+faults, 0 contaminated) on the byte-identical harness.

@@ -470,10 +470,10 @@ Replaces the head-to-head block and the "Pending re-measurement" section
 > Attribution, mandatory: diff − redump +0.0pp [−9.2, +9.2]; redump − sealed
 > +10.0pp [−0.3, +20.2] — **the product gap is engine/dialect (compact
 > rendering; the catalog-order conversion), and no share of it may be
-> attributed to the diff mechanism.** account-prefs remains 0/10 in three
-> arms (case-sensitive predicate defect, deliberately unfixed to keep the
-> task set byte-identical per §9.1.2; in the reliability pool
-> intention-to-treat, excluded from cost claims by H11).
+> attributed to the diff mechanism.** account-prefs remains at 0% in three
+> arms and 1/10 in the fourth (case-sensitive predicate defect, deliberately
+> unfixed to keep the task set byte-identical per §9.1.2; in the reliability
+> pool intention-to-treat, excluded from cost claims by H11).
 >
 > **Economics (primary): the realistic-page claim stays licensed at its new,
 > honestly worse number — and the small-page premium is gone.** Neutral-large
