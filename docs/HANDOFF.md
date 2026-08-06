@@ -1,34 +1,53 @@
 # Handoff
 
-State as of `1381e10` (head-to-head scored and adjudicated). If you are picking
-this up cold, read this file, then [`bench/RESULTS.md`](../bench/RESULTS.md),
-then the three adjudications in `docs/design/` (`wave3-evaluation.md`,
-`sweep-evaluation.md`, `h2h-evaluation.md`). **The adjudications outrank the
-raw reports** — three of the five scored stores are scored *out of band*
-because the suite's own guards correctly refuse to print a verdict on them.
+State as of `e3f8add`. If you are picking this up cold, read this file, then
+[`bench/RESULTS.md`](../bench/RESULTS.md), then the adjudications in
+`docs/design/`. **The adjudications outrank the raw reports** — most of the
+scored stores are scored *out of band*, because the suite's own guards
+correctly refuse to print a verdict on them.
+
+Reading order, decisive first:
+
+1. `h2h-post-tier5-evaluation.md` — the closing cohort. §7 is the
+   RESULTS.md-ready text, §8 the README-ready paragraph, §0 four framing
+   corrections that bind anyone citing it.
+2. `tier5-ruling.md` — the tripwire adjudication and §7's preregistration, the
+   terms the cohort above was judged against.
+3. `sink-closure-review-4.md` and `security.md` — the seven-class table, the
+   stopping criterion, and what must not be undone.
+4. `webbotauth.md` §12–§13 — what was built, what was verified live, what is
+   still owed.
+5. `h2h-evaluation.md`, `wave3-evaluation.md`, `sweep-evaluation.md` — the
+   archived cohorts, kept as history.
 
 ---
 
 ## Where this stands
 
 The browser runs, the MCP server works, `browser_act` closes the act-observe
-loop (click, type, clear, hover, scroll, key, select), and Claude Code can
-drive it end to end. The full test suite passes; `npm run typecheck` is clean.
+loop (click, type, clear, hover, scroll, key, select), Claude Code can drive it
+end to end, the vault fill path is wired behind a native consent dialog, and
+Web Bot Auth request signing is built and live-verified. The full test suite
+passes; `npm run typecheck` is clean.
 
 ```
-bench:fidelity form       GREEN   18/18 refs · 13 diffs + 1 forced resync · 0 wrong [N options] markers
-bench:fidelity rerender   GREEN   17/17 refs · 0 phantoms through full DOM teardowns
-bench:fidelity widgets    GREEN   6/6 refs · clicks, +checked/+expanded, shadow DOM, clock suppressed
-bench:fidelity biglist    GREEN   71/71 refs · 70 refs die and revive · size-cap resync fired
-bench:fidelity selects    GREEN   7/7 refs · 4 native selects + a custom ARIA combobox
-bench:guards              GREEN   11/11 refusals and retractions (1/11 on the pre-fix build)
-npm run bench             ok      6.6x–10.2x synthetic observation-token model
+bench:fidelity form         GREEN   18/18 refs · 13 diffs + 1 forced resync · 0 wrong [N options] markers
+bench:fidelity rerender     GREEN   17/17 refs · 0 phantoms through full DOM teardowns
+bench:fidelity widgets      GREEN   6/6 refs · clicks, +checked/+expanded, shadow DOM, clock suppressed
+bench:fidelity biglist      GREEN   71/71 refs · 70 refs die and revive · size-cap resync fired
+bench:fidelity selects      GREEN   7/7 refs · 4 native selects + a custom ARIA combobox
+bench:fidelity blindfields  GREEN   table cells, an href rewrite and a label morph, asserted from the stream alone
+bench:guards --phase=allow  GREEN   72/72 at artifact 4115dd9f… (webbotauth.md §13)
+npm run bench               ok      6.6x–10.2x synthetic observation-token model
 ```
 
-The diff design has now been measured end to end against a real competitor.
-**It won the cost primary and lost the precision primary.** The precision
-failure is a live correctness hazard in our engine, it is the top open defect,
-and it is not fixed.
+The diff design has been measured end to end against a real competitor, twice,
+on a byte-identical apparatus with one engine treatment between the cohorts.
+**It won the cost primary both times, lost the precision primary in the first,
+and passed it in the second.** The precision fix (`tier5`) was specified,
+preregistered and independently adjudicated before its numbers existed; the
+adjudication is `h2h-post-tier5-evaluation.md` and it closes the head-to-head
+programme as specified.
 
 ---
 
@@ -40,19 +59,37 @@ and it is not fixed.
 | Wave 2 — 251 ep, $37.34 | 7 bookkeeping-hard tasks | **PARITY**, but exclusion-conditional and fragile; the −5pp/"parity" vocabulary is now retired as unreachable at any affordable n |
 | Wave 3 — 230 ep, $76.91 | 3 positional-identity tasks + 2 canaries, post-P1 engine | **PASS**: no diff-bookkeeping penalty larger than 10pp in success or +0.4 wrong-element/run, n=105/arm. MDE ~23.5pp. Diff arm +4.4% dearer in dollars |
 | Size sweep Tier B — 54 ep, $9.88 | `cart-adjust`, 5 page-weight tiers, 1,116–38,081 chars | **One-sided no-crossover**: never significantly dearer, significantly cheaper from s3 (~10k chars) up, 19/39/43% at s3/s4/s5 |
-| Head-to-head — 385 ep, $104.53 | vs `@playwright/mcp@0.0.78`, 4 arms, 13 tasks | Cost **licensed** (0.31× [0.27, 0.36] on realistic-weight pages); reliability bound **holds but is carried by one task**; precision bound **FAILS** |
+| Head-to-head, pre-tier5 — 385 ep, $104.53 | vs `@playwright/mcp@0.0.78`, 4 arms, 11 prompts | Cost **licensed** (0.313× on realistic-weight pages, 1.295× DEARER on home); reliability bound **holds but is carried by one task**; precision bound **FAILS** (+0.173 [0.018, 0.345]) |
+| Head-to-head, post-tier5 — 385 ep, $97.17 | same harness byte-for-byte, build `0916e30f…`, only the engine changed | Precision bound **HOLDS and the sign reversed** (−0.109 [−0.200, −0.036]; zero landed wrong-element actions in 220 episodes); reliability **HOLDS, and now without the ruled cell** (+10.0pp [−0.3, +20.2]; minus catalog-order +1.0pp [−9.2, +11.2]); economics **0.390× [0.338, 0.455]** neutral-large, **0.823× [0.693, 0.975]** home, **0.977×** neutral-small |
 
 **Rules that bind every citation of these numbers:**
 
-- **Wave 2, wave 3 and the head-to-head are scored out of band.** Wave 2's
+- **Wave 2, wave 3 and both head-to-heads are scored out of band.** Wave 2's
   `report()` exits 3 (wedged episodes trip G3), wave 3's exits 3 (a 26-byte
-  engine validation error classified `other`), the h2h's exits 7 (SHIM-SUSPECT
-  on `catalog-order`). Every refusal was investigated and ruled; the rulings
-  are in the adjudications and the verdicts were recomputed there with the
-  suite's own stats code. A store that exits non-zero is not a faulted store —
-  read the ruling.
+  engine validation error classified `other`), both h2h stores exit 7
+  (SHIM-SUSPECT on `catalog-order`). Every refusal was investigated and ruled;
+  the rulings are in the adjudications and the verdicts were recomputed there
+  with the suite's own stats code. A store that exits non-zero is not a faulted
+  store — read the ruling.
 - **Never pool cohorts.** Different engine stamps, different task sets.
-  Cross-wave comparisons are directional narrative only, never CI'd.
+  Cross-wave comparisons are directional narrative only, never CI'd. This binds
+  the two head-to-head cohorts too: the archived pre-tier5 store
+  (`episodes.20260805T231456Z.jsonl`) is read for comparison and never
+  re-scored, never pooled.
+- **The model alias is undated**, so cross-cohort movements in *agent
+  behaviour* — "the incumbent got slightly worse", "its refused-stale count
+  fell 75 → 24" — are observations and never claims. Every primary is a
+  within-cohort contrast for this reason.
+- **The measured build is tier5 plus four security commits**, not "the
+  post-tier5 build". The attribution survives on three measured grounds
+  (h2h-post-tier5 §0.1) — tier5's own mechanism files are byte-unchanged since
+  its landing, the result carries tier5's designed signature, and the cost
+  movement is localized to the cells that mechanism lives in — but the hash on
+  every claim is `0916e30f…`.
+- **Both h2h cohorts run a shared-tab-per-run protocol.** Aperture's engine
+  carries warm ref state across a run's episodes; the pw arms have none. The
+  preregistration pinned this as a mandatory disclosure and the frozen report
+  cannot print it, so it travels with every economics number by hand.
 - **The size sweep's own printed band sentence is false for its own data**
   (`NO CLOSED BAND — every tier's CI straddles zero`, printed above a table
   where three of five CIs sit entirely below zero). Do not quote it; quote
@@ -63,63 +100,85 @@ and it is not fixed.
   Split by subset the sign flips (six tasks with zero voluntary observations:
   −4.1%; four with them: +20.9%). It was published twice before anyone split
   it. Pooling hid a sign change — this is the failure mode this programme keeps
-  catching its own coordinators in, most recently in the h2h brief (§0).
+  catching its own coordinators in, most recently in H10, which printed
+  MECHANISM CONFIRMED off one cell in the pool and NOT CONFIRMED off the same
+  cell one cohort earlier.
+
+---
+
+## What was closed, and what the closure costs
+
+### Removal-side ordinal rebinding — CLOSED, and the currency it was traded for
+
+**What it was.** A positional family (identical rows, no ids, no distinguishing
+accessible names) re-keyed **downward** when a member was removed. The
+restatement block retired only the *tail* refs and silently re-bound the rest
+to *positions*, so a plan captured against snapshot N executed one row off
+after any removal above it, silently, labels agreeing. The click **landed**.
+It cost the precision primary: +0.173/run [0.018, 0.345] against a
+preregistered +0.2 bound, 27 landed wrong-row clicks in 50 home episodes.
+
+**The fix.** `tier5`: a positional family's refs retire on *any* membership
+change, so the ref is dead rather than rebound and the act is refused. This is
+deliberately moving to Playwright's side of the silent-vs-loud tradeoff on this
+markup class.
+
+**The evidence it worked**, from the fresh cohort measured against §7 of
+`tier5-ruling.md` as written before any of it existed:
+
+| preregistered | measured |
+|---|---|
+| pooled wrong-element CI upper ≤ +0.2 | **−0.109 [−0.200, −0.036]** — holds, sign reversed |
+| diff-arm home `wrong_choice` (was 27) at least halves | **0** |
+| aperture refused-stale acts rise from 8 toward ~75 | **90** |
+| redump improves in step | **0 wrong-element too** — an engine-level fix and only an engine-level fix moves both arms |
+
+Zero landed wrong-element actions across all 220 Aperture episodes. Under the
+old home rate the probability of that by luck is e^(−27), and the re-dump arm
+replicates it independently.
+
+**What the closure costs, and it must be said in the same breath:**
+
+- **The hazard is still reached, constantly.** Agents acted on stale refs 90
+  times in 50 home episodes — 5.7/ep on the fixture built for it. The staleness
+  *attempt* rate rose (35 → 90) because a refusal invites a retry and each
+  retry is another refusal. What changed is that no attempt lands.
+- **Refusals buy round-trips.** The turn term now runs against Aperture (−0.7
+  to −1.2 turns/ep in the mechanism decomposition), and observation chars rose
+  3% on home — the gone-list tax, at the low end of what was predicted.
+- **Warm revisits pay an expand.** A positional family reappearing after
+  absence with exactly its old membership is now retired rather than revived,
+  so the consumer re-pays a collapse expand it used to skip. Measured at
+  +$0.066/ep on one fixture, in 10 of 10 episodes — the entire worsening of the
+  realistic-page economics from 0.313× to 0.390×. `tier5.1` ("same-set
+  reappearance revives") is prototyped and recorded in `tier5-ruling.md` §6,
+  and is **NOT owed**: its preregistered trigger did not fire, and landing it
+  would spend a RED-first cycle plus a fresh cohort to improve a claim that is
+  not at risk.
+- **Zero-landed-wrong is a measurement, not a guarantee.** It holds on fixtures
+  purpose-built to stress re-rendering identical-row lists, with one model.
+  Wrong-*current*-ref choices remain possible in principle in our dialect; this
+  store measured none in 220 episodes while agents on Playwright's dialect
+  landed 20.
+- **The negative sign is partly the incumbent's.** pw-sealed's own wrong clicks
+  rose 8 → 12 across cohorts under the undated alias. The durable claim is
+  Aperture's zero, not Playwright's 0.24.
 
 ---
 
 ## Open defects, with their evidence
 
-### 1. Removal-side ordinal rebinding — the headline, and it lost a primary
-
-**What.** A positional family (identical rows, no ids, no distinguishing
-accessible names) re-keys **downward** when a member is removed. The
-restatement block retires only the *tail* refs (`! e2 replaced (gone: e57
-e58)`) and silently re-binds e3–e16 to *positions*: the same `e10` means "the
-4th row's Reject" before and after, whatever submission now sits 4th.
-
-**Consequence.** A plan captured against snapshot N executes one row off after
-any removal above it, silently, labels agreeing. The click **lands**.
-Playwright cannot make this mistake land — its refs are per-snapshot and a
-stale one is refused — so the same underlying staleness pays out in the
-opposite currency: **Aperture executes stale plans; Playwright refuses them.**
-
-**Evidence.** h2h-evaluation §2. Pooled wrong-element +0.173/run [0.018, 0.345]
-against a preregistered +0.2 bound → **BOUND FAILS**; +0.380 [0.060, 0.740] on
-the home set, where all of it lives. 27 landed wrong-row clicks (Aperture-diff)
-vs 8 (pw-sealed), while pw-sealed logged 75 refused dead-ref acts, 9× ours. The
-decomposition attributes it to the engine, **not** the diff mechanism
-(diff − redump −0.10 [−0.36, +0.15]; redump − sealed +0.27 [0.08, 0.49]). The
-wrong rejects cluster exactly on the rows that *slid into* the 5th/9th/13th
-positions after the first removal — identical sequences across runs.
-
-**Status of the surrounding work.** tier3 §3.1 recorded the rebinding gap.
-tier4 §1 closed only the **growth** side (a positional family that gains a
-member escalates to a full `replace`). **The removal side is live.**
-
-**Candidate fixes** (h2h §2.3): escalate positional-family *shrink* the way
-growth escalates, or retire-and-reissue the whole family's refs on any
-membership change. Both trade landed-wrong for refused-stale — deliberately
-moving to Playwright's side of the silent-vs-loud tradeoff on this markup
-class. That is an engine decision for a stage-C window and a **fresh cohort**;
-nothing in the existing store can be re-scored under it.
-
-**Domain honesty, both directions.** The home fixtures were *built* to produce
-this (disclosed adversarial); wrong-element is 0.000 on every neutral fixture
-with realistic markup. So the hazard's measured domain is re-rendering
-same-label lists — queues, tables, feeds — real but not universal. And
-pw-sealed also beat both Aperture arms on home-set *success* (82% vs 76%/70%):
-on the fixtures we designed to break our own bookkeeping, the incumbent held up
-better than we did, on our own sealed surface.
-
-### 2. `identity_mismatch` cannot fire on identical-label rows
+### 1. `identity_mismatch` cannot fire on identical-label rows
 
 The detector compares labels; the queue rows are identical by construction, so
 a rebound ref lands on a same-labelled button and `labelsAgree` passes. Zero
-`identity_mismatch` in 385 episodes is a **detector limitation, not an absence
-of the hazard** — `wrong_choice` bundles the rebind route there. Never cite the
-zero as evidence. (h2h §0.6, obligation §8.6.)
+`identity_mismatch` across both 385-episode cohorts is a **detector limitation,
+not an absence of the hazard** — `wrong_choice` is where the rebind route lands.
+Never cite the zero as evidence, in either direction. The claim that *is*
+licensed post-tier5 rests on `wrong_choice` going to zero while refused-stale
+acts rose to 90, not on this detector. (h2h §0.6, obligation §8.6.)
 
-### 3. Replace-op elision can hide a changed survivor
+### 2. Replace-op elision can hide a changed survivor
 
 A replace subtree renders collapsed. A surviving ref in the elided tail whose
 *content changed in the same re-render* goes stale in the model with no
@@ -128,14 +187,14 @@ fixture constructs this; it is the most plausible remaining fidelity hole.
 tier2 §1 (expand `add`/`replace` subtrees, `expand: false` → `true` at
 render.ts ~410 and ~433) is the ruled fix and has **not** landed.
 
-### 4. `~ eN "A"` is ambiguous by format
+### 3. `~ eN "A"` is ambiguous by format
 
 One quoted string could be a name change or a text change; no reader, model or
 mechanical, can tell. Harmless today because name and text co-change for the
 nodes that emit it, but the format owes a disambiguator. Deliberately deferred
 (tier2 §10) rather than forced through a wire-format change mid-backlog.
 
-### 5. `inert`, `pointer-events: none`, and small modal dialogs
+### 4. `inert`, `pointer-events: none`, and small modal dialogs
 
 `statesOf` consults `:disabled` only; the `select` handler refuses on
 `isDisabled` only; `resolveRef`'s hit-test catches a *covering* overlay but not
@@ -146,7 +205,7 @@ and a `pointer-events: none` target hit-tests to whatever is beneath it,
 producing an obstruction error naming an innocent bystander. Every one is the
 agent acting where a human demonstrably cannot. Spec: tier2 §5.
 
-### 6. Input-witness (W1) residuals
+### 5. Input-witness (W1) residuals
 
 W1 now covers scroll and key as well as element-targeted acts (tier3 §1.3,
 closing the Gate-2 open item), and its `unknown`/`landed`/`lost` tallies are
@@ -163,7 +222,7 @@ Related loose thread, still on the books: the once-in-~450-acts `ok click e6`
 that never reached the button (wave 1), unreproduced in three cold starts. W1
 is the mechanism that would now catch it; nothing has re-observed it.
 
-### 7. Benchmark and harness defects found by the adjudications
+### 6. Benchmark and harness defects found by the adjudications
 
 - **`crossoverBand` (bench/size.mjs:1464–1495) prints a false sentence** for
   the one band shape reality produced. `--dry`'s four test cases enumerate
@@ -181,14 +240,27 @@ is the mechanism that would now catch it; nothing has re-observed it.
   vs 4,268 measured). Cite the one-regressor description (slope 8.1×10⁻⁷
   $/char, R² 0.908) or nothing; never "the prefix costs X".
 - **H10's mechanism guard pools failure-loop cells** into a mechanism share and
-  prices the turn term at the Aperture arm's per-turn context. That is why it
-  printed `NOT CONFIRMED` at 46.7% observation-byte share when the true figure
-  where the claim lives is 66–81%. Fix spec: h2h §8.4.
+  prices the turn term at the Aperture arm's per-turn context. **It has now
+  been wrong in both directions off the same single cell**: `NOT CONFIRMED` at
+  46.7% pre-tier5 (80.6% without catalog-order), `MECHANISM CONFIRMED` at 62.7%
+  post-tier5 (33.3% without it). Neither printed verdict is a licensed reading.
+  Where both arms solve the page, observation bytes are ~half the cost delta;
+  the clean isolation is the diff/redump ratio, 0.46× on neutral-large. Fix
+  spec: h2h §8.4. It stayed unfixed on purpose — the harness was frozen
+  byte-identical so the two cohorts stayed comparable.
 - **`account-prefs` has a case-sensitive predicate defect** — agents completed
   the task, the page said `digest Weekly`, the predicate wanted `weekly`. Every
   arm "failed" it. Symmetric, so it moves the headline by one episode; it is
-  **not** a capability finding and must never be quoted as one. Fix severs the
-  cohort. (h2h §0.4, obligation §8.3.)
+  **not** a capability finding and must never be quoted as one. It was left
+  broken deliberately so the post-tier5 cohort ran a byte-identical task set;
+  **that constraint is now discharged and the fix is unblocked** for whenever a
+  next cohort exists (it severs the store). Note that an adversarial reader can
+  point at this cell to fire §7's economics-failure clause literally — diff
+  $0.1502 vs redump $0.1357 — and `h2h-post-tier5-evaluation.md` §1.3 rules it
+  does not fire, on three evidential grounds: the same inequality with the same
+  margin exists in the archived pre-tier5 store, tier5's cost on this fixture is
+  ±12 chars, and H11 excludes a both-arms-under-50% cell from every cost claim
+  in either direction. Read §1.3 before re-opening it.
 - **`report()` never prints `pwBrowserOverride`**, despite the harness comment
   promising it does. Every pw episode ran branded Chrome 150.0.7871.187, not
   the pinned chromium-1232 (which cannot spawn on this machine —
@@ -196,7 +268,7 @@ is the mechanism that would now catch it; nothing has re-observed it.
   pinned build that never ran. Scoring integrity is unaffected; the disclosure
   is mandatory. (h2h §0.5, obligation §8.1.)
 
-### 8. Standing gaps in what the benches can see
+### 7. Standing gaps in what the benches can see
 
 - **Structure and position are not part of "faithful".** The fidelity bench
   verifies existence + role + label + value + states. A stream that scrambled
@@ -207,7 +279,7 @@ is the mechanism that would now catch it; nothing has re-observed it.
 - **iframes** are claimed by the design and exercised by no benchmark or test.
 - **The obstruction gate is exercised only by `bench:guards`** (G7a/G7b); no
   fidelity scenario raises a modal, so a hit-test regression would slip past
-  the standing five.
+  the standing six.
 - **`[N options]` staleness is measurable but only on the guard fixture** — no
   fidelity scenario contains a dependent select.
 - **Shadow-root focus is invisible to the walker** (`document.activeElement` is
@@ -216,48 +288,185 @@ is the mechanism that would now catch it; nothing has re-observed it.
 - **Equal-size same-walk family churn is undetectable in principle** at the key
   level — see the deferred backlog.
 
+### 8. Security — the two classes with no author-independent sabotage row
+
+The redaction programme is closed against a criterion that can be failed (below,
+"The security programme"), and two of its seven rows have **not** been put
+through the criterion's third clause:
+
+- **Row C, alphabet** — walk-time `stripFormat`, one `redactUrl` composing
+  `scrubUrlish`, `canonicalNeedle`. Only the builder's own sabotage row exists.
+  Part of the class's repair is by construction (`redactFreeText` has no
+  `marker` parameter, so "right marker, wrong scrub" is a compile error), which
+  is stronger than a row — but that is an argument, not a measurement.
+- **Row D, parity** — `urlsurfaces.test.ts` over all three page-influenced
+  arguments of `routeCapture`. F-G was itself an independent finding *about*
+  this guard, which is evidence it was narrow rather than evidence it is now
+  wide.
+
+Everything known about C and D is that they catch the instance they were
+written from, which is exactly the standard the fourth gate measured to be
+insufficient. **This is the first thing a fifth reviewer should point at**, and
+the job is constructing those two rows — not inventing a sixteenth attack.
+
+Disclosed residuals, none of them oversights:
+
+- **A short all-digit sensitive value on a *carried* origin is not scrubbed
+  there.** A one-time code, a 6–8 digit national ID, account number or salary is
+  registered like any other needle but matched only on the origin it was filled
+  into. On a carried origin nothing distinguishes those digits from the page's
+  own order number; a marker that is sometimes a lie is worse than coverage
+  that is sometimes absent. Both directions of that bound are guarded (one leg
+  fails on over-redaction, one on under-redaction).
+- **Page-side transformation defeats substring matching and always will** —
+  base64, reversal, one character per element. Documented as unclosable; it is
+  not a mechanism class.
+- **The TTL boundary** — ten minutes, after which copies the page made go clear.
+  Named as a member of the lifetime class, guarded by the lifetime invariant.
+- **The vault window runs in the browser process**, not its own low-privilege
+  OS account. Sound against the threat that matters (a hostile page steering the
+  agent), not sound against local code execution as the same user.
+
 ### 9. Product surfaces not finished
 
-- **Vault MCP fill path** — refuses deliberately (`fill refused: the vault fill
-  path is not yet wired in this build`). Unblocked since the consent dialog
-  exists. tier2 §6 sequences the WebAuthn probe ahead of its design on purpose:
-  if Electron cannot host a platform authenticator, passkeys become a
-  Chromium-patch project and the vault roadmap stays password-primary.
 - **Multi-select is replace-only.** Adding to an existing selection is not
   expressible; the result says so out loud rather than implying otherwise.
 - **Optgroups are passive** — shown in listings and errors, never matched.
   `"group > label"` queries are deferred, so two same-labelled options in
   different groups are distinguishable only by value.
-- **Per-container fingerprint derivation is not applied** — the seed exists and
-  is stable, nothing derives from it yet.
+- **Per-container fingerprint derivation is not applied** — the seed exists, is
+  stable, and is written into every container record; nothing derives from it
+  yet (verified: `fingerprintSeed` has no reader in `src/`).
 - **Attachments**: multi-upload forms need the ref→node bridge.
 - **The Notion API path is unverified** and falls back to disk.
+- **Passkeys are blocked on a probe, not on design.** tier2 §6 sequences the
+  WebAuthn platform-authenticator probe first on purpose: if Electron cannot
+  host one, passkeys become a Chromium-patch project and the vault roadmap stays
+  password-primary.
 
 ---
 
-## Obligations created by the h2h adjudication (§8) — no code was written for any of these
+## The security programme — what it is, and what must not be undone
 
-1. **`report()` must print the browser override** — surface `pwBrowserOverride`
+Fifteen findings across four rounds, and the count never bent: read found 0,
+probe 4, fixing 5, gate 7, fix 9, gate 11, fix 13, gate 15. "No more findings"
+is therefore the wrong criterion — unfalsifiable, and wrong four times. Sorted
+by **mechanism** rather than by surface, the findings collapse to seven classes,
+each with a guard — and two of them additionally closed **by construction**,
+where the wrong call is now a compile error rather than a reviewable mistake
+(`redactFreeText` lost its `marker` parameter; `registerNeedles` returns what it
+added). The table is in `security.md`; do not restate the programme as a count
+of sinks.
+
+**The criterion, and it can be failed:**
+
+> Every mechanism has a guard that fails when that mechanism regresses; each
+> guard has been shown to fail by sabotage; and **the sabotage row is an
+> instance of the class that the guard's author did not have in hand** —
+> equivalently, someone other than the guard's author picks the row.
+
+The third clause is the whole difference, and it was earned by measurement, not
+argument: the fourth gate re-applied two guards' recorded rows (both red, as
+claimed), then wrote its own row for each — **both went green**. Twice more,
+satisfying the clause *changed* a guard rather than confirming it (rows E and
+G), and in both cases the author-independent row was green on the first attempt
+and the fix was one line of the guard.
+
+**What a future session must not undo** (`sink-closure-review-4.md` §8). Each
+exists because a specific measured leak came through it:
+
+1. **Needles survive navigation.** `invalidate` must not clear them again. The
+   navigation is how the value arrives somewhere the agent reads.
+2. **Needles are keyed by origin, and a tab's scope includes what it carries** —
+   its opener's whole scope and every origin it has left. Coverage follows the
+   value, not the tab's location.
+3. **The strip happens at walk time.** `walker.ts` must hand the redactor the
+   same bytes `quote()` will emit. Move it back downstream and one invisible
+   character reopens everything.
+4. **One `redactUrl`, and `redactFreeText` has no marker parameter.** Restoring
+   that parameter makes "right marker, wrong scrub" spellable again.
+5. **Both fill paths arm needles before the write** — and a third one must too.
+6. **`needlesFor` and `scrubbablesFor` are not exported.** The store returns
+   scrubbed text and a boolean; never a value.
+7. **The marker is a claim about a match, not about a location.** It appears on
+   origins the value was never filled into, and it must stay true there.
+
+**What the criterion does not claim.** It does not claim there is no sixteenth
+finding. It claims something narrower and checkable: a sixteenth finding that is
+an instance of A–G fails a guard, and one that is not is an **eighth mechanism**
+— which is the thing to report, because it is the only kind of finding that
+moves the count that matters.
+
+---
+
+## Still owed
+
+### Web Bot Auth
+
+Built, merged, and live-verified (`webbotauth.md` §13): 72/72 green with the
+feature present at artifact `4115dd9f…`, and 66/72 with the request mux
+uninstalled — red on exactly the six named legs, including the three *absence*
+guards, which are wired to hard-fail rather than pass vacuously when nothing
+signs anywhere. Both artifact hashes are recorded, and the ordering deviation
+(green run first, to establish the harness before a red could mean anything) is
+recorded with it. What remains:
+
+1. **§12.5 step 3 — the two live-only sabotage rows.** `installMux(
+   session.defaultSession)` in `containers.harden()`, and window-open children
+   inheriting `agentOwned` from their opener in `tabs.ts`. The first is the
+   sharper one: **every unit test stays green while nothing reaches the wire.**
+   The second must fail twice, because the same keystroke silently widens
+   `browser_capture`'s refusal boundary.
+2. **Verification queue #7 — header order and casing** under a registered
+   `onBeforeSendHeaders`. It is a diff of two launches (mux commented out, then
+   restored) capturing a request at the 8902 probe. Write the result into
+   `security.md`'s queue row **whatever it shows**. What is known without a
+   launch bounds the residual rather than closing it: the mux returns
+   `requestHeaders` unchanged when no handler contributes, and only ever adds
+   names. What is not known is whether Chromium re-serializes order or casing
+   merely because a listener returned an object at all.
+
+### Security
+
+3. **Author-independent sabotage rows for classes C and D** (defect 8 above).
+
+### Harness obligations, carried forward verbatim — no code was written for any of these
+
+The harness was frozen byte-identical so the two head-to-head cohorts stayed
+comparable, and it stayed frozen. That freeze is now over.
+
+4. **`report()` must print the browser override** — surface `pwBrowserOverride`
    from the cohort sidecar. H0's promise is currently kept only by the
    preflight.
-2. **A SHIM-SUSPECT ruling acknowledgement** — a `--ruling <doc>` path letting
+5. **A SHIM-SUSPECT ruling acknowledgement** — a `--ruling <doc>` path letting
    `--report` exit 0 while printing both the flag and the ruling reference, so
-   an adjudicated store stops reading as a faulted one forever.
-3. **`account-prefs` predicate case-normalizes** (`String(v).toLowerCase()` at
-   the fixture's state fn). Severs the cohort; next run only.
-4. **H10 hardening** — print the pooled share alongside minus-flagged-cells
+   an adjudicated store stops reading as a faulted one forever. Until it
+   exists, exit 7 is the shipped suite's honest posture and both h2h stores
+   read as faulted forever.
+6. **`account-prefs` predicate case-normalizes** (`String(v).toLowerCase()` at
+   the fixture's state fn). Severs the cohort; next run only. **Now unblocked** —
+   the byte-identical-task-set constraint was discharged with the cohort.
+7. **H10 hardening** — print the pooled share alongside minus-flagged-cells
    (any SHIM-SUSPECT or H11 cell), and price the turn term at each arm's own
    per-turn context rather than the Aperture arm's.
-5. **§2 wall-clock boilerplate** amended to cite the measured `upstreamMs`
+8. **§2 wall-clock boilerplate** amended to cite the measured `upstreamMs`
    split instead of attributing the whole gap to queueing noise. The gap is
-   real and attributable: pw-sealed ~40s/ep of browser-side time on home vs
-   Aperture's ~1.1s.
-6. **§5.2 vocabulary note** — document that `identity_mismatch` is unreachable
+   real and attributable: sealed pw's browser-side time on home is 42.4s/ep
+   median vs Aperture's 1.1s.
+9. **§5.2 vocabulary note** — document that `identity_mismatch` is unreachable
    on identical-label rows and that `wrong_choice` there bundles the rebind
    hazard.
-7. **Engine, stage-C: the removal-side rebinding fix** (defect 1 above),
-   measured by a fresh cohort on an unchanged task set before the precision
-   sentence can be retired.
+10. **The report must print the tab-policy / warm-revisit disclosure** that
+    `tier5-ruling.md` §7 pinned. `h2h-post-tier5-evaluation.md` §4.2 carries it
+    meanwhile, by hand.
+
+**Not owed, deliberately:** `tier5.1` ("same-set reappearance revives"). Its
+preregistered trigger did not fire, its entire value at current prices is
++$0.066/ep on one fixture's warm revisits while that fixture's ratio is already
+licensed at 0.660×, and landing it costs a RED-first cycle plus a fresh cohort
+to improve a claim that is not at risk. Prototyped and recorded in
+`tier5-ruling.md` §6; available if the identity-tier work (radio `name`-attr
+keying, §6's separate note) ever gets its own tier.
 
 ---
 
@@ -268,7 +477,7 @@ done — the size sweep ran):
 
 - **§1 — expand `add`/`replace` op subtrees in diffs** (stage C). Ruled DO IT;
   `expand: false` is still hardcoded at both render sites. This is also the fix
-  for defect 3 and retires the `finder-cheapest` collapse cost.
+  for defect 2 and retires the `finder-cheapest` collapse cost.
 - **§2 — sharpen `streamAssert`** to `streamAssert(diffStream, acts)` so
   `queue-positional`'s assertion actually discriminates positional from
   content-based keying (stage C).
@@ -277,7 +486,7 @@ done — the size sweep ran):
   `page.ts`. security.md records four; the `select` handler made it five, which
   is the argument for the item: a construction does not need re-making every
   time a handler lands.
-- **§5 — `inert` / `pointer-events: none` / small modal dialogs** (defect 5).
+- **§5 — `inert` / `pointer-events: none` / small modal dialogs** (defect 4).
 - **§6 — the security verification queue.** Two probes are real work and
   neither has run: **WebAuthn platform authenticator in Electron** (ranked
   first — it decides whether passkeys are reachable at all) and
@@ -287,32 +496,32 @@ done — the size sweep ran):
   (`Input.insertText` fidelity) is closed by inspection; **item #4 (webRequest
   listener eviction) is CLOSED BY CONSTRUCTION** — `src/net/webRequestMux.ts`
   is the one `onBeforeSendHeaders` registration in `src/` and
-  `test/botauth.test.ts` asserts that receiver-independently; item #7 (header
-  order/casing) now has a listener to measure it against and is owed one live
-  launch; item #3 (debugger detectability) is queued behind a trigger
-  condition.
-- **§7 — Web Bot Auth. Part 3 written (`docs/design/webbotauth.md`), part 2
-  BUILT.** `src/net/botAuthCore.ts` (pure leaf: RFC 9421 canonicalization, RFC
-  7638/8037 thumbprints, config validation, the signing predicate),
-  `src/net/botAuth.ts` (keys, directory export, one mux handler) and
-  `src/net/webRequestMux.ts` (THE one `onBeforeSendHeaders` registration).
-  Two corrections to the wording this bullet used to carry, both decisions
-  rather than drift — `docs/design/webbotauth.md` §11 is the record. The
-  keypair is **per CONTAINER, not per install**: one key across containers
-  hands every allowlisted origin a cross-container correlator, which is the
-  exact thing the container work exists to prevent. The scope is **main-frame
-  documents in `agentOwned` tabs only, not subresources**: a subresource clause
+  `test/botauth.test.ts` asserts that receiver-independently; **item #8
+  (`Signature-Agent` structured-field form) is RESOLVED** by the differential
+  probe, 13/13, with the library version and draft revision pinned; item #7
+  (header order/casing) is owed one two-launch measurement (see "Still owed");
+  item #3 (debugger detectability) is queued behind a trigger condition.
+- **§7 — Web Bot Auth. DONE and live-verified.** `src/net/botAuthCore.ts` (pure
+  leaf: RFC 9421 canonicalization, RFC 7638/8037 thumbprints, config
+  validation, the signing predicate), `src/net/botAuth.ts` (keys, directory
+  export, one mux handler) and `src/net/webRequestMux.ts` (THE one
+  `onBeforeSendHeaders` registration). Two design decisions worth not
+  re-litigating, recorded in `webbotauth.md` §11: the keypair is **per
+  CONTAINER, not per install** — one key across containers hands every
+  allowlisted origin a cross-container correlator, the exact thing the
+  container work exists to prevent — and the scope is **main-frame documents in
+  `agentOwned` tabs only, not subresources**, because a subresource clause
   re-opens a `fetch()` signature-minting oracle for page script on an
   allowlisted origin. Signing is off unless a human writes
   `userData/botauth.json`, and with no directory URL it is structurally off
   rather than defaulted off, because an unverifiable `keyid` is a supercookie.
   The agent surface is zero — no tool reads, writes or reports any of it, and
   the allowlist is withheld as a targeting map. **The "register as a signed
-  agent before 2026-09-15" goal stays killed**, now corroborated against
+  agent before 2026-09-15" goal stays killed**, corroborated against
   Cloudflare's published policy rather than inferred: signed-agent enrollment
-  requires widespread-zone use, which one install per human fails per key.
-  Live verification (guards G33a-e, and queue #7's measurement) is the one part
-  still owed — it needs the ports a bench cohort is holding.
+  requires widespread-zone use, which one install per human fails per key. What
+  is still owed is in "Still owed" above — two live sabotage rows and queue #7,
+  not code.
 - **§8 — two hygiene comments** (engine.ts's inert diff-seq burn; proxy.mjs's
   byte-symmetry argument, which tier1b §1 corrected). Ride-alongs on the first
   stage-C commit touching each file.
@@ -332,6 +541,10 @@ done — the size sweep ran):
   s1–s2 nulls cap it at +10–20% of episode cost but neither confirm nor refute
   it. Resolving a ~5% effect there needs ~100 episodes/arm **or** the
   `modelUsage` token-split field, whichever is cheaper. The field is cheaper.
+  Post-tier5 this is **retired for the home set** — the 1.295× DEARER became
+  0.823× CHEAPER when the bookkeeping tax died with the defect — and **stays
+  live for neutral-small**, which is 0.977× [0.937, 1.019], a null in both
+  cohorts.
 - **P2 equal-size same-walk family churn.** A positional family that loses one
   member and gains another in the same walk is **undetectable in principle** at
   the key level (`added` stays false, membership size is unchanged), so no
@@ -362,11 +575,11 @@ npx http-server test/fixtures -p 8899 -c-1 --silent &
 npx electron . > /tmp/ap.log 2>&1 &
 sleep 15
 TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
-node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects
+node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects | blindfields
 npm run bench:guards -- "$TOK"        # optional 2nd arg: fixture base URL
 ```
 
-All five fidelity scenarios in one go, one fresh Aperture each:
+All six fidelity scenarios in one go, one fresh Aperture each:
 `bash bench/fidelity-all.sh`.
 
 Exit codes for `fidelity.mjs`: 0 green · 1 red · 2 truth unusable · 3 step
@@ -383,22 +596,27 @@ restart Aperture, then run the guards; the credential guards additionally need
 fixtures on **127.0.0.1:8899 and 127.0.0.2:8899**, with `localhost:8899`
 reaching the same server (it is a third *origin*, not a third binding).
 
-**The `allow` phase needs `--seed-profile` as well as `--seed-vault`** since
-2026-08-05:
+**The `allow` phase needs two more seed flags than it used to**, both since
+2026-08-05, and neither is optional:
 
 ```bash
 npx electron . --seed-vault --seed-profile \
+  --seed-botauth=bench/fixtures/botauth-dev-key.json \
   --e2e-consent=allow --e2e-consent-delay-ms=1500 > /tmp/ap.log 2>&1 &
 ```
 
 The G30 block exercises the **profile** fill path, which had none of the
 credential path's redaction machinery wired to it for three gates
-(`docs/design/sink-closure-review-3.md` F-F). `G30-seed` fails loudly when the
-flag is missing, so a forgotten flag reads as a RED rather than as a block of
-passes against an empty form. Note also that the vault's idle auto-lock is five
-minutes and is not reset by a dev-auto consent, so the credential guards have to
-finish inside that window — a fresh Aperture per run, which is the recommendation
-anyway.
+(`docs/design/sink-closure-review-3.md` F-F). The G33 block measures Web Bot
+Auth signing, and G33b/c/d assert the **absence** of signatures — vacuously
+true against a launch with no signing configured, so they hard-fail unless
+G33a (presence) is green in the same run. In both cases a forgotten flag reads
+as REDs rather than as a block of quiet passes, which is the whole point:
+`G30-seed` and the G33 vacuity trap exist because a green run against an
+unarmed build is byte-identical to a green run against an armed one. Note also
+that the vault's idle auto-lock is five minutes and is not reset by a dev-auto
+consent, so the credential guards have to finish inside that window — a fresh
+Aperture per run, which is the recommendation anyway.
 
 The scored suites own their whole world — each refuses to start if 8817 is in
 use, then starts its own Aperture, a `no-store` fixture server, the witness
@@ -416,7 +634,7 @@ node bench/size.mjs --sweep --n 6               # Tier B (add --force-budget onl
 
 node bench/headtohead/h2h.mjs --lint            # fixture linter
 node bench/headtohead/h2h.mjs --selftest        # H0–H4 guards, no API budget
-node bench/headtohead/h2h.mjs --report          # exits 7 on the current store — read h2h-evaluation §1
+node bench/headtohead/h2h.mjs --report          # exits 7 on the current store — read h2h-post-tier5-evaluation §6
 ```
 
 Others: `npm run bench` (synthetic diff model), `npm run bench:live` (real-site
@@ -468,18 +686,30 @@ Three corollaries earned the hard way:
   global — the type checker bound it to `lib.dom` while the main process would
   have thrown `ReferenceError` on every successful select.
 - **Pooling hides sign changes.** Wave 1's cost headline was right about the
-  aggregate and wrong about every subset. The h2h's reliability headline is
-  carried entirely by one task and its H10 mechanism share was one task wearing
-  a mechanism costume. A number consistent with a story is not the same as a
-  true one — split it before you publish it.
+  aggregate and wrong about every subset. Both h2h reliability headlines are
+  carried entirely by one task, and H10's mechanism share has now been one task
+  wearing a mechanism costume *twice, in opposite directions*: NOT CONFIRMED at
+  46.7% off catalog-order's presence, CONFIRMED at 62.7% off the same cell one
+  cohort later. A number consistent with a story is not the same as a true one
+  — split it before you publish it.
+- **A guard recognising its author's example is not a guard.** The security
+  programme's stopping criterion needed a third clause for exactly this: two
+  guards caught the sabotage row their author wrote and passed a different
+  instance of the very same class. Twice more, an author-independent row was
+  green on the first attempt and the fix was one line of the guard. If you write
+  a guard, someone else picks the row that tests it.
 
 The guard layer is the thing that has kept the numbers honest, not the
-coordinators' aggregate readings. Its full record across this programme: three
+coordinators' aggregate readings. Its record across this programme: three
 apparatus faults, all real, all caught before a verdict; one guard that
 *manufactured* a finding and was demoted to advisory rather than allowed to
-exclude cells; and one surviving tripwire which, on investigation, was flagging
-a genuine result. Three of its four kills were the harness's own defects — so
-the layer's history says our first-draft apparatus is the most dangerous
+exclude cells; one surviving tripwire which, on investigation, was flagging a
+genuine result; and the tier5 economics tripwire, which fired on a false premise
+and was **honored rather than voided** — its diagnostic half caught a wrong spec
+argument (every conventional HTML radio group is a positional family under the
+shipped identity scheme) before a cohort was bought on it, while its stop-ship
+half was ruled mis-specified. Most of its kills were the harness's own defects —
+so the layer's history says our first-draft apparatus is the most dangerous
 component in any benchmark here.
 
 Instrument and compare against ground truth. Do not reason from the code alone,
@@ -488,46 +718,49 @@ green, spend a day trying to make it lie to you before you believe it.
 
 ---
 
-## Pause point — 2026-08-03, HEAD `0ff819e`
+## Where the programme stopped — 2026-08-06, HEAD `e3f8add`
 
-Work stopped here deliberately, at a green gate. Everything below is either
-done and verified, or written down with its evidence.
+Everything below is either done and verified, or written down with its evidence.
 
-### Green at the pause
-`npx tsc --noEmit` · `npx vitest run` 501 · `npx electron-vite build` ·
-`bash bench/fidelity-all.sh` 6/6 · `node bench/guards.mjs <tok>` 39/39 allow,
-3/3 deny, 2/2 none · `node bench/task.mjs --selftest` PASS.
+### Green at the stop
+`npx tsc --noEmit` · `npx vitest run` · `npx electron-vite build` ·
+`bash bench/fidelity-all.sh` 6/6 · `node bench/guards.mjs <tok> --phase=allow`
+**72/72 at artifact `4115dd9f…`** (`webbotauth.md` §13 is the record, and it
+records the discriminating RED against a differently-hashed artifact in the
+same session) · `node bench/task.mjs --selftest` PASS. The `deny` and `none`
+phases were last recorded green at the 2026-08-03 pause and have not been
+re-run since; re-run them before quoting them.
 
 ### Tags
 `wave2-scored` · `wave3-scored` · `sweep-scored` · `tier4-landed` ·
 `h2h-scored` · `vaultfill-landed`
 
-### Owed before the vault holds a real credential
-Nothing blocking. Both review blockers are closed (`0ff819e`). The
-non-blocking remainder from `docs/design/vaultfill-review.md` items 5-12 is
-listed in the open-defects section above; the sharpest is that
-`docs/design/security.md` still contains two sentences this work made false
-("the process never receives plaintext" is now narrower than written, and the
-redaction row reads "designed, not yet implemented" when it is implemented).
-Correcting that file was outside the fixer's permitted scope and is the first
-small job for whoever resumes.
+### What closed here
 
-### Next, in the owner's stated order
-1. Security & hardening session (Opus runs it from inside the repo; the
-   built-in review needs a git root, which this checkout is).
-2. ~~Web Bot Auth — RFC 9421 signing.~~ **Built.** Scoped to what a client
-   browser can honestly claim: main-frame documents in agent-owned tabs, to
-   registrable domains and exact origins a human listed in
-   `userData/botauth.json`, with a per-container key. `docs/design/tier2.md`
-   §7 killed the 2026-09-15 deadline framing and `docs/design/webbotauth.md` §1
-   corroborated the kill against Cloudflare's published policy. **What is owed
-   is live verification, not code:** the G33a-e legs and queue #7's
-   header-order measurement need Aperture on 8817 and a build, and both were
-   held off while a scored cohort was running. The exact commands are in
-   `docs/design/webbotauth.md`'s implementation report, and every leg's RED
-   must be recorded before its green counts.
-3. The removal-side ordinal rebinding hazard (open-defects above) — it cost a
-   preregistered primary in the head-to-head and has wire-level evidence.
+- **The head-to-head programme.** Both primaries measured twice on a
+  byte-identical apparatus with one engine treatment between the cohorts; the
+  one failed primary was fixed under preregistration and re-measured passing;
+  every economics claim carries its class, its CI and its disclosures. What
+  remains unsettleable is unchanged — live web, other models, the sealed frame
+  itself, familiarity asymmetry, Playwright's CLI mode, long horizons — plus
+  one addition: the undated model alias makes cross-cohort agent-behaviour
+  comparisons observations, never claims.
+- **The tier5 tripwire**, ruled ACCEPT by an independent adjudicator who did not
+  build the fix (`tier5-ruling.md`). The §9.4 claims freeze is lifted; RESULTS
+  and README now restate from the post-tier5 store only.
+- **The redaction programme**, against a criterion that can be failed — seven
+  mechanism classes, seven guards, five of them sabotaged by someone other than
+  the guard's author.
+- **Web Bot Auth**, built, merged and live-verified with both artifact hashes
+  recorded.
+- **Two false sentences in `security.md`** that the vault fill work created
+  ("the process never receives plaintext" was narrower than written; the
+  redaction row said "designed, not yet implemented" when it was implemented).
+  Both corrected 2026-08-05.
+
+### What is not done
+Everything under "Open defects" and "Still owed" above. Nothing there blocks the
+Thursday backlog below.
 
 ### The rule that produced everything here
 Six things marked "working" broke the moment they were measured end to end,
@@ -537,36 +770,44 @@ way; a guard that has only ever passed is a guard of unknown value.
 
 ---
 
-## Amendment — tier5 landed, and its tripwire fired (2026-08-03, HEAD `1d13e0b`)
+## Two rulings worth not re-opening
 
-`1d13e0b` adds the positional-rebind fix — the cause of the reduced accuracy
-measured in the head-to-head. Free battery green: unit suite, fidelity 6/6,
-guards 43/43 + 3/3 + 2/2, selftest PASS. Measurement was deliberately deferred
-by the owner, so nothing is proven about whether it works in an agent's hands.
+**The tier5 economics tripwire fired, and was ruled ACCEPT** (`tier5-ruling.md`,
+by an adjudicator who did not write the spec and did not build the change). Read
+it before anyone proposes narrowing the retirement pre-pass:
 
-### FIRST JOB ON RESUME — an independent ruling, not the coordinator's
+- The firing family on `journal-comment` is **not** the star-group wrappers the
+  builder's record blamed — wrappers hold no refs, so the "nothing held" gate
+  skips them every time. It is the **five radios themselves**, keyed
+  `N|0|radio|rating`, because `identityKey` ranks the shared `name` attribute
+  above the radios' unique ids. **Every conventional HTML radio group is a
+  positional family under the shipped identity scheme.** The §4.2 neutrality
+  lint could not have caught it: the lint checks unique accessible names, a
+  property the identity key never consults.
+- Retirement fires on **all six** neutral fixtures, not one; five are costless
+  (±3–18 chars) and were invisible to the char-delta instrument that was
+  supposed to detect them.
+- Every neutral firing is a **same-set reappearance** after absence, never a
+  live membership change, so first-contact cost is identical pre- and post-fix.
+  The whole +96% is warm-revisit cost, and the pre-fix cheapness was
+  manufactured by the revival channel tier5 exists to close.
+- Candidate (b) — narrow the pre-pass to non-ADDRESSABLE nodes — was
+  **prototyped and measured dead**: byte-identical to the unpatched fix, because
+  `radio` and `list` are both ADDRESSABLE. It excludes only the family that
+  already cannot fire.
 
-`docs/design/tier5.md` §9.1.1 preregistered a stop-ship tripwire on the
-economics stratum. **It fired.** `journal-comment` (neutral-large) went +96%
-observation chars, because that fixture's star-group *wrappers* are unnamed
-`generic` nodes, content-identical — a positional family the spec's stratum
-argument assumed could not form (it reasoned from "no identical interactive
-siblings" to "no family can form"; the wrappers are not interactive).
-
-Three candidate rulings are set out in `bench/RESULTS.md`'s "Pending
-re-measurement" section: accept it (the pre-fix cheapness was positional
-revival smuggling addressability across a re-visit — the same defect class
-tier5 fixes), narrow the pre-pass so non-ADDRESSABLE nodes are not retired if
-that preserves the precision fix, or revert per §9's conditions. **Whoever
-rules should not be whoever built it.**
-
-Until that ruling and the owed h2h cohort, **no economics claim in RESULTS.md
-or README describes shipped `master`**. The precision claim is unchanged and
-still failing; tier5 is an attempted fix, not evidence of one.
-
-Superseded by this change: tier4 §1.7's byte-identity pin. G1's `queue-resync`
+Superseded by tier5: tier4 §1.7's byte-identity pin. G1's `queue-resync`
 snapshot moved 2067 → 2074, fully explained — cross-fixture positional revival
-is now severed, so seven refs mint as 3-char `eNN` instead of 2-char `eN`.
+is severed, so seven refs mint as 3-char `eNN` instead of 2-char `eN`.
+
+**The `catalog-order` SHIM-SUSPECT tripwire fired on both cohorts and is ruled
+the same fair product difference both times.** pw-sealed: 0/10, all `gave_up`,
+all at the step cap, zero witness-visible page actions in 120 steps, every
+episode asking for a `budgetTokens` affordance only Aperture's channel can
+honour. pw-stock: 5/5, same engine, bigger dumps. The cell measures the model
+failing to convert a ~22k-token re-dump into a targeted action through a 3-tool
+surface with no scoping affordance — and **the deployment-relevant incumbent
+number on that task is stock's 100%, said in the same breath.**
 
 ---
 
@@ -596,5 +837,6 @@ Owner-requested, not started, no design work done. Listed in the order given.
    consent for anything sensitive still has to live in the native dialog a
    voice command cannot click.
 
-None of these blocks the resume items above (the tier5 tripwire ruling, the
-security session, Web Bot Auth, the owed h2h cohort).
+None of these is blocked by anything above, and nothing above is blocked by
+them. The items they were queued behind — the tier5 tripwire ruling, the
+security session, Web Bot Auth, and the owed h2h cohort — are all closed.
