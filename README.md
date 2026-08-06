@@ -217,6 +217,50 @@ the same genuine product difference), so the verdict was computed out of band
 with the suite's own stats code. The full disclosure block is in
 [`bench/RESULTS.md`](bench/RESULTS.md).
 
+### Speed
+
+Aperture finished faster than Playwright MCP in **every task class, in both
+head-to-head cohorts** — median wall-clock per episode, 385 episodes each:
+
+| task class | Aperture | Playwright MCP (sealed) | (stock) |
+|---|---|---|---|
+| adversarial home | **36.7s** | 96.3s | 84.4s |
+| neutral, small pages | **24.7s** | 41.5s | 46.1s |
+| neutral, real-page weight | **24.7s** | 61.7s | 58.5s |
+
+The load-bearing half of that is **browser time** — the seconds spent inside
+the tool call, not waiting on the model — measured directly per call:
+
+| task class | Aperture | Playwright MCP |
+|---|---|---|
+| adversarial home | **1.1s** | 42.4s |
+| neutral, small pages | **0.7s** | 18.2s |
+| neutral, real-page weight | **0.7s** | 12.2s |
+
+That is ~0.075s per action against ~3s, and it is the same mechanism the cost
+result measures: a full aria snapshot generated and shipped across a process
+boundary on every action, versus a diff computed in-process.
+
+**Stated at the scope it was measured, which is narrower than the table looks.**
+Wall-clock was preregistered as *reported, never verdicted* — there is no
+confidence interval and no bound it passed, because end-to-end time at these
+episode lengths is dominated by API queueing noise (`pw-sealed`'s
+neutral-large episodes range [34.4s, 141.2s]). One machine, serial runs, one
+model. What survives that caveat: the direction is consistent across all six
+class-cohort cells, and the browser-time component is not queueing noise —
+it is time the browser spent, recorded per call.
+
+Two things this does **not** claim. It says nothing about **raw Playwright**:
+a script with no model in the loop runs at machine speed and wins outright on
+any task it already knows how to do. And the wall-clock gap is not the diff
+mechanism's alone — the same engine in re-dump mode posts 33.8s/24.3s/27.6s,
+so most of the browser-time advantage is Aperture's in-process engine rather
+than diffs specifically.
+
+A side effect worth recording: Aperture's home median was **70.5s before the
+positional-rebind fix and 36.7s after**. Wrong actions were burning turns;
+not making them made the browser faster.
+
 ### The mechanism, on our own bench
 
 - **Diff fidelity: six scenarios GREEN** (`npm run bench:fidelity`) — typing
