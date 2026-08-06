@@ -718,7 +718,7 @@ green, spend a day trying to make it lie to you before you believe it.
 
 ---
 
-## Where the programme stopped — 2026-08-06, HEAD `e3f8add`
+## Where the programme stopped — 2026-08-06, HEAD `6e919d6`
 
 Everything below is either done and verified, or written down with its evidence.
 
@@ -811,7 +811,7 @@ number on that task is stock's 100%, said in the same breath.**
 
 ---
 
-## Backlog — added 2026-08-03, queued for Thursday (2026-08-06)
+## Backlog — added 2026-08-03, DONE 2026-08-06 (see below)
 
 Owner-requested, not started, no design work done. Listed in the order given.
 
@@ -840,3 +840,21 @@ Owner-requested, not started, no design work done. Listed in the order given.
 None of these is blocked by anything above, and nothing above is blocked by
 them. The items they were queued behind — the tier5 tripwire ruling, the
 security session, Web Bot Auth, and the owed h2h cohort — are all closed.
+
+
+---
+
+## Thursday's backlog — closed 2026-08-06, HEAD 
+| item | outcome |
+|---|---|
+| Screenshot autocrop | **Shipped.** Auto-trim default (cannot hide visible content by construction); detail crop declines to the full frame on a closed list including any open modal — even when the modal is the target. Eight decline paths demonstrated live.  |
+| Dark-mode contrast | **Shipped.** The reported defect was Chromium force-dark's band seam: 1.21:1 measured, 7.87:1 after. Diagnosis also found the dark-mode policy engine had ONE call site (the MCP tool) and had never run during normal browsing, and that theme  did not stop darkening while reporting that it had. Both fixed. , bench  |
+| Voice input | **Dropped by the owner.** Spec kept at , marked DROPPED, because the reasoning is the useful part: the honest design was that Aperture should never open the microphone at all. All code removed; seven files returned byte-identical to HEAD. |
+
+Two bench reds were **ruled, not waived**, and the distinction is the point:
+ was the *bound* being wrong (it demanded 3.0:1 from a surface its
+author shipped at 2.32:1, which §6.1's own rationale forbids) — corrected, and
+verified to move exactly two rows and flip exactly one verdict.
+ was closed by **measuring** a sweep of the live contrast
+tuning and taking the max-min point (110, worst margin +0.32), not by relaxing
+the 0.8 factor, which was not touched.
