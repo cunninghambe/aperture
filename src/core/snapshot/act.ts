@@ -63,6 +63,16 @@ export interface Resolved {
   vh?: number;
   obstructed: boolean;
   obstructor: string | null;
+  /**
+   * Why a human could not reach this element, from the preload.
+   *
+   * OPTIONAL for the same named precedent as `rect`/`vw`/`vh` above: against a
+   * stale preload artifact the field is simply absent, and absence must mean NO
+   * GATING rather than a crash or a blanket refusal. What actually protects a
+   * guard run from a stale build is `guards.mjs`'s own refusal, which compares
+   * `out/` against `src/` and stops before the first check.
+   */
+  blocked?: 'inert' | 'modal' | 'no-pointer' | null;
   tag: string;
   editable: boolean;
 }

@@ -1573,3 +1573,64 @@ is 42.4s/ep median vs Aperture's 1.1s (upstreamMs), a real felt-latency gap
 the §2 boilerplate understates. Programme lineage: five archived cohorts
 precede this one; this is the second consecutive clean cohort (0 harness
 faults, 0 contaminated) on the byte-identical harness.
+
+---
+
+# Update: diff fidelity — the `filterlist` scenario (2026-08-06, tier6 §2)
+
+`bash bench/fidelity-all.sh` now runs **seven** scenarios. The new one is the
+fixture the replace-op elision defect never had.
+
+When a `replace` escalation fires, `walk()` returns immediately (diff.ts 226,
+274, 324) — **no `propDelta` update is emitted for anything inside the replaced
+subtree**. The subtree used to render collapsed, so a survivor sitting past
+`COLLAPSE_SHOW` (3) in a same-shape run of ≥ `COLLAPSE_RUN` (5) had its changed
+content elided, and the model held the stale text indefinitely: the next diff
+compares new-vs-newer, so the change is absorbed into the baseline and no
+re-announcement ever comes. `runOwesReannounce` does not save it — that gate
+asks `needsReannounce`, which `markDead` sets for REVIVED refs, and a survivor
+never died. Both `add` and `replace` op subtrees now render in full.
+
+`test/fixtures/filterlist.html` rebuilds an 8-row list in one re-render as six
+fresh rows plus two survivors, and moves the survivor whose link text changed
+from the head of the list into the elided tail.
+
+```
+bench:fidelity filterlist  GREEN  19/19 refs · 1 diff · 0 wrong labels
+                            RED against the pre-fix build (out/main/index.js
+                            sha256 1faac8cb…): 11 refs, 1 WRONG LABEL, 1 of 1
+                            independent check failed —
+                            "e3: agent has label \"In stock\", page has \"Backordered\""
+```
+
+The pre-existing six were re-measured against the pre-fix build and against the
+post-fix build, and **not one diff count, resync count or ref count moved**:
+form 18 refs / 13 diffs + 1 resync, rerender 15 / 3 + 0, widgets 6 / 5 + 0,
+biglist 71 / 1 + 1, selects 7 / 8 + 0, blindfields 6 / 4 + 0, both sides. No
+`expect` block was re-pinned. One observation cost moved: **widgets 288 → 278
+tokens**, which is tier6 §3's dedupe — the counter button's label change alters
+name and text to the same string and used to emit it twice.
+
+## The arithmetic tier2 §1 asked for
+
+Printed by every `filterlist` run, never asserted. Cross-build, because a build
+can only measure the diff it renders:
+
+| | chars | ~tokens |
+|---|---|---|
+| the collapsed diff (pre-fix build) | 552 | 138 |
+| the expanded diff (post-fix build) | 979 | 245 |
+| **what expansion cost** | **+427** | **+107** |
+| the deferred read it replaces — one extra turn + an `expand:true` FULL snapshot of the same page | 1124 | 281 |
+
+Expansion is a little over a third of the price of the read it removes, and the
+turn is free on top. Stated as measurement on one fixture, not as a general
+claim: a wider subtree costs more, and the size governor turns anything
+pathological into a resync exactly as it did before.
+
+**No precision or economics sentence anywhere else in this file changes.** The
+post-tier5 precision result (zero landed wrong-element actions in 220 episodes)
+stays pinned to build `0916e30f…`. tier6 changes the rendered wire, so that
+number is not a property of any post-tier6 build and must not be restated as
+one; re-claiming it needs a fresh preregistered cohort (`--new-cohort`), and
+nothing in any existing store may be re-scored or pooled.

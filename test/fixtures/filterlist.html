@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Filtered results</title>
+  </head>
+  <body>
+    <main>
+      <h1>Filtered results</h1>
+
+      <!-- THE FIXTURE THE REPLACE-ELISION DEFECT NEVER HAD
+           (docs/design/tier6.md §2.4; tier2 §1 ruled the fix and never landed).
+
+           WHAT THE DEFECT IS. When a `replace` escalation fires, `walk()`
+           returns immediately (diff.ts 226, 274, 324) — no `propDelta` update is
+           ever emitted for anything INSIDE the replaced subtree. A survivor's
+           changed content therefore exists only in the rendered subtree; and
+           that subtree used to render COLLAPSED, so a survivor sitting past
+           COLLAPSE_SHOW (3) in a same-shape run of >= COLLAPSE_RUN (5) had its
+           new text elided. `runOwesReannounce` does not save it either: that
+           gate asks `needsReannounce`, which `markDead` sets for REVIVED refs,
+           and a survivor never died. The model holds the stale text forever —
+           the next diff compares new-vs-newer, so the change is absorbed into
+           the baseline and no re-announcement ever comes.
+
+           HOW THIS PAGE MAKES THAT OBSERVABLE. Every constraint below is
+           load-bearing; changing any one of them stops this page measuring the
+           defect and starts it measuring something else.
+
+             1. EIGHT same-shape rows, `heading,link,button` for every one, so
+                `shapeHash` matches across the family and the run really
+                collapses (8 >= COLLAPSE_RUN). No row may differ structurally.
+
+             2. EVERY row, link and button carries a NON-GENERATED id, so
+                `identityKey` takes the I tier (`I|0|listitem|row-alpha`) and
+                identity is under this fixture's control rather than derived from
+                text or from document order. `looksGenerated` rejects ids
+                carrying hashes or >40% digits; these are words.
+
+             3. THE PER-ROW <h3> IS NOT DECORATION. `siblingDiscriminator` is
+                appended to EVERY tier of key, including the I tier, and it
+                consults <a> and <h1>..<h4> siblings first — falling back to
+                `:scope > a|h1|h2|h3` on the parent, which for a lone <a> inside
+                an <li> matches THE LINK ITSELF. Without a heading beside it, a
+                link's key folds in its own text, a text change re-keys it, and
+                the "survivor" is not a survivor at all: it is buried and reborn,
+                and the defect this page exists to show cannot happen. The <h3>
+                gives every row a stable discriminator ("alpha"), so the link's
+                key survives its own text changing. Measured, not assumed — the
+                first draft of this fixture had no heading and the survivor's
+                refs came back in `(gone: …)`.
+
+             4. THE REFILTER REBUILDS IN ONE re-render (`replaceChildren`) with
+                SIX fresh rows and TWO survivors. `countMatched` is then 2 of 8 =
+                0.25, under REPLACE_MATCH_RATIO (0.4), with span 8 >=
+                REPLACE_MIN_CHILDREN — so the match-ratio replace fires on the
+                list. Change either count and the escalation stops firing.
+
+             5. THE CHANGED SURVIVOR MOVES FROM THE HEAD TO THE TAIL. `alpha` is
+                row 1 before (inside COLLAPSE_SHOW, so the model is SHOWN it and
+                holds "In stock") and row 5 after (inside the elided tail, so the
+                unfixed renderer hides "Backordered"). Both halves are needed: a
+                survivor the model never saw has no stale belief to catch, and a
+                survivor left in the first three would be restated even unfixed.
+
+             6. `bravo` is the CONTROL survivor — same construction, no text
+                change, restated at row 1 — so a build that lost its survivors
+                altogether fails differently from one that hides a changed one.
+
+           WHAT THE BENCH SEES. On the unfixed build the mechanical reader holds
+           "In stock" for a link the page calls "Backordered": one WRONG LABEL,
+           and the scenario is RED. On the fixed build the replace subtree
+           renders in full, the changed line arrives, and it is GREEN.
+
+           Deterministic: no timers, no randomness, no network, and the refilter
+           is idempotent, so a retried step cannot change the answer. -->
+
+      <ul id="results" aria-label="Results"></ul>
+
+      <!-- OUTSIDE the list, with its own non-generated id, so it can never join
+           the family it mutates. -->
+      <button id="refilter">Refilter</button>
+    </main>
+
+    <script>
+      (function () {
+        // Row identity is the id stem and the <h3>; `status` is what changes.
+        var BEFORE = [
+          { id: 'alpha', name: 'Alpha', status: 'In stock' },
+          { id: 'bravo', name: 'Bravo', status: 'In stock' },
+          { id: 'charlie', name: 'Charlie', status: 'In stock' },
+          { id: 'delta', name: 'Delta', status: 'In stock' },
+          { id: 'echo', name: 'Echo', status: 'In stock' },
+          { id: 'foxtrot', name: 'Foxtrot', status: 'In stock' },
+          { id: 'golf', name: 'Golf', status: 'In stock' },
+          { id: 'hotel', name: 'Hotel', status: 'In stock' },
+        ];
+
+        // Six fresh rows, two survivors. `bravo` keeps its status and is
+        // restated at the head; `alpha` keeps its KEY, changes its STATUS, and
+        // lands at index 4 — the first position the elision swallows.
+        var AFTER = [
+          { id: 'bravo', name: 'Bravo', status: 'In stock' },
+          { id: 'kilo', name: 'Kilo', status: 'In stock' },
+          { id: 'lima', name: 'Lima', status: 'In stock' },
+          { id: 'mike', name: 'Mike', status: 'In stock' },
+          { id: 'alpha', name: 'Alpha', status: 'Backordered' },
+          { id: 'november', name: 'November', status: 'In stock' },
+          { id: 'oscar', name: 'Oscar', status: 'In stock' },
+          { id: 'papa', name: 'Papa', status: 'In stock' },
+        ];
+
+        var listEl = document.getElementById('results');
+
+        function render(rows) {
+          listEl.replaceChildren.apply(
+            listEl,
+            rows.map(function (row) {
+              var li = document.createElement('li');
+              li.id = 'row-' + row.id;
+
+              var h = document.createElement('h3');
+              h.textContent = row.name;
+
+              var a = document.createElement('a');
+              a.id = 'link-' + row.id;
+              a.href = '/i/' + row.id;
+              a.textContent = row.status;
+
+              var b = document.createElement('button');
+              b.id = 'pick-' + row.id;
+              b.textContent = 'Pick';
+
+              li.append(h, a, b);
+              return li;
+            }),
+          );
+        }
+
+        document.getElementById('refilter').addEventListener('click', function () {
+          render(AFTER);
+        });
+
+        render(BEFORE);
+      })();
+    </script>
+  </body>
+</html>

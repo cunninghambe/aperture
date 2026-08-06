@@ -23,9 +23,17 @@
  * make it.
  */
 
+/**
+ * WITHOUT AN ENTRY HERE THE READER CANNOT SEE THE WORD, and both sides of
+ * every fidelity comparison are built by this file — so a state the renderer
+ * emits and this set omits compares stale-against-fresh as EQUAL, silently,
+ * forever. That is the propDelta blind-field failure exactly (see the header),
+ * one field along. `inert` and `no-pointer` arrive with tier6 §4.
+ */
 export const STATE_WORDS = new Set([
   'checked', 'disabled', 'expanded', 'selected', 'required',
   'focused', 'modal', 'readonly', 'invalid', 'live',
+  'inert', 'no-pointer',
 ]);
 
 export const unesc = (s) => s.replace(/\\(.)/g, '$1');
@@ -71,6 +79,97 @@ export function splitRowLine(s) {
 
 /** Leading whitespace of a line, as a count. Row attachment is indentation-based. */
 const indentOf = (line) => /^\s*/.exec(line)[0].length;
+
+/**
+ * One left-to-right, escape-aware pass over the tail of a `~` update line.
+ *
+ * WHY A SCANNER AND NOT ANOTHER SEQUENCE OF REGEX EXCISIONS. Excision is
+ * exactly what made the old misparse possible: the tail was searched for a
+ * `="…"`, then for "the first remaining quoted string", and whatever was left
+ * over was assumed to be a text delta nobody could verify. Under that rule a
+ * text-only delta on an aria-labelled button (`~ e1 "✕"`) overwrote the LABEL —
+ * corruption, not ambiguity, and permanent, because no later observation ever
+ * contradicts it (tier6 §3.1).
+ *
+ * The wire is prefix-disambiguated now (`"…"` = name, `="…"` = value,
+ * `text "…"` = inner text, `href=` = target, `RxC:` = rows), and no single-pass
+ * regex can read it safely: a NAME whose own content ends in `text `, followed
+ * by a real `text "T"` token, defeats any excision order you pick. Reading
+ * quoted strings as UNITS and looking at the token immediately before each is
+ * unambiguous by construction, whatever the page puts inside the quotes.
+ *
+ * Returns `{ quoted, words, href, dims }`, where `quoted` is
+ * `[{ prefix, value }]` with `prefix` one of `'='`, `'text'`, or null (no
+ * prefix), and `words` is every bare token that was NOT consumed as a prefix,
+ * an href, or the trailing dims marker — i.e. exactly the candidates for the
+ * state loop.
+ */
+export function scanUpdateTail(rest) {
+  const quoted = [];
+  const words = [];
+  let href;
+  let dims;
+  let prefix = null; // the bare token immediately before the next quoted string
+  let i = 0;
+
+  while (i < rest.length) {
+    if (rest[i] === ' ') {
+      i++;
+      continue;
+    }
+    // `="…"` — the value, whose `=` is attached rather than a separate token.
+    if (rest[i] === '=' && rest[i + 1] === '"') {
+      const m = /^="((?:[^"\\]|\\.)*)"/.exec(rest.slice(i));
+      if (m) {
+        quoted.push({ prefix: '=', value: unesc(m[1]) });
+        prefix = null;
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (rest[i] === '"') {
+      const m = /^"((?:[^"\\]|\\.)*)"/.exec(rest.slice(i));
+      if (m) {
+        quoted.push({ prefix, value: unesc(m[1]) });
+        // A token consumed as a PREFIX is not also a state-word candidate.
+        if (prefix !== null) words.pop();
+        prefix = null;
+        i += m[0].length;
+        continue;
+      }
+      // An unterminated quote is not a quoted string; fall through and eat it
+      // as a bare token, so the scan always terminates.
+    }
+    let j = i;
+    while (j < rest.length && rest[j] !== ' ') j++;
+    const tok = rest.slice(i, j);
+    i = j;
+
+    // hrefs hold no whitespace and no quotes (`sanitizeHref`, walker.ts), so a
+    // token-level read of them cannot be broken by page content.
+    const hm = /^href=(\S+)$/.exec(tok);
+    if (hm) {
+      href = hm[1];
+      prefix = null;
+      continue;
+    }
+    // `RxC:` — a rows restatement, and only ever the LAST token on the line;
+    // the rows themselves follow, indented, on the lines after it. "Last" has
+    // to tolerate trailing whitespace, exactly as the regex this replaced did
+    // (` (\d+)x(\d+):\s*$`) — a trailing space would otherwise drop the dims on
+    // the floor AND leave the indented rows unconsumed, in silence.
+    const dm = /^(\d+)x(\d+):$/.exec(tok);
+    if (dm && rest.slice(i).trim() === '') {
+      dims = { rows: Number(dm[1]), cols: Number(dm[2]) };
+      prefix = null;
+      continue;
+    }
+    words.push(tok);
+    prefix = tok;
+  }
+
+  return { quoted, words, href, dims };
+}
 
 /**
  * Full-snapshot / subtree line:
@@ -194,30 +293,24 @@ export function applyObservation(model, text) {
 
     if (/^> e\d+ moved/.test(line)) continue; // position is not tracked
 
-    // Diff update: `~ e3 "name" ="value" "text" href=/p 3x2: +focused -checked`
+    // Diff update:
+    // `~ e3 "name" ="value" text "inner" href=/p 3x2: +focused -checked`
     //
     // `href=` and the `RxC:` + indented rows tail are the wire form tier2b P0
-    // adds for the two fields propDelta was blind to. Reading them here has to
-    // land in the SAME change set as the renderer emitting them — the
-    // `isNoChange` note below is the precedent and the reason.
+    // adds for the two fields propDelta was blind to; the `text` token is
+    // tier6 §3's disambiguator. Reading any of them here has to land in the
+    // SAME change set as the renderer emitting them — the `isNoChange` note
+    // below is the precedent and the reason.
     const upd = /^~ (e\d+)(.*)$/.exec(line);
     if (upd) {
       const entry = model.get(upd[1]) ?? { role: '?', label: '', value: '', states: new Set() };
-      let rest = upd[2];
+      const { quoted, words, href, dims } = scanUpdateTail(upd[2]);
 
-      // Before the quoted-string extractions: an href is unquoted and cannot
-      // contain whitespace, so it is unambiguous wherever it sits on the line.
-      const hm = / href=(\S+)/.exec(rest);
-      if (hm) {
-        entry.href = hm[1];
-        rest = rest.slice(0, hm.index) + rest.slice(hm.index + hm[0].length);
-      }
+      if (href !== undefined) entry.href = href;
       // `~ e7 3x2:` — a rows restatement. The rows follow, indented, in exactly
       // the element-line row format.
-      const rm2 = / (\d+)x(\d+):\s*$/.exec(rest);
-      if (rm2) {
-        entry.dims = { rows: Number(rm2[1]), cols: Number(rm2[2]) };
-        rest = rest.slice(0, rm2.index);
+      if (dims !== undefined) {
+        entry.dims = dims;
         const rows = [];
         const base = indentOf(line);
         while (i + 1 < lines.length && lines[i + 1].trim() && indentOf(lines[i + 1]) > base) {
@@ -226,25 +319,34 @@ export function applyObservation(model, text) {
         entry.rows = rows;
       }
 
-      const vm = / ="((?:[^"\\]|\\.)*)"/.exec(rest);
-      if (vm) {
-        entry.value = unesc(vm[1]);
-        rest = rest.slice(0, vm.index) + rest.slice(vm.index + vm[0].length);
+      for (const q of quoted) {
+        if (q.prefix === '=') entry.value = q.value;
+        // NO PREFIX = THE NEW ACCESSIBLE NAME. That is now the whole rule for a
+        // bare string, and the corruption it replaces is why: a text delta used
+        // to arrive bare and overwrite the label of an element whose name had
+        // not changed at all.
+        else if (q.prefix === null) entry.label = q.value;
+        else if (q.prefix === 'text') {
+          // The displayed string of a TEXT line IS its text, so for that role
+          // the two are one fact and the label moves. For everything else the
+          // inner text is recorded and NOT compared — a full snapshot renders
+          // no inner text for a non-text node, so nothing could verify it. Same
+          // posture as before; now without the misapply.
+          if (entry.role === 'text') entry.label = q.value;
+          else entry.text = q.value;
+        }
+        // Any OTHER prefix is a token this reader does not know, on a wire it
+        // is supposed to understand completely. Falling back to bare-string
+        // semantics here is precisely how the old misapply worked, so an
+        // unknown prefix applies NOTHING and the disagreement stays visible in
+        // the comparison rather than being laundered into the model.
       }
-      // First remaining quoted string is the new name; a second is the text
-      // delta, which a full snapshot cannot verify and is ignored here.
-      const nm = / "((?:[^"\\]|\\.)*)"/.exec(rest);
-      if (nm) {
-        entry.label = unesc(nm[1]);
-        rest = rest.slice(0, nm.index) + rest.slice(nm.index + nm[0].length);
-      }
-      // Strip any remaining quoted segments (the text delta) BEFORE the state
-      // token loop — quoted page text containing "+... checked" must not be
-      // able to inject state flags into the model.
-      rest = rest.replace(/ "((?:[^"\\]|\\.)*)"/g, '');
+
+      // The state loop runs over the bare tokens only — after every quoted
+      // string has been consumed as a unit — so quoted page text reading
+      // `+checked disabled` can never inject a state flag.
       let mode = null;
-      for (const tok of rest.trim().split(/\s+/)) {
-        if (!tok) continue;
+      for (const tok of words) {
         if (tok.startsWith('+')) mode = 'on';
         else if (tok.startsWith('-')) mode = 'off';
         const word = tok.replace(/^[+-]/, '');

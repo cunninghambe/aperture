@@ -20,7 +20,7 @@ import {
 import { normalizeText, sanitize } from '../src/core/snapshot/text.js';
 import { VolatilityTracker } from '../src/core/snapshot/volatility.js';
 import { looksGenerated } from '../src/core/snapshot/walker.js';
-import type { Role, Snapshot, SnapshotNode } from '../src/core/snapshot/types.js';
+import type { PropDelta, Role, Snapshot, SnapshotNode } from '../src/core/snapshot/types.js';
 import { State } from '../src/core/snapshot/types.js';
 
 // -- helpers ----------------------------------------------------------------
@@ -383,6 +383,29 @@ describe('renderFull', () => {
     expect(out).toContain('disabled');
     expect(out).not.toContain('checked');
   });
+
+  it('renders the two reachability words, and appends them to the existing order', () => {
+    // tier6 §4. The words are APPENDED to STATE_NAMES on purpose — the
+    // existing order is pinned by tests and by every archived transcript — so
+    // this row asserts both that they render and that they render last.
+    const b = k('button', 'b2', 'Ghost action', {
+      states: State.Disabled | State.Inert | State.NoPointer,
+    });
+    const line = renderLine(b, 0)!;
+    expect(line).toBe('button "Ghost action" disabled inert no-pointer');
+  });
+
+  it('diffs a reachability flip like any other state', () => {
+    // Nothing masks these: only Offscreen is excused in `propDelta`, and
+    // volatility suppression does not apply to state changes. A page that
+    // toggled `pointer-events` in a loop would emit a flip per walk, with the
+    // size governor as the backstop — which is why the guard fixture's classes
+    // are static (unreachable.html's churn note).
+    const off = k('button', 'b3', 'Ghost action');
+    const on = k('button', 'b3', 'Ghost action', { states: State.NoPointer });
+    expect(propDelta(off, on)).toMatchObject({ statesOn: State.NoPointer });
+    expect(propDelta(on, off)).toMatchObject({ statesOff: State.NoPointer });
+  });
 });
 
 describe('renderDiff', () => {
@@ -404,6 +427,52 @@ describe('renderDiff', () => {
     // stay green through a rewording that broke the classifier.
     expect(out).toBe('page #4.2 (unchanged — you already hold the current page)');
     expect(estimateTokens(out)).toBeLessThan(20);
+  });
+
+  // -- the update line's disambiguator (tier6 §3) ----------------------------
+  //
+  // A bare quoted string on a `~` line is now always and only the new
+  // accessible NAME; an inner-text change is spelled `text "…"`. Before this,
+  // both went out bare and the reader guessed by position — so a text-only
+  // delta on an aria-labelled button silently overwrote the LABEL the model
+  // held, which is corruption rather than ambiguity.
+  const upd = (delta: PropDelta) =>
+    renderDiff({
+      seq: '4.1', baseSeq: '4.0', suppressed: 0, unreadChanges: 0,
+      ops: [{ op: 'update', ref: 'e1', delta }],
+    }).split('\n')[1]!;
+
+  it('spells a text-only delta with the `text` token, and emits no bare string', () => {
+    // `<button aria-label="Close">×</button>`, page swaps × for ✕. The name did
+    // not change; the old wire said `~ e1 "✕"` and the reader applied it as one.
+    expect(upd({ text: ['×', '✕'] })).toBe('~ e1 text "✕"');
+  });
+
+  it('dedupes the commonest update: name and text changed to the same string', () => {
+    // `<button>Save</button>` → `Saved` changes name AND text, and used to emit
+    // `~ e1 "Saved" "Saved"` — two identical strings, the second discarded.
+    expect(upd({ name: ['Save', 'Saved'], text: ['Save', 'Saved'] })).toBe('~ e1 "Saved"');
+  });
+
+  it('emits both when the name and the text genuinely differ', () => {
+    expect(upd({ name: ['A', 'N'], text: ['B', 'T'] })).toBe('~ e1 "N" text "T"');
+  });
+
+  it('uses the same token for a text-role node — no special case in the renderer', () => {
+    // The token is uniform; the ROLE decides what it means, and that decision
+    // lives in the reader, which is the only side that knows the role.
+    expect(upd({ text: ['12 products', '7 products'] })).toBe('~ e1 text "7 products"');
+  });
+
+  it('keeps the emission order name · value · text · href · states', () => {
+    // Order is no longer load-bearing — every field is prefix-tagged — but a
+    // stable order keeps every archived transcript diffable against the grammar.
+    expect(
+      upd({
+        name: ['a', 'N'], value: 'V', text: ['b', 'T'],
+        href: ['/a', '/b'], statesOn: State.Focused,
+      }),
+    ).toBe('~ e1 "N" ="V" text "T" href=/b +focused');
   });
 
   it('names the base seq so a compacted model can notice it lost the base', () => {
@@ -560,6 +629,144 @@ describe('collapsed runs', () => {
     const root = catalogue(8, 'g');
     assignRefs(root, reg);
     expect(renderFull(snapshot(root, '3.0'), { registry: reg })).toBe(GOLDEN_COLLAPSED);
+  });
+});
+
+/**
+ * Op subtrees render IN FULL (tier6 §2).
+ *
+ * Everything inside an `add` or `replace` subtree is content the model has by
+ * definition never seen, so collapsing it defers the read to a strictly dearer
+ * channel. Row (d) is the one that is about correctness rather than economics:
+ * `walk()` returns immediately on every replace escalation (diff.ts 226, 274,
+ * 324), so NO update op is ever emitted for a survivor inside a replaced
+ * subtree — and an elided tail is then a place for a changed survivor to hide
+ * with nothing downstream ever contradicting the model's stale belief.
+ */
+describe('op subtrees render in full', () => {
+  /** 8 same-shape rows: exactly the shape the collapse machinery elides. */
+  function rowsOf(stems: string[], renamed: Record<string, string> = {}): SnapshotNode[] {
+    return stems.map((stem) =>
+      k('listitem', stem, undefined, {
+        children: [
+          k('link', `${stem}l`, renamed[stem] ?? `Item ${stem}`, { href: `/i/${stem}` }),
+          k('button', `${stem}b`, 'Pick'),
+        ],
+        shape: 'link,button',
+      }),
+    );
+  }
+  const listOf = (stems: string[], renamed: Record<string, string> = {}) =>
+    k('main', 'm', undefined, {
+      children: [
+        k('list', 'L', 'results', { children: rowsOf(stems, renamed), shape: 'listitem' }),
+      ],
+    });
+  const linkLines = (out: string) => out.split('\n').filter((l) => /^\s*link e\d+ /.test(l));
+  const stems = (prefix: string, n: number) =>
+    Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+
+  // PARAMETRIZED OVER RUN LENGTH, and that is not thoroughness for its own
+  // sake — it is a guard change a sabotage row forced. `expand: true` at a
+  // single call site is one edit away from `expand: subtree.children.length <=
+  // 8`, the shape any "let us not blow up huge lists" optimisation takes. Both
+  // fixed sizes below straddle every threshold a plausible cap would use;
+  // pinning ONE size (the size the author happened to write) leaves the
+  // elision free to come back for exactly the lists where it hurts most.
+  it.each([8, 40])('(a) an add subtree renders all %i same-shape children, with no elision', (n) => {
+    const reg = new RefRegistry();
+    const subtree = listOf(stems(`a${n}_`, n)).children[0]!;
+    assignRefs(subtree, reg);
+    const out = renderDiff(
+      {
+        seq: '2.1', baseSeq: '2.0', suppressed: 0, unreadChanges: 0,
+        ops: [{ op: 'add', parent: 'e1', after: null, subtree }],
+      },
+      reg,
+    );
+    expect(out).not.toMatch(/… \d+ more/);
+    expect(linkLines(out)).toHaveLength(n);
+  });
+
+  it.each([8, 40])('(b) a replace subtree renders all %i same-shape children, with no elision', (n) => {
+    const reg = new RefRegistry();
+    const subtree = listOf(stems(`b${n}_`, n)).children[0]!;
+    assignRefs(subtree, reg);
+    const out = renderDiff(
+      {
+        seq: '2.1', baseSeq: '2.0', suppressed: 0, unreadChanges: 0,
+        ops: [{ op: 'replace', ref: subtree.ref!, subtree }],
+      },
+      reg,
+    );
+    expect(out).not.toMatch(/… \d+ more/);
+    expect(linkLines(out)).toHaveLength(n);
+  });
+
+  it('(c) a commit render marks every expanded subtree ref emitted; a dry render marks none', () => {
+    // The `wasEmitted` plumbing is what stops a later `~ eN` on a line the
+    // model never received being gated into `unreadChanges` forever. Expansion
+    // puts far MORE refs on the wire, so the marking has to follow them.
+    const reg = new RefRegistry();
+    const subtree = listOf(['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7'])
+      .children[0]!;
+    assignRefs(subtree, reg);
+    const tail = reg.byKeyLookup('c7l')!.ref;
+    const d = {
+      seq: '2.1', baseSeq: '2.0', suppressed: 0, unreadChanges: 0,
+      ops: [{ op: 'add' as const, parent: 'e1', after: null, subtree }],
+    };
+
+    const dry = renderDiff(d, reg, false);
+    expect(dry).toContain(`${tail} `);
+    expect(reg.wasEmitted(tail)).toBe(false);
+
+    const committed = renderDiff(d, reg, true);
+    expect(committed).toBe(dry); // byte-identical; only the bookkeeping differs
+    for (const ref of refsIn(subtree)) expect(reg.wasEmitted(ref)).toBe(true);
+  });
+
+  it.each([8, 30])('(d) a replace does not hide a survivor whose content changed in the same re-render (%i rows)', (n) => {
+    // The probe shape from tier6 §2.1, verbatim at n=8: 8 rows rebuilt as 6
+    // fresh + 2 survivors, one survivor's link text changed, that survivor
+    // sitting in the tail the unfixed renderer elides. On the unfixed build the
+    // string "CHANGED" appears NOWHERE on the wire, the survivor's ref stays
+    // live and resolvable, and the model holds the stale text indefinitely —
+    // the next diff compares new-vs-newer, so the change is absorbed into the
+    // baseline. n=30 is the same hole at a size no plausible expansion cap
+    // covers (see the size note on rows (a)/(b)).
+    const reg = new RefRegistry();
+    const before = listOf(stems('s', n));
+    assignRefs(before, reg);
+    renderFull(snapshot(before, '1.0'), { registry: reg });
+    const survivor = reg.byKeyLookup('s0l')!.ref;
+    expect(reg.wasEmitted(survivor)).toBe(true); // s0 is among the three shown
+
+    // n-2 new rows, 2 survivors; s1 stays at the head (the control, restated
+    // either way) and the CHANGED one lands at index n-4 — past COLLAPSE_SHOW,
+    // deep inside the elided tail.
+    const order = stems(`d${n}f`, n - 2);
+    order.unshift('s1');
+    order.splice(n - 4, 0, 's0');
+    expect(order).toHaveLength(n);
+    const after = listOf(order, { s0: 'Item s0 CHANGED' });
+    assignRefs(after, reg);
+    const out = render(
+      diffSnapshots(before, after, reg, { wasEmitted: (x) => reg.wasEmitted(x) }).ops,
+      reg,
+    );
+
+    // The escalation really fired — otherwise this row would be measuring an
+    // ordinary update path and would pass for the wrong reason.
+    expect(out).toMatch(/^! e\d+ replaced/m);
+    // The survivor never died, so nothing retires its ref and no re-announcement
+    // is owed: `runOwesReannounce` asks only `needsReannounce`, which `markDead`
+    // sets for REVIVED refs.
+    expect(out).not.toMatch(new RegExp(`gone:[^)]*\\b${survivor}\\b`));
+    expect(reg.resolve(survivor)!.state).toBe('live');
+    // THE ASSERTION. The changed text has to be somewhere on the wire.
+    expect(out).toContain('CHANGED');
+    expect(out).toMatch(new RegExp(`^\\s*link ${survivor} "Item s0 CHANGED"`, 'm'));
   });
 });
 

@@ -266,6 +266,38 @@ describe('every path that writes a value into a page arms the redaction for it',
     ).toMatch(/sensitive/);
   });
 
+  it('the write preflight consults the composed-tree inert ascent, not `closest`', () => {
+    // The tier6 §4.2 fill ride-along. "A human could not do it either" is the
+    // rule `checkTarget` already enforces for `:disabled` and `readOnly`, and an
+    // inert ancestor is the same rule: a human cannot type into an inert field,
+    // and this write does NOT go through the CDP input path the platform would
+    // have stopped, so nothing else refuses it.
+    //
+    // Asserted at the SOURCE, and here rather than as a jsdom row, because
+    // `checkTarget` lives in the preload behind module-scope `ipcRenderer.on`
+    // registrations and cannot be imported into vitest at all. The coverage of
+    // record for its BEHAVIOUR is the live guard set (G25/G25b); this row pins
+    // the wiring, which is what this file exists for.
+    //
+    // The helper matters as much as the check: `closest('[inert]')` stops at a
+    // shadow boundary and the walker pierces shadow roots, so an element the
+    // agent was shown — inside the shadow root of an inert host — would pass a
+    // `closest`-based test. One composed-tree ascent, shared by the resolve
+    // gate, the select handler and this preflight.
+    const page = file('src/preload/page.ts');
+    const at = page.code.indexOf('function checkTarget(');
+    expect(at, 'checkTarget must still exist under that name').toBeGreaterThan(0);
+    const body = page.code.slice(at, page.code.indexOf('\n}\n', at));
+    expect(
+      body,
+      'checkTarget must refuse a target inside an [inert] subtree',
+    ).toMatch(/inInertSubtree\(/);
+    expect(
+      page.code,
+      'the inert ascent must cross shadow boundaries via the host chain, never `closest`',
+    ).not.toMatch(/closest\(['"]\[inert\]/);
+  });
+
   it('needlesFor is not exported — a caller can scrub, never read', () => {
     // The property that makes "register the value" safe to do on a second path:
     // main retains the plaintext, and the only way out of the store is a

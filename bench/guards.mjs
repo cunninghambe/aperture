@@ -2419,6 +2419,379 @@ const beta = refFor('Beta action', 'button');
 }
 
 // ---------------------------------------------------------------------------
+// G34-G36: the agent must not act where a human demonstrably cannot
+// ---------------------------------------------------------------------------
+//
+// docs/design/tier6.md §4 (tier2 §5 is the ruled design, renumbered: G13-G15
+// are long taken). Fixture `test/fixtures/unreachable.html` — NOT `inert.html`,
+// which is the G19k security fixture and must not grow script. Red record:
+// docs/design/g34-36-red-record.md.
+//
+// Three facts the engine did not consult, and every one of them is the agent
+// acting where a human cannot:
+//
+//   G34 `[inert]`     — `statesOf` read `:disabled` only, and the `select`
+//                       handler refused on `isDisabled` only. `select` takes no
+//                       coordinates, so the hit-test never protected it: a
+//                       <select> inside an inert panel was simply writable.
+//   G35 no-pointer    — a `pointer-events: none` target hit-tests to whatever
+//                       is beneath it, so the refusal (when there was one)
+//                       named an innocent bystander. G35a pins the WORDING as
+//                       hard as the refusal, because "refused for the wrong
+//                       reason" is what the agent has to act on. G35b pins the
+//                       ASYMMETRY: `select` must still SUCCEED, since a human
+//                       Tabs to such a control and changes it by keyboard, and
+//                       an agent weaker than a human is the inverse failure.
+//   G36 small modal   — `findModal` only REPORTS an overlay above 15% of the
+//                       viewport and blocks nothing; a control beside a small
+//                       `dialog.showModal()` was clickable whenever the dialog
+//                       did not cover its point.
+//
+// Every assertion is against the page's own witness line, never against
+// Aperture's report of itself — the rule the whole file follows.
+{
+  const unreachModel = new Map();
+  await call('browser_navigate', {
+    action: 'goto',
+    url: `${BASE}/unreachable.html?guardrun=${Date.now()}`,
+  });
+  await sleep(2500);
+  const unreachInitial = await call('browser_snapshot', { mode: 'full' });
+  if (!/^FULL SNAPSHOT #/m.test(unreachInitial)) {
+    console.error(
+      'G34-G36 could not run: unreachable.html did not produce a full snapshot.\n' +
+        unreachInitial.slice(0, 400),
+    );
+    process.exit(3);
+  }
+  applyObservation(unreachModel, unreachInitial);
+
+  /** A ref out of THIS page's model, by label. Fails the guard, never the run. */
+  const uref = (label, role) => {
+    const hits = [...unreachModel.entries()].filter(
+      ([, e]) => e.label === label && (!role || e.role === role),
+    );
+    return hits.length === 1 ? hits[0][0] : null;
+  };
+  /**
+   * The snapshot line for a labelled element, by ROLE as well as by label.
+   *
+   * Role-qualified because a wrapper inherits its only child's text as its
+   * accessible name, so `<div><button>Re-enabled action</button></div>` puts
+   * TWO lines on the wire carrying that string and the first one is the
+   * `generic`. A label-only search silently reads the wrong line — measured
+   * while building G35d, where it made the leg assert about a wrapper.
+   */
+  const lineFor = (text, label, role) =>
+    text
+      .split('\n')
+      .find((l) =>
+        role
+          ? new RegExp(`^\\s*${role} e\\d+ "${label}"`).test(l)
+          : l.includes(`"${label}"`),
+      ) ?? '';
+  const firstLine = (s) => s.split('\n')[0].slice(0, 170);
+
+  const inertSelect = uref('Inert field', 'combobox');
+  const inertButton = uref('Inert action', 'button');
+  const liveSelect = uref('Live field', 'combobox');
+  const ghostButton = uref('Ghost action', 'button');
+  const ghostSelect = uref('Ghost field', 'combobox');
+  const openDialog = uref('Open dialog', 'button');
+  const background = uref('Background action', 'button');
+  const shadowButton = uref('Shadow inert action', 'button');
+  const reenabled = uref('Re-enabled action', 'button');
+  const besideNonmodal = uref('Beside the non-modal', 'button');
+  const insideNonmodal = uref('Inside the non-modal', 'button');
+  const missing = Object.entries({
+    inertSelect, inertButton, liveSelect, ghostButton, ghostSelect,
+    openDialog, background, shadowButton, reenabled, besideNonmodal,
+    insideNonmodal,
+  })
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length) {
+    console.error(
+      `G34-G36 could not run: unreachable.html did not yield refs for ${missing.join(', ')}.\n` +
+        [...unreachModel.entries()].map(([r, e]) => `  ${r} ${e.role} "${e.label}"`).join('\n'),
+    );
+    process.exit(3);
+  }
+
+  // --- G34c / G35c: the RENDERED half ---------------------------------------
+  //
+  // Enforcement without rendering leaves the agent refused with no way to have
+  // known; rendering without enforcement is worse (a build that passes these
+  // two and fails G34a/G35a looks healthier than HEAD while being no safer).
+  check(
+    'G34c',
+    "the inert select's snapshot line says `inert`, so the agent can see why",
+    /\binert\b/.test(lineFor(unreachInitial, 'Inert field', 'combobox')),
+    `line: ${lineFor(unreachInitial, 'Inert field', 'combobox').trim() || '(not found)'}`,
+  );
+  check(
+    'G35c',
+    "the no-pointer button's snapshot line says `no-pointer`",
+    /\bno-pointer\b/.test(lineFor(unreachInitial, 'Ghost action', 'button')),
+    `line: ${lineFor(unreachInitial, 'Ghost action', 'button').trim() || '(not found)'}`,
+  );
+
+  // --- G34a: select inside [inert] ------------------------------------------
+  {
+    const before = await witness();
+    const out = await call('browser_act', {
+      action: 'select', ref: inertSelect, option: 'Beta',
+    });
+    const after = await witness();
+    check(
+      'G34a',
+      'action:"select" on a <select> inside an [inert] panel is refused, and writes nothing',
+      /^error:/.test(out) && /inert/.test(out) &&
+        after === before && !after.includes('inert-select='),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G34b: the twin control ------------------------------------------------
+  {
+    const before = await witness();
+    const out = await call('browser_act', {
+      action: 'select', ref: liveSelect, option: 'Beta',
+    });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G34b',
+      'the identical select OUTSIDE the inert panel still succeeds, and the page records it',
+      /^ok select/.test(out) && after !== before && after.includes('live-select=b'),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G34d: click inside [inert] -------------------------------------------
+  {
+    const before = await witness();
+    const out = await call('browser_act', { action: 'click', ref: inertButton });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G34d',
+      'a click on a button inside an [inert] panel is refused, and the page records nothing',
+      /^error:/.test(out) && /inert/.test(out) &&
+        after === before && !after.includes('inert-button'),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G34e: inert ACROSS A SHADOW BOUNDARY ---------------------------------
+  //
+  // The walker pierces shadow roots, so this button is rendered, named and
+  // addressable — but `closest('[inert]')` does not cross the boundary to its
+  // inert host, so an ascent written that way calls it reachable. Added after a
+  // sabotage row (`inInertSubtree` → `closest`) passed all of G34a-d: the two
+  // implementations are indistinguishable on a fixture with no shadow DOM in
+  // it, and every other section of this page is light DOM.
+  {
+    const before = await witness();
+    const out = await call('browser_act', { action: 'click', ref: shadowButton });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G34e',
+      'inert crosses a SHADOW boundary — a button in the shadow root of an inert host is refused',
+      /^error:/.test(out) && /inert/.test(out) &&
+        after === before && !after.includes('shadow-button'),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G35a: click on pointer-events:none, and the WORDING -------------------
+  {
+    const before = await witness();
+    const out = await call('browser_act', { action: 'click', ref: ghostButton });
+    await sleep(200);
+    const after = await witness();
+    // The bystander regression is the thing this leg pins. `.ghost` sits over a
+    // decoy sibling, so pre-fix the hit-test resolved to the decoy and the
+    // error blamed it — a refusal the agent cannot act on, because dismissing
+    // the named "overlay" would not help.
+    check(
+      'G35a',
+      'a click on a pointer-events:none button is refused for the RIGHT reason, not as an obstruction',
+      /^error:/.test(out) && /pointer-events/.test(out) && !/is covered by/.test(out) &&
+        after === before && !after.includes('ghost-button'),
+      `reply: ${firstLine(out)}\n        ` +
+        `names pointer-events: ${/pointer-events/.test(out)}; ` +
+        `blames a bystander: ${/is covered by/.test(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G35b: THE ASYMMETRY — select must still work -------------------------
+  {
+    const before = await witness();
+    const out = await call('browser_act', {
+      action: 'select', ref: ghostSelect, option: 'Gamma',
+    });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G35b',
+      'action:"select" on a pointer-events:none select SUCCEEDS — a human reaches it by keyboard',
+      /^ok select/.test(out) && after !== before && after.includes('ghost-select=c'),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G35d: the OVER-BLOCKING control --------------------------------------
+  //
+  // A `pointer-events: none` container with one child that turns it back on is
+  // the commonest real shape of all, and `pointer-events` INHERITS — so the
+  // only honest answer is the computed value ON THE ELEMENT. Added after a
+  // sabotage row (walk the ancestors looking for `none` instead of reading the
+  // computed value) passed G35a, G35b and G35c: every no-pointer control on
+  // this page was directly styled, so nothing distinguished "computed on the
+  // element" from "any ancestor says none".
+  {
+    const before = await witness();
+    const out = await call('browser_act', { action: 'click', ref: reenabled });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G35d',
+      'a child that re-enables pointer-events inside a no-pointer container is NOT blocked',
+      /^ok click/.test(out) && after !== before && after.includes('reenabled-button') &&
+        !/\bno-pointer\b/.test(lineFor(unreachInitial, 'Re-enabled action', 'button')),
+      `reply: ${firstLine(out)}\n        ` +
+        `snapshot line: ${lineFor(unreachInitial, 'Re-enabled action', 'button').trim() || '(not found)'}\n        ` +
+        `witness: ${after}`,
+    );
+  }
+
+  // --- G36e: a NON-MODAL <dialog open> gates nothing -------------------------
+  //
+  // `aria-modal` and a plain open <dialog> are ADVISORY: the platform makes no
+  // background inert for either, and a human uses the rest of the page
+  // normally. Added after a sabotage row (`dialog:modal` → `dialog[open]`)
+  // passed every other leg — a page carrying an open non-modal dialog would
+  // have been taken away from the agent entirely, and no leg that only ever
+  // calls `showModal()` can see it. Runs BEFORE the modal is opened, for the
+  // obvious reason.
+  {
+    const before = await witness();
+    const beside = await call('browser_act', { action: 'click', ref: besideNonmodal });
+    await sleep(200);
+    const inside = await call('browser_act', { action: 'click', ref: insideNonmodal });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G36e',
+      'a NON-modal <dialog open> gates nothing — inside it and beside it both still work',
+      /^ok click/.test(beside) && /^ok click/.test(inside) &&
+        after !== before && after.includes('beside-nonmodal') &&
+        after.includes('nonmodal-inside'),
+      `beside: ${firstLine(beside)}\n        inside: ${firstLine(inside)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G36c: the control, taken FIRST ---------------------------------------
+  //
+  // Before the dialog is ever opened, the background button must be ordinary.
+  // Taken first so a build that refuses the background click unconditionally
+  // cannot pass G36a by breaking the page.
+  {
+    const before = await witness();
+    const out = await call('browser_act', { action: 'click', ref: background });
+    await sleep(200);
+    const after = await witness();
+    check(
+      'G36c',
+      'with the dialog CLOSED, the background button is an ordinary button',
+      /^ok click/.test(out) && after !== before && after.includes('background-action'),
+      `reply: ${firstLine(out)}\n        witness: ${after}`,
+    );
+  }
+
+  // --- G36a / G36b: the small open modal ------------------------------------
+  {
+    const opened = await call('browser_act', { action: 'click', ref: openDialog });
+    await sleep(400);
+    if (!/^ok click/.test(opened)) {
+      for (const g of ['G36a', 'G36b']) {
+        check(g, 'the small modal dialog gates the background', false,
+          `not reached: opening the dialog failed — ${firstLine(opened)}`);
+      }
+    } else {
+      const before = await witness();
+      const blocked = await call('browser_act', { action: 'click', ref: background });
+      await sleep(200);
+      const after = await witness();
+      check(
+        'G36a',
+        'with a SMALL modal dialog open, a click on a background button beside it is refused as modal',
+        /^error:/.test(blocked) && /modal dialog/.test(blocked) &&
+          after === before && !after.includes('background-action background-action'),
+        `reply: ${firstLine(blocked)}\n        ` +
+          `names the modal: ${/modal dialog/.test(blocked)}; ` +
+          `blames a bystander: ${/is covered by/.test(blocked)}\n        witness: ${after}`,
+      );
+
+      // G36d — THE LEG THAT KEEPS G36 FROM BEING COSMETIC.
+      //
+      // Measured, and it corrects tier6 §4.1's read-only mechanism claim: under
+      // Chromium a modal `<dialog>`'s `::backdrop` covers the WHOLE viewport
+      // and `document.elementFromPoint` returns the `<dialog>` for every point
+      // over it. So the pre-fix hit-test does refuse an ordinary background
+      // click — for the wrong reason, with remediation ("dismiss the overlay")
+      // that sends the agent hunting for a cookie banner.
+      //
+      // But the hit-test has an escape hatch the modal rule does not:
+      // `resolveRef` excuses obstruction when the target CONTAINS the element
+      // at the point (`composedContains(el, atPoint)`), which is exactly true of
+      // every addressable ANCESTOR of the dialog. That is a background act on an
+      // open modal that lands today, and the ruled design refuses it — an
+      // element outside the open dialog's composed subtree is refused, and the
+      // dialog's own parent is outside its subtree.
+      const panel = uref('Dialog panel', 'region');
+      if (!panel) {
+        check('G36d', 'an addressable ANCESTOR of the open dialog is refused too', false,
+          'no ref for the "Dialog panel" region — cannot exercise the containment escape hatch');
+      } else {
+        const outPanel = await call('browser_act', { action: 'click', ref: panel });
+        await sleep(200);
+        check(
+          'G36d',
+          'an addressable ANCESTOR of the open dialog is refused too — the containment escape hatch does not excuse a modal',
+          /^error:/.test(outPanel) && /modal dialog/.test(outPanel),
+          `reply: ${firstLine(outPanel)}\n        ` +
+            'pre-fix this is `ok click`: the hit-test resolves to the DIALOG, and ' +
+            '`composedContains(el, atPoint)` excuses it because the target is the dialog\'s parent',
+        );
+      }
+
+      // The over-blocking guard. A build that refused everything while a dialog
+      // is open would pass G36a and trap the agent in a dialog it cannot use.
+      const inRef = refIn(opened, 'Confirm inside the dialog', 'button')
+        ?? uref('Confirm inside the dialog', 'button');
+      if (!inRef) {
+        check('G36b', 'the button INSIDE the open dialog still works', false,
+          'the dialog subtree carried no ref for "Confirm inside the dialog"');
+      } else {
+        const before2 = await witness();
+        const inside = await call('browser_act', { action: 'click', ref: inRef });
+        await sleep(200);
+        const after2 = await witness();
+        check(
+          'G36b',
+          'the button INSIDE the open dialog still works — the gate is directional, not a blanket no',
+          /^ok click/.test(inside) && after2 !== before2 && after2.includes('in-dialog'),
+          `reply: ${firstLine(inside)}\n        witness: ${after2}`,
+        );
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // G33: Web Bot Auth — signing happens where it should, and NOWHERE ELSE
 // ---------------------------------------------------------------------------
 //

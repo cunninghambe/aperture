@@ -120,8 +120,14 @@ export function walk(ctx: WalkContext): WalkResult {
 
   const body = doc.body;
   if (body) {
+    // `inert` on <body> or <html> is inherited by everything under it, and the
+    // walk starts at body's children — so the root's inherited value has to be
+    // computed here rather than assumed false.
+    const rootInert =
+      body.hasAttribute('inert') ||
+      doc.documentElement?.hasAttribute('inert') === true;
     for (const child of Array.from(body.children)) {
-      const n = visit(child as HTMLElement, ctx, 0, []);
+      const n = visit(child as HTMLElement, ctx, 0, [], rootInert);
       if (n) root.children.push(n);
     }
   }
@@ -154,9 +160,31 @@ function visit(
   ctx: WalkContext,
   depth: number,
   ancestry: string[],
+  /**
+   * Does an ANCESTOR carry `inert`?
+   *
+   * Threaded down the recursion rather than recomputed with `closest()` per
+   * node: this is O(1) per element where the ancestor walk would be O(depth),
+   * on the hottest loop in the product. It also crosses shadow boundaries for
+   * free, because the recursion already descends the composed tree through
+   * `childSource`, which `closest()` would not.
+   */
+  inheritedInert = false,
 ): SnapshotNode | null {
   if (depth > MAX_DEPTH) return null;
-  if (!isRendered(el, ctx.win)) return null;
+  // The cheap attribute/tag tests first, so the style read below is paid only
+  // for elements that could survive it — the short-circuit `isRendered` used
+  // to do internally.
+  if (!isRenderableNode(el)) return null;
+  // ONE `getComputedStyle` per element, shared by the visibility test and the
+  // state bits. `isRendered` already paid for one, so reading `pointerEvents`
+  // costs nothing extra (tier6 §4.2.3) — and it must be the COMPUTED value,
+  // because `pointer-events` inherits and a class on an ancestor is the common
+  // way it arrives.
+  const cs = ctx.win.getComputedStyle(el);
+  if (!isVisible(cs)) return null;
+
+  const inert = inheritedInert || el.hasAttribute('inert');
 
   const role = roleOf(el);
   // Containers take only an explicit name. Letting a <ul> or <main> inherit
@@ -187,7 +215,7 @@ function visit(
     : Array.from(el.children);
 
   for (const c of childSource) {
-    const n = visit(c as HTMLElement, ctx, depth + 1, nextAncestry);
+    const n = visit(c as HTMLElement, ctx, depth + 1, nextAncestry, inert);
     if (n) kids.push(n);
   }
 
@@ -219,7 +247,7 @@ function visit(
   const node: SnapshotNode = {
     role,
     key,
-    states: statesOf(el, ctx.win, rect),
+    states: statesOf(el, ctx.win, rect, role, cs, inert),
     frameId: ctx.frameId,
     rect,
     children: kids,
@@ -599,7 +627,14 @@ export function accessibleName(el: HTMLElement): string | undefined {
 // State and geometry
 // ---------------------------------------------------------------------------
 
-function statesOf(el: HTMLElement, win: Window, rect: Rect): StateBits {
+function statesOf(
+  el: HTMLElement,
+  win: Window,
+  rect: Rect,
+  role: Role,
+  cs: CSSStyleDeclaration,
+  inert: boolean,
+): StateBits {
   let s = 0;
   const aria = (n: string): string | null => el.getAttribute(`aria-${n}`);
 
@@ -619,6 +654,15 @@ function statesOf(el: HTMLElement, win: Window, rect: Rect): StateBits {
   if ((el as HTMLInputElement).readOnly === true) s |= State.Readonly;
   if (aria('modal') === 'true') s |= State.Modal;
   if (el.ownerDocument.activeElement === el) s |= State.Focused;
+
+  // `inert` is already the ANCESTOR-AWARE answer — threaded down `visit`'s
+  // recursion, so it crosses shadow boundaries and costs O(1) here.
+  if (inert) s |= State.Inert;
+  // ROLE-GATED, and this is the whole reason the word is affordable:
+  // decorative overlays carry `pointer-events: none` constantly, so emitting
+  // it everywhere would cost tokens on every page and tell the agent nothing
+  // about anything it could act on.
+  if (ADDRESSABLE.has(role) && cs.pointerEvents === 'none') s |= State.NoPointer;
 
   const inView = rect[1] < win.innerHeight && rect[1] + rect[3] > 0;
   if (!inView) s |= State.Offscreen;
@@ -665,7 +709,15 @@ function rectOf(el: HTMLElement): Rect {
   return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
 }
 
-function isRendered(el: HTMLElement, win: Window): boolean {
+/**
+ * The two halves of what `isRendered` used to be, split so the caller can pay
+ * for exactly one `getComputedStyle` and hand it to `statesOf` as well.
+ *
+ * The order is preserved from the single function: everything answerable from
+ * attributes and tag names is asked FIRST, so a <script> or a bound <label>
+ * still costs no style resolution at all.
+ */
+function isRenderableNode(el: HTMLElement): boolean {
   if (el.hasAttribute('hidden')) return false;
   if (el.getAttribute('aria-hidden') === 'true') return false;
   const tag = el.tagName;
@@ -676,8 +728,10 @@ function isRendered(el: HTMLElement, win: Window): boolean {
   // carries that text as its accessible name, so emitting the label too
   // doubles the line count of every form on the web.
   if (el instanceof HTMLLabelElement && el.control) return false;
+  return true;
+}
 
-  const cs = win.getComputedStyle(el);
+function isVisible(cs: CSSStyleDeclaration): boolean {
   if (cs.display === 'none' || cs.visibility === 'hidden') return false;
   if (cs.opacity === '0') return false;
   return true;

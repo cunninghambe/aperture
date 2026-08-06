@@ -27,7 +27,7 @@ SERVER=$!
 sleep 1
 
 FAILED=0
-for scenario in form rerender widgets biglist selects blindfields; do
+for scenario in form rerender widgets biglist selects blindfields filterlist; do
   taskkill //F //IM electron.exe >/dev/null 2>&1
   sleep 3
   npx electron . > /tmp/ap-$scenario.log 2>&1 &

@@ -361,6 +361,32 @@ const SCENARIOS = {
       { anyLabel: 'Following' },
     ],
   },
+
+  // The changed survivor inside a replaced subtree (docs/design/tier6.md §2.4).
+  //
+  // One click rebuilds an 8-row list as six fresh rows plus two survivors, and
+  // moves the survivor whose link text CHANGED from the head of the list into
+  // the tail the collapse machinery elides. A `replace` escalation emits no
+  // update op for anything inside its own subtree (walk() returns immediately —
+  // diff.ts 226/274/324), so the changed text exists only in the rendered
+  // subtree: collapsed, it is nowhere on the wire at all, and nothing
+  // downstream ever contradicts the model's stale belief.
+  //
+  // The standard comparison does the work — the reader must hold every item's
+  // label from the stream alone, and against the unfixed build it holds
+  // "In stock" for a link the page calls "Backordered": one WRONG LABEL, RED.
+  // The independent check is the same claim without the truth snapshot, so a
+  // walker that agreed with itself could not launder it.
+  filterlist: {
+    url: `${BASE}/filterlist.html`,
+    steps: [{ do: 'click', label: 'Refilter' }],
+    expect: { minRefs: 10, minDiffs: 1 },
+    independent: [{ anyLabel: 'Backordered' }],
+    // Prints (never asserts) the tier2 §1 economics line — see §2.4. Carrying
+    // the numbers in every green run is the point: the claim "expansion is
+    // cheaper than the deferred read" should never have to be looked up.
+    arithmetic: true,
+  },
 };
 
 const which = process.argv[3] ?? 'form';
@@ -464,6 +490,8 @@ console.log(`initial full snapshot: ${model.size} refs tracked`);
 const initialProblems = scenario.checkInitial ? scenario.checkInitial(initial) : [];
 
 let observedTokens = 0;
+/** Raw chars of each step's observation, for the §2.4 arithmetic line. */
+const stepChars = [];
 let diffSteps = 0;
 let fullSteps = 0;
 let sawSuppression = false;
@@ -513,6 +541,7 @@ for (const [i, step] of scenario.steps.entries()) {
   if (/live-region updates? suppressed/.test(out)) sawSuppression = true;
 
   observedTokens += Math.ceil(out.length / 4);
+  stepChars.push(out.length);
   applyObservation(model, out);
 
   if (step.do === 'type') typed.set(ref, step.text);
@@ -549,10 +578,10 @@ for (const [i, step] of scenario.steps.entries()) {
 // Ground truth, never shown to the "agent" above. Expanded and generously
 // budgeted: the model side above is the production stream being measured,
 // this side only has to be complete.
-const truth = truthFrom(
-  await call('browser_snapshot', { mode: 'full', expand: true, budgetTokens: 20000 }),
-  scenario.expect.minRefs,
-);
+const truthText = await call('browser_snapshot', {
+  mode: 'full', expand: true, budgetTokens: 20000,
+});
+const truth = truthFrom(truthText, scenario.expect.minRefs);
 
 // ---------------------------------------------------------------------------
 // Vacuity guards — BEFORE any verdict. A perfect score over an empty or
@@ -792,6 +821,30 @@ if (scenario.expect.suppression) {
   console.log(`volatility suppression note : ${sawSuppression ? 'seen' : 'NOT SEEN'}`);
 }
 console.log(`observation cost            : ${observedTokens} tokens for ${scenario.steps.length} actions`);
+
+// The economics tier2 §1 asked to see, PRINTED and never asserted (tier6 §2.4).
+//
+// The honest scope, stated rather than implied: a build can only measure the
+// diff IT renders. "Expanded diff chars vs collapsed diff chars" is a
+// CROSS-BUILD subtraction, and the collapsed term is measurable only against
+// the pre-fix build — it lives in the red record, not here. What every run can
+// measure is the comparison that decides the question: the diff that carried
+// the replace, against the channel a collapsed subtree defers the same content
+// to — a whole extra turn spending an `expand:true` FULL page snapshot.
+if (scenario.arithmetic) {
+  const diffChars = stepChars[stepChars.length - 1] ?? 0;
+  const tok = (n) => `${n} chars (~${Math.ceil(n / 4)} tokens)`;
+  console.log('');
+  console.log('expansion arithmetic (tier6 §2.4, printed not asserted):');
+  console.log(`  the diff that carried the replace : ${tok(diffChars)}`);
+  console.log(`  the deferred read it replaces     : ${tok(truthText.length)}` +
+    ' — one extra turn, expand:true FULL snapshot of the same page');
+  console.log(
+    `  ratio                             : ${(diffChars / (truthText.length || 1)).toFixed(2)}x` +
+      ' (a collapsed diff is strictly SMALLER than the expanded one, so adding' +
+      ' its chars to the right-hand side only widens the gap)',
+  );
+}
 
 if (problems.length) {
   console.log('\nProblems:');

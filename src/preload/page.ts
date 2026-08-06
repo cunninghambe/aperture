@@ -557,7 +557,17 @@ function checkTarget(t: FillTarget, el: HTMLElement): FillReason | null {
   // reason (see the `aperture:select` handler below), and repeating it here
   // would be repeating a bug this codebase has already paid for once. The
   // change can only ever refuse MORE, never less. Measured by guard G25b.
-  if (isDisabled(input) || input.readOnly) return 'not-editable';
+  //
+  // AN INERT ANCESTOR IS THE SAME RULE and slipped through until tier6 §4.2: a
+  // human cannot type into an inert field either, and this write does not go
+  // through the CDP input path that the platform would have stopped. It
+  // returns the EXISTING token rather than growing the deny vocabulary —
+  // `not-editable` is already what "a human could not have typed here" means
+  // on this path, and a new token would need a new prose string, a new
+  // `FILL_REASON` mapping and a new guard for no measurement gain.
+  if (isDisabled(input) || input.readOnly || inInertSubtree(input)) {
+    return 'not-editable';
+  }
 
   if (credential) {
     const r = input.getBoundingClientRect();
@@ -648,6 +658,13 @@ ipcRenderer.on(
         obstructor: obstructed
           ? (atPoint?.tagName ?? '') + (atPoint?.id ? `#${atPoint.id}` : '')
           : null,
+        // Reachability facts the hit-test cannot see, and in two of the three
+        // cases actively MISREPORTS: a `pointer-events: none` target cannot be
+        // its own hit-test result, so it reads as "covered by" whatever sits
+        // beneath it, and an addressable ANCESTOR of an open modal dialog is
+        // excused by the containment test above. A fixed vocabulary, never
+        // page bytes — these land in prose outside the untrusted envelope.
+        blocked: blockedReason(el),
         tag: el.tagName,
         editable:
           el instanceof HTMLInputElement ||
@@ -749,6 +766,65 @@ function composedContains(ancestor: Element, node: Element): boolean {
     cur = cur.parentNode ?? (cur instanceof ShadowRoot ? cur.host : null);
   }
   return false;
+}
+
+/**
+ * Is this element inside an `[inert]` subtree?
+ *
+ * The SAME composed-tree ascent `composedContains` uses, and deliberately not
+ * `closest('[inert]')`: `closest` stops at a shadow boundary, so an inert host
+ * would not be seen from inside its own shadow root — and the walker pierces
+ * shadow roots, so the agent is shown those elements and can name them.
+ *
+ * One helper, three consumers (the resolve gate, the select handler and the
+ * fill preflight), because three copies of "is this reachable" is how one of
+ * them goes stale.
+ */
+function inInertSubtree(node: Element): boolean {
+  let cur: Node | null = node;
+  while (cur) {
+    if (cur instanceof Element && cur.hasAttribute('inert')) return true;
+    cur = cur.parentNode ?? (cur instanceof ShadowRoot ? cur.host : null);
+  }
+  return false;
+}
+
+/**
+ * Why a human could not reach this element — `null` when they could.
+ *
+ * Computed HERE, in the preload, because this is where the live element is.
+ * First match wins and the order is the order of severity: an inert control
+ * inside an open dialog's background is inert AND behind a modal, and "the
+ * page has disabled it" is the more actionable of the two.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: `aria-modal="true"` div overlays. aria-modal
+ * is ADVISORY — the platform does not make the background inert, a human can
+ * still Tab into it — so the hit-test remains the only honest gate there, on
+ * the covered-point case only, exactly as before. `dialog:modal` is different
+ * in kind: the platform itself blocks the background.
+ */
+function blockedReason(el: Element): 'inert' | 'modal' | 'no-pointer' | null {
+  if (inInertSubtree(el)) return 'inert';
+
+  // Wrapped, and the catch means "no modal": a page cannot be allowed to break
+  // the resolve by breaking the selector engine, and an Electron whose Chromium
+  // lacked `:modal` would otherwise fail every act rather than degrade. The
+  // failure mode of the degraded path is a RED G36, which is the correct
+  // discovery route.
+  let modal: Element | null = null;
+  try {
+    modal = document.querySelector('dialog:modal');
+  } catch {
+    modal = null;
+  }
+  if (modal && !composedContains(modal, el)) return 'modal';
+
+  try {
+    if (getComputedStyle(el).pointerEvents === 'none') return 'no-pointer';
+  } catch {
+    // Same posture: an unresolvable style is not a reason to fail the act.
+  }
+  return null;
 }
 
 /**
@@ -910,6 +986,22 @@ ipcRenderer.on(
       // this the snapshot could not even show the agent.
       if (isDisabled(el)) {
         return reply({ ok: false, reason: 'select-disabled', total: el.options.length });
+      }
+      // BELT AND BRACES, the shape the disabled fix above already uses: the
+      // resolve gate in tools.ts refuses these too, and this handler refuses
+      // them again so the invariant holds even if a future caller skips it.
+      // Fixed tokens, never interpolated — they land outside the envelope.
+      //
+      // NO `no-pointer` HERE, and that is the ruled asymmetry rather than an
+      // omission: `pointer-events` blocks POINTER input only, a human Tabs to
+      // such a select and changes it with the keyboard, and `select` is
+      // already the no-coordinates state-mutation path. Refusing it would make
+      // the agent weaker than a human — the inverse failure (tier6 §4.2).
+      if (inInertSubtree(el)) {
+        return reply({ ok: false, reason: 'inert', total: el.options.length });
+      }
+      if (blockedReason(el) === 'modal') {
+        return reply({ ok: false, reason: 'modal', total: el.options.length });
       }
 
       const opts = optionsOf(el);

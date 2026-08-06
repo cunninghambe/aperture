@@ -168,55 +168,90 @@ replicates it independently.
 
 ## Open defects, with their evidence
 
-### 1. `identity_mismatch` cannot fire on identical-label rows
+### 1. `identity_mismatch` — CLOSED (documented domain, claim retired, tier6 §5)
 
-The detector compares labels; the queue rows are identical by construction, so
-a rebound ref lands on a same-labelled button and `labelsAgree` passes. Zero
-`identity_mismatch` across both 385-episode cohorts is a **detector limitation,
-not an absence of the hazard** — `wrong_choice` is where the rebind route lands.
-Never cite the zero as evidence, in either direction. The claim that *is*
-licensed post-tier5 rests on `wrong_choice` going to zero while refused-stale
-acts rose to 90, not on this detector. (h2h §0.6, obligation §8.6.)
+A **label-divergence tripwire, not a rebind detector**: it compares
+page-reported label to shadow-model label (`labelsAgree`), so it is unreachable
+by construction on identical-label rows — which is every fixture built to
+stress positional rebinding. The rebind hazard's detectors of record are
+`wrong_choice` (page ground truth from the task's `allowed` set, h2h.mjs:352)
+and the refused-stale counts; the zero is never citable, in either direction.
+The bucket stays: it still catches the cross-family class (bench/tasks.mjs
+~331), and deleting it would sever stores and break the
+`benchAttribution.test.ts` pins for no measurement gain. There is no honest
+repair — one would need page-side ground truth for what each ref pointed at
+when read, which the product deliberately withholds from the wire. The
+vocabulary note lives in headtohead.md §5 (obligation #9 discharged); the
+`proxy.mjs` docstring **rides the next harness bundle**, with tier2 §8.2's
+hygiene comment.
 
-### 2. Replace-op elision can hide a changed survivor
+### 2. Replace-op elision — FIXED (tier6 §2)
 
-A replace subtree renders collapsed. A surviving ref in the elided tail whose
-*content changed in the same re-render* goes stale in the model with no
-re-announcement (`runOwesReannounce` covers revived refs, not changed ones). No
-fixture constructs this; it is the most plausible remaining fidelity hole.
-tier2 §1 (expand `add`/`replace` subtrees, `expand: false` → `true` at
-render.ts ~410 and ~433) is the ruled fix and has **not** landed.
+`add`/`replace` op subtrees render expanded (render.ts, the two `expand`
+literals). The changed-survivor case is pinned by unit rows in
+`test/snapshot.test.ts` and by the new `filterlist` fidelity scenario, both
+shown RED against the pre-fix build — `"e3: agent has label \"In stock\",
+page has \"Backordered\""`, one wrong label and one failed independent check,
+against build `1faac8cb…`. Seven fidelity scenarios now; none of the
+pre-existing six moved a diff, resync or ref count. Arithmetic in RESULTS.md.
 
-### 3. `~ eN "A"` is ambiguous by format
+### 3. `~ eN "A"` ambiguity — FIXED (tier6 §3)
 
-One quoted string could be a name change or a text change; no reader, model or
-mechanical, can tell. Harmless today because name and text co-change for the
-nodes that emit it, but the format owes a disambiguator. Deliberately deferred
-(tier2 §10) rather than forced through a wire-format change mid-backlog.
+Upgraded from tier2 §10's deferral because it was **corrupting, not merely
+ambiguous**: a text-only delta on an aria-labelled button emitted a bare
+`~ e1 "✕"` and the shared reader applied it as a LABEL change, leaving a wrong
+belief nothing downstream ever contradicts. Wire rule now: a bare quoted string
+on a `~` line is always and only the new accessible name; inner text is spelled
+`text "…"`; a name/text co-change emitting identical strings is deduped. The
+reader parses by the token BEFORE each quoted string — one escape-aware scan,
+not another regex excision, because a name whose content ends in `text ` defeats
+any excision order. Renderer, reader, legend and tests landed together; the
+misapply is pinned RED-first in `test/benchStream.test.ts`.
 
-### 4. `inert`, `pointer-events: none`, and small modal dialogs
+### 4. `inert` / `pointer-events` / small modals — FIXED (tier6 §4)
 
-`statesOf` consults `:disabled` only; the `select` handler refuses on
-`isDisabled` only; `resolveRef`'s hit-test catches a *covering* overlay but not
-these. So: a `<select>` inside an `[inert]` subtree is writable by
-`action:"select"`; a control in the inert background of a small
-`dialog.showModal()` is clickable whenever the dialog does not cover its point;
-and a `pointer-events: none` target hit-tests to whatever is beneath it,
-producing an obstruction error naming an innocent bystander. Every one is the
-agent acting where a human demonstrably cannot. Spec: tier2 §5.
+Rendered `inert` and `no-pointer` state words (State bits 2048/4096, appended to
+STATE_NAMES); a `blocked: 'inert' | 'modal' | 'no-pointer'` field on the resolve
+reply, computed in the preload; a per-action refusal matrix in tools.ts asked
+BEFORE the hit-test — `select` allows no-pointer, which is the keyboard
+asymmetry and is load-bearing; belt-and-braces refusals in the `aperture:select`
+handler; and the inert ascent added to the fill preflight (`checkTarget`,
+returning the existing `not-editable` token). Guards **G34–G36**, eleven legs
+plus three added by the sabotage matrix, with the red record in
+`docs/design/g34-36-red-record.md`. Pre-fix evidence includes `ok select e62 →
+"Beta"` with the page's own witness reading `inert-select=b`.
 
-### 5. Input-witness (W1) residuals
+One correction to the spec, measured: a modal `<dialog>`'s `::backdrop` covers
+the whole viewport in Chromium, so the pre-fix build already refused an ordinary
+background click — as an *obstruction*, naming the dialog and advising the agent
+to dismiss an overlay. What actually landed pre-fix was the containment escape
+hatch (guard G36d): `resolveRef` excuses obstruction when the target CONTAINS
+the element at the point, and every addressable ancestor of the dialog does.
 
-W1 now covers scroll and key as well as element-targeted acts (tier3 §1.3,
-closing the Gate-2 open item), and its `unknown`/`landed`/`lost` tallies are
-exposed on `/metrics` with a >10% advisory (tier4 §6.3). Two residuals stand,
-both by design and both stated in the contract:
+### 5. W1 residuals — CLOSED AS DESIGNED (tier6 §6)
 
-- **`unknown` never fails an act.** A dead poll channel, a failed arming, or a
-  subframe-and-silent act all fall through to `observe`.
-- **A page that self-navigates on a timer during settle yields `unknown` per
-  act**, so a wedge on that page class is invisible to W1 — bounded only by the
-  bench liveness canary, whose fixture does not navigate.
+`unknown` never fails an act, by contract (act.ts 98–103, 267): a mechanism that
+turns its own unavailability into an error would invent failures — the Gate-2
+lesson made structural. A page that self-navigates on a timer during settle
+yields `unknown` per act (the `docToken` mismatch proves the document changed,
+not that the input arrived), so a wedge on that page class is invisible to W1 in
+principle and is covered only bench-side, by the collector's fixture-truth
+witness events. Verified in the same function: a wedge on a NON-navigating page
+cannot escape through that door — nothing navigates, the token still matches,
+the counters stay frozen through the 2500ms re-poll → `lost`.
+
+Three strengthenings considered and rejected on the record: escalating N
+consecutive `unknown`s (converts apparatus states into invented act failures);
+distinguishing timer-navigation from input-navigation (not derivable from the
+recorder's counters); a self-navigating liveness canary (receives `unknown`
+whether the input path is healthy or wedged, so it cannot discriminate).
+
+The production surface is `witnessTally()` on `/metrics` with the >10% advisory
+(tier4 §6.3). **It has never seen production data**: 0 of 385 h2h episodes and
+0 of 230 task episodes carry a witness field, both cohorts predating the stamp,
+so the advisory's only discrimination evidence is its `benchReport.test.ts`
+console-capture row and the first post-tier6 cohort will be its first live
+reading.
 
 Related loose thread, still on the books: the once-in-~450-acts `ok click e6`
 that never reached the button (wave 1), unreproduced in three cold starts. W1
@@ -610,11 +645,11 @@ npx http-server test/fixtures -p 8899 -c-1 --silent &
 npx electron . > /tmp/ap.log 2>&1 &
 sleep 15
 TOK=$(grep -oE "Bearer [A-Za-z0-9_-]+" /tmp/ap.log | head -1 | cut -d' ' -f2)
-node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects | blindfields
+node bench/fidelity.mjs "$TOK" form   # or rerender | widgets | biglist | selects | blindfields | filterlist
 npm run bench:guards -- "$TOK"        # optional 2nd arg: fixture base URL
 ```
 
-All six fidelity scenarios in one go, one fresh Aperture each:
+All seven fidelity scenarios in one go, one fresh Aperture each:
 `bash bench/fidelity-all.sh`.
 
 Exit codes for `fidelity.mjs`: 0 green · 1 red · 2 truth unusable · 3 step

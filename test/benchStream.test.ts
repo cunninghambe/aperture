@@ -299,12 +299,135 @@ describe('applyObservation — the update-line wire form for the blind fields', 
     expect(m.has('e8')).toBe(false);
   });
 
+  it('the reader can SEE the reachability words the walker now emits', () => {
+    // Without an entry in STATE_WORDS this reader drops the word — and it
+    // builds BOTH sides of every fidelity comparison, so a dropped state
+    // compares stale-against-fresh as equal and no scenario could ever go red
+    // on it. That is the propDelta blind-field failure exactly, one field
+    // along, which is why tier6 §4.3 puts this row in the same change set as
+    // the walker bits.
+    const m = new Map();
+    applyObservation(m, 'combobox e1 "Inert field"');
+    applyObservation(m, '~ e1 +inert');
+    expect(m.get('e1').states.has('inert')).toBe(true);
+    applyObservation(m, '~ e1 -inert +no-pointer');
+    expect(m.get('e1').states.has('inert')).toBe(false);
+    expect(m.get('e1').states.has('no-pointer')).toBe(true);
+    // And on a full-snapshot line, which is the other half of the wire.
+    const f = new Map();
+    applyObservation(f, 'button e2 "Ghost action" no-pointer');
+    expect(f.get('e2').states.has('no-pointer')).toBe(true);
+  });
+
   it('an href token cannot smuggle a state flag into the model', () => {
     const m = new Map();
     applyObservation(m, 'link e4 "L" /a');
     applyObservation(m, '~ e4 href=/b+checked');
     expect(m.get('e4').href).toBe('/b+checked');
     expect(m.get('e4').states.size).toBe(0);
+  });
+});
+
+/**
+ * The update line, prefix-disambiguated (tier6 §3).
+ *
+ * WHAT WAS WRONG. `renderOp` pushed a name delta and a text delta as two BARE
+ * quoted strings, and this reader resolved the ambiguity by convention — "first
+ * remaining quoted string is the new name". That convention is not merely
+ * unreadable, it is CORRUPTING: `<button aria-label="Close">×</button>` whose
+ * text becomes `✕` emits `~ e1 "✕"`, and the reader — and, reading the same
+ * legend, the model — overwrites the element's LABEL with `✕`. The element is
+ * still called `Close`; the belief is now wrong, and nothing downstream ever
+ * contradicts it. Name and text diverge whenever the accessible name comes from
+ * aria-* or from descendants, which is most real buttons.
+ *
+ * THE RULE NOW. On a `~` line a bare quoted string is always and only the new
+ * accessible NAME; the inner-text change is spelled `text "…"`. `=` keeps
+ * value, `href=` keeps href, `RxC:` keeps rows — the grammar is fully
+ * prefix-disambiguated, and the reader decides by the token BEFORE each quoted
+ * string rather than by position.
+ */
+describe('applyObservation — a bare string is the name, `text` is the text', () => {
+  it('a bare quoted string still updates the label', () => {
+    // The kept behaviour. Green before and after — it is what says the rows
+    // below are not passing by breaking the ordinary case.
+    const m = new Map();
+    applyObservation(m, 'button e1 "Save"');
+    applyObservation(m, '~ e1 "Saved"');
+    expect(m.get('e1').label).toBe('Saved');
+  });
+
+  it('a `text` delta on an aria-labelled button does NOT touch the label', () => {
+    // THE CORRUPTION, pinned. The probe measured this misapply against HEAD.
+    const m = new Map();
+    applyObservation(m, 'button e1 "Close"');
+    applyObservation(m, '~ e1 text "✕"');
+    expect(m.get('e1').label).toBe('Close');
+    expect(m.get('e1').text).toBe('✕');
+  });
+
+  it('a `text` delta on a text-role entry DOES update its label', () => {
+    // The displayed string of a text line IS its text, so for role `text` the
+    // two are the same fact. The renderer emits the uniform token either way;
+    // the ROLE decides what it means, and the reader is where that lives.
+    const m = new Map();
+    applyObservation(m, 'text e2 "12 products"');
+    expect(m.get('e2').role).toBe('text');
+    applyObservation(m, '~ e2 text "7 products"');
+    expect(m.get('e2').label).toBe('7 products');
+  });
+
+  it('a name whose own content ends in `text ` cannot be mistaken for the token', () => {
+    // WHY A SCANNER AND NOT ANOTHER REGEX PASS. Excision is what made the
+    // misparse possible in the first place, and no single-pass regex survives a
+    // label that ENDS in the token's own spelling. The scanner reads quoted
+    // strings as units and looks at the token immediately before each, which is
+    // unambiguous by construction.
+    const m = new Map();
+    applyObservation(m, 'button e3 "x"');
+    applyObservation(m, '~ e3 "x text " text "T"');
+    expect(m.get('e3').label).toBe('x text ');
+    expect(m.get('e3').text).toBe('T');
+  });
+
+  it('does NOT move the label of an entry whose role the model never learned', () => {
+    // The role gate is `role === 'text'`, and the tempting widening is
+    // `|| role === '?'` — "we do not know what it is, so treat the displayed
+    // string as the label". That re-acquires exactly the default this fix
+    // removed, on the entries LEAST able to survive it.
+    //
+    // `?` is not hypothetical: `applyObservation` manufactures it for any `~ eN`
+    // naming a ref the model does not hold — after a `gone` it applied, after a
+    // compaction, or on the first update for a ref allocated mid-diff. And
+    // fidelity.mjs excuses href/rows for role `?` but still COMPARES the label,
+    // so a misapply here reads as a wrong-element belief about a real page.
+    const m = new Map();
+    applyObservation(m, '~ e9 text "✕"');
+    expect(m.get('e9').role).toBe('?');
+    expect(m.get('e9').label).toBe('');
+    expect(m.get('e9').text).toBe('✕');
+  });
+
+  it('quoted content in a `text` delta still injects no state flag', () => {
+    // The state loop runs after ALL quoted content is consumed, so page text
+    // reading `+checked disabled` cannot become a state. Unchanged contract,
+    // re-asserted through the new scanner because the scanner is what enforces
+    // it now.
+    const m = new Map();
+    applyObservation(m, 'button e4 "B"');
+    applyObservation(m, '~ e4 text "body text +checked disabled"');
+    expect(m.get('e4').states.size).toBe(0);
+    expect(m.get('e4').label).toBe('B');
+  });
+
+  it('value, name and text on one line each land where they belong', () => {
+    const m = new Map();
+    applyObservation(m, 'textbox e5 "Email" ="a@b.c"');
+    applyObservation(m, '~ e5 "Email address" ="x@y.z" text "hint" +focused');
+    expect(m.get('e5')).toMatchObject({
+      label: 'Email address', value: 'x@y.z', text: 'hint',
+    });
+    expect(m.get('e5').states.has('focused')).toBe(true);
   });
 });
 
@@ -392,6 +515,23 @@ describe('renderer → reader round trip', () => {
     const l = [...model.values()].find((e: any) => e.role === 'link');
     expect(l.href).toBe('/checkout-v2');
     expect(l.label).toBe('Continue to checkout');
+  });
+
+  it('a text-only delta round-trips without touching the label', () => {
+    // THE CORRUPTION, end to end through the real engine and the real renderer:
+    // an aria-labelled button whose inner text alone changes. Against the old
+    // wire this line was `~ eN "✕"` and the reader applied it as a rename. The
+    // renderer and the reader are two ends of ONE wire and are edited by nobody
+    // together, which is why this row drives both rather than a hand-written
+    // line.
+    const closer = (t: string) =>
+      node({ role: 'button', name: 'Close', key: 'I|0|button|close', text: t });
+    const { model, text } = stream(page([closer('×')]), page([closer('✕')]));
+    expect(text).toMatch(/^~ e\d+ text "✕"$/m);
+    applyObservation(model, text);
+    const b = [...model.values()].find((e: any) => e.role === 'button');
+    expect(b.label).toBe('Close');
+    expect(b.text).toBe('✕');
   });
 
   it('reads the same rows whether they arrived by full snapshot or by update', () => {

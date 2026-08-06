@@ -566,6 +566,28 @@ What does NOT survive unchanged, and the decisions:
    previous snapshot did contain — pw's analogue of ref loss), `tool_fault`
    (§6 H9). The report compares like with like and says where the
    vocabularies differ.
+
+   > **`identity_mismatch` is a label-divergence tripwire, not a rebind
+   > detector** (tier6 §5; obligation #9 from h2h-evaluation §8.6). It compares
+   > page-reported label to shadow-model label (`labelsAgree`), so it is
+   > unreachable by construction wherever the rows are identical by design —
+   > which is every fixture built to stress positional rebinding. On those
+   > fixtures a rebound ref that LANDS is counted in `wrong_choice`, and a zero
+   > in this column is a statement about label diversity, never about the
+   > hazard. Do not cite the zero, in either direction. The rebind hazard's
+   > detectors of record are `wrong_choice` (page ground truth — computed at
+   > h2h.mjs:352 from the task's `allowed` set, never from labels, and the
+   > instrument that caught the 27 landed wrong-row clicks pre-tier5 and the 0
+   > post-tier5) and the refused-stale counts; post-tier5 the engine retires
+   > positional families on membership change, so the landing route is closed
+   > and measured closed (h2h-post-tier5-evaluation §2). The residual P2
+   > same-size churn route is undetectable in principle at the key level
+   > (tier4 §1.4) and is not claimed to be covered by anything. The bucket is
+   > kept rather than deleted because it still catches the cross-family class
+   > (bench/tasks.mjs ~331, where a stale ref crosses families and lands on a
+   > differently-labelled button) — deleting it would sever stores, break the
+   > `benchAttribution.test.ts` pins, and buy no measurement.
+
 3. **Observation classification.** Aperture arms keep
    `isFullSnapshot`/`isDiff`/`isNoChange`. pw arms get shape predicates over
    the section format (`### Snapshot` present = full observation; absent =

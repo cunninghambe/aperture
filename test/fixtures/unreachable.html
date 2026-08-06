@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Unreachable elements</title>
+    <style>
+      /* `pointer-events: none` from a STYLE SHEET, never an inline style —
+         closer to the real web, where it arrives from a utility class or a
+         framework's "disabled" styling, and inline styles are the one form the
+         walker could have cheated by reading off the attribute. */
+      .ghost {
+        pointer-events: none;
+      }
+
+      /* THE RE-ENABLED CHILD, and it is the commonest real shape of all: a
+         container switched off wholesale with one utility class, and one
+         control inside it switched back on. `pointer-events` INHERITS, so the
+         only honest answer is the COMPUTED value on the element itself — an
+         implementation that walks ancestors looking for `none` refuses a
+         control a human clicks every day. Must come after `.ghost`: equal
+         specificity, so source order decides. */
+      .repointer {
+        pointer-events: auto;
+      }
+
+      /* A NON-modal <dialog open> flows normally rather than taking the UA's
+         `position: absolute; margin: auto`, so it cannot land on top of
+         anything else on this page and confuse a hit-test. */
+      #nonmodal-dialog {
+        position: static;
+        margin: 8px 0;
+        padding: 6px;
+      }
+
+      /* The ghost controls sit ON TOP of a decoy sibling. That is what makes
+         G35a's regression pinnable: with `pointer-events: none` the target
+         cannot be its own hit-test result, so `document.elementFromPoint`
+         returns the DECOY, and the pre-fix error blamed the innocent element
+         beneath. Without something under them, the hit-test would return an
+         ANCESTOR, `composedContains` would call that "not obstructed", and the
+         misnamed-bystander failure this guard exists to catch could not
+         happen. */
+      .overlap {
+        position: relative;
+        height: 44px;
+        margin-bottom: 8px;
+      }
+      .decoy {
+        position: absolute;
+        inset: 0;
+        background: #eee;
+      }
+      .overlap > .ghost {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 2;
+      }
+
+      /* SMALL, and small on purpose: `findModal` (walker.ts) only reports a
+         modalKey for an overlay covering more than 15% of the viewport, so a
+         dialog this size is precisely the one that rule skips — while
+         `showModal()` still makes the whole background inert to a human. It is
+         pinned bottom-right so "Background action" at the top-left is beside
+         it and never under it: the click G36a refuses is one the hit-test
+         alone has no reason to stop. */
+      /* `left: auto; top: auto` is NOT tidiness. Chromium's UA sheet gives
+         `dialog:modal` `inset: 0` plus `margin: auto`, and with left, right and
+         width all resolved the RIGHT offset is the one that gets dropped — so
+         `right/bottom` alone left this dialog pinned at the TOP-LEFT, directly
+         over the background button, and G36a's whole "beside it, not under it"
+         claim was false. Measured: the pre-fix refusal blamed
+         `BUTTON#in-dialog`, which is only possible if the dialog is on top of
+         the button. */
+      #small-dialog {
+        position: fixed;
+        left: auto;
+        top: auto;
+        right: 8px;
+        bottom: 8px;
+        width: 140px;
+        height: 92px;
+        margin: 0;
+        padding: 6px;
+      }
+
+      #background-action {
+        position: fixed;
+        left: 8px;
+        top: 8px;
+        z-index: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Unreachable elements</h1>
+
+      <!-- THE THREE WAYS AN AGENT CAN ACT WHERE A HUMAN DEMONSTRABLY CANNOT
+           (docs/design/tier6.md §4; tier2 §5 is the ruled design). Guards
+           G34-G36; red record in docs/design/g34-36-red-record.md.
+
+           Pre-fix, `statesOf` consulted `:disabled` and nothing else, the
+           `select` handler refused on `isDisabled` and nothing else, and the
+           only reachability gate anywhere was `resolveRef`'s hit-test — which
+           catches a COVERING overlay and none of the three facts below.
+
+           NO TIMERS, NO RANDOMNESS, and no runtime class toggling: every
+           `pointer-events: none` and every `inert` on this page is static.
+           That is a deliberate churn decision (§4.6 item 5). Inert and
+           NoPointer transitions ARE diffed — only Offscreen is masked in
+           `propDelta`, and volatility suppression does not apply to state
+           changes — so a class that oscillated would emit a state flip on
+           every walk, with the size governor as the only backstop. The one
+           thing on this page that changes is the dialog, and it changes only
+           when a guard clicks it. -->
+
+      <!-- 1. THE INERT PANEL. A <select> here is writable by action:"select"
+              pre-fix: that path takes no coordinates, so the hit-test never
+              runs, and nothing else looked at `inert` at all. -->
+      <section id="inert-panel" inert>
+        <h2>Inert panel</h2>
+        <select id="inert-select" aria-label="Inert field">
+          <option value="a">Alpha</option>
+          <option value="b">Beta</option>
+          <option value="c">Gamma</option>
+        </select>
+        <button id="inert-button">Inert action</button>
+      </section>
+
+      <!-- 1b. INERT ACROSS A SHADOW BOUNDARY. The host carries `inert`; the
+              button lives in its OPEN shadow root. The walker pierces shadow
+              roots, so the agent is shown this button and can name it — and
+              `closest('[inert]')` from inside a shadow root does NOT cross the
+              boundary to the host, so an ascent written with `closest` reports
+              it reachable. The walker's inherited flag and the preload's
+              composed-tree ascent both cross it; this section is what makes the
+              difference between them measurable. -->
+      <div id="shadow-inert-host" inert></div>
+
+      <!-- 2. THE TWIN. Byte-for-byte the same controls, no `inert` attribute.
+              Without it a build that refused EVERYTHING would pass G34a and
+              G34d, and the guard would be measuring nothing. -->
+      <section id="live-panel">
+        <h2>Live panel</h2>
+        <select id="live-select" aria-label="Live field">
+          <option value="a">Alpha</option>
+          <option value="b">Beta</option>
+          <option value="c">Gamma</option>
+        </select>
+        <button id="live-button">Live action</button>
+      </section>
+
+      <!-- 3. POINTER-EVENTS: NONE, on both an addressable button and an
+              addressable select — because the two get OPPOSITE verdicts and
+              that asymmetry is load-bearing. `pointer-events` blocks pointer
+              input only; a human Tabs to such a select and changes it with the
+              keyboard, so refusing `select` would make the agent WEAKER than a
+              human, the inverse failure. `click`/`type` refuse because the
+              type path acquires focus by CDP click, so a no-pointer field
+              mechanically cannot be focused. -->
+      <section id="ghost-panel">
+        <h2>Ghost panel</h2>
+        <div class="overlap">
+          <div class="decoy" id="decoy-button">Decoy under the ghost button</div>
+          <button id="ghost-button" class="ghost">Ghost action</button>
+        </div>
+        <div class="overlap">
+          <div class="decoy" id="decoy-select">Decoy under the ghost field</div>
+          <select id="ghost-select" class="ghost" aria-label="Ghost field">
+            <option value="a">Alpha</option>
+            <option value="b">Beta</option>
+            <option value="c">Gamma</option>
+          </select>
+        </div>
+
+        <!-- THE OVER-BLOCKING CONTROL. The wrapper is `pointer-events: none`
+             and this button turns it back on — a human clicks it, so the agent
+             must be allowed to, and its snapshot line must NOT say no-pointer.
+             Nothing sits under it, so the hit-test has no opinion either way
+             and the only thing being measured is the reachability rule. -->
+        <div class="ghost">
+          <button id="reenabled-button" class="repointer">Re-enabled action</button>
+        </div>
+      </section>
+
+      <!-- 5. A NON-MODAL <dialog open>. It gates NOTHING: the platform makes no
+              background inert for it, a human uses the rest of the page
+              normally, and `dialog:modal` does not match it. An enforcement
+              written against `dialog[open]` instead would take this whole page
+              away from the agent for as long as this dialog is on screen —
+              over-blocking that no leg exercising only `showModal()` can see.
+              It is open from load and never closes, so every other leg on this
+              page doubles as a witness that it gates nothing. -->
+      <dialog id="nonmodal-dialog" open>
+        <button id="nonmodal-inside">Inside the non-modal</button>
+      </dialog>
+      <button id="beside-nonmodal">Beside the non-modal</button>
+
+      <!-- 4. THE SMALL MODAL DIALOG, with the way out INSIDE it (so a refusing
+              build does not trap the agent) and a background button BESIDE it
+              (so the refusal cannot be the hit-test doing its old job). -->
+      <section id="dialog-panel">
+        <h2>Dialog panel</h2>
+        <button id="open-dialog">Open dialog</button>
+        <dialog id="small-dialog">
+          <button id="in-dialog">Confirm inside the dialog</button>
+          <button id="close-dialog">Close dialog</button>
+        </dialog>
+      </section>
+
+      <button id="background-action">Background action</button>
+
+      <!-- THE WITNESS, in guards.html's shape and for guards.html's reason:
+           Aperture reporting "refused" is not evidence that nothing happened.
+           This line is. -->
+      <p id="witness">events: none</p>
+    </main>
+
+    <script>
+      (function () {
+        var seen = [];
+        var witnessEl = document.getElementById('witness');
+        function record(what) {
+          seen.push(what);
+          witnessEl.textContent = 'events: ' + seen.join(' ');
+        }
+
+        for (const id of ['inert-select', 'live-select', 'ghost-select']) {
+          document
+            .getElementById(id)
+            .addEventListener('change', function (e) {
+              record(id + '=' + e.target.value);
+            });
+        }
+        for (const id of [
+          'inert-button', 'live-button', 'ghost-button', 'reenabled-button',
+          'in-dialog', 'background-action', 'decoy-button', 'decoy-select',
+          'nonmodal-inside', 'beside-nonmodal',
+        ]) {
+          document.getElementById(id).addEventListener('click', function () {
+            record(id);
+          });
+        }
+
+        // The inert host's button lives in an OPEN shadow root — open because
+        // the walker only pierces open ones, and a closed root would make this
+        // section unreachable for a reason that has nothing to do with inert.
+        var shadow = document
+          .getElementById('shadow-inert-host')
+          .attachShadow({ mode: 'open' });
+        var shadowButton = document.createElement('button');
+        shadowButton.id = 'shadow-button';
+        shadowButton.textContent = 'Shadow inert action';
+        shadowButton.addEventListener('click', function () {
+          record('shadow-button');
+        });
+        shadow.append(shadowButton);
+
+        var dlg = document.getElementById('small-dialog');
+        // `showModal`, not `show`: only the modal form puts the dialog in the
+        // top layer and makes the rest of the document inert to a human. A
+        // non-modal <dialog open> would make G36 vacuous.
+        document.getElementById('open-dialog').addEventListener('click', function () {
+          if (!dlg.open) dlg.showModal();
+        });
+        document.getElementById('close-dialog').addEventListener('click', function () {
+          dlg.close();
+        });
+        // Deliberately NO click-outside-to-close handler: a background click
+        // that reaches the backdrop must change nothing at all, so the witness
+        // stays the page's honest record of what landed.
+      })();
+    </script>
+  </body>
+</html>

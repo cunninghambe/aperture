@@ -382,7 +382,29 @@ function renderOp(
       const bits: string[] = [];
       if (op.delta.name) bits.push(quote(op.delta.name[1]));
       if (op.delta.value !== undefined) bits.push(`=${quote(op.delta.value)}`);
-      if (op.delta.text) bits.push(quote(op.delta.text[1]));
+      // A BARE quoted string on a `~` line is always and only the new
+      // accessible NAME; an inner-text change is spelled `text "…"`. Both used
+      // to go out bare and the reader resolved the ambiguity by position. That
+      // is not merely unreadable, it is CORRUPTING: an aria-labelled button
+      // whose text alone changes emitted `~ e1 "✕"`, which reads as a rename of
+      // an element still called `Close`, and nothing downstream ever
+      // contradicts the wrong belief. Name and text diverge whenever the
+      // accessible name comes from aria-* or from descendants — the walker sets
+      // `text` from `directText` on ANY element with direct text, and
+      // `propDelta` compares it for every node, so the co-change the old wire
+      // relied on is the common case and not the contract.
+      //
+      // The equality test is the DEDUPE, and it covers the commonest update
+      // there is: `<button>Save</button>` → `Saved` changes name and text to
+      // the same string and used to emit it twice. The model holds one
+      // displayed string per line; identical bytes twice buy nothing.
+      //
+      // No registry lookup and no role logic here — the token is uniform. What
+      // it MEANS (for a `text`-role node the displayed string IS its text) is
+      // decided by the only side that knows the role: the reader.
+      if (op.delta.text && op.delta.text[1] !== op.delta.name?.[1]) {
+        bits.push(`text ${quote(op.delta.text[1])}`);
+      }
       // New target only — the same convention `name` and `value` follow.
       // Unquoted, because `sanitizeHref` (walker.ts) has already stripped
       // whitespace, control characters and bidi overrides and capped the
@@ -407,9 +429,14 @@ function renderOp(
     }
     case 'add': {
       const lines: string[] = [];
-      // Diffs are the production stream and stay collapsed; `expand` is an
-      // explicit, opt-in request on a full snapshot.
-      renderNode(op.subtree, 1, lines, { reg, seq, expand: false, marks });
+      // Op subtrees render IN FULL. Everything in an add/replace subtree is
+      // content the model has by definition never seen; collapsing it only
+      // defers the read to a strictly dearer channel (a turn + an expand:true
+      // FULL page snapshot), and the elided tail of a replace could hide a
+      // survivor whose content changed in the same re-render — a silent
+      // fidelity hole, since walk() emits no update op inside a replaced
+      // subtree (tier6 §2).
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: true, marks });
       const where = op.after ? `after ${op.after}` : `under ${op.parent}`;
       return `+ ${where}:\n${lines.join('\n')}`;
     }
@@ -430,7 +457,9 @@ function renderOp(
       return `- gone: ${op.refs.join(' ')}`;
     case 'replace': {
       const lines: string[] = [];
-      renderNode(op.subtree, 1, lines, { reg, seq, expand: false, marks });
+      // In full, for the reason spelled out on the `add` case above — and this
+      // is the site where it is a correctness fix rather than an economy.
+      renderNode(op.subtree, 1, lines, { reg, seq, expand: true, marks });
       // Naming the refs the replace destroyed is what stops the model going on
       // believing in elements that no longer exist — the phantom refs the
       // fidelity check caught. A replace that reports only what it created is

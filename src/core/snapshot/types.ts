@@ -28,6 +28,25 @@ export const State = {
   Volatile: 256,
   Offscreen: 512,
   Invalid: 1024,
+  /**
+   * The element, or an ancestor of it through the composed tree, carries the
+   * `inert` attribute.
+   *
+   * RENDERED PER ELEMENT, unlike the open-modal fact (tier6 §4.2). Inert
+   * regions are typically small, deliberately-marked panels, so the token cost
+   * is local; a page flipping inert on a large region produces a large diff and
+   * the size governor resyncs, which is the correct outcome. Enforced as well
+   * as rendered: `action:"select"` takes no coordinates, so the hit-test never
+   * protected an inert `<select>` and it was simply writable.
+   */
+  Inert: 2048,
+  /**
+   * Computed `pointer-events` is `none`, AND the role is addressable.
+   *
+   * The role gate is the point: decorative overlays carry `pointer-events:none`
+   * constantly, and the agent needs the word only on things it might act on.
+   */
+  NoPointer: 4096,
 } as const;
 
 export type StateBits = number;
@@ -43,6 +62,10 @@ export const STATE_NAMES: [number, string][] = [
   [State.Modal, 'modal'],
   [State.Readonly, 'readonly'],
   [State.Invalid, 'invalid'],
+  // APPENDED, and appended deliberately: the existing word order is pinned by
+  // tests and by every archived transcript.
+  [State.Inert, 'inert'],
+  [State.NoPointer, 'no-pointer'],
 ];
 
 export type Rect = [x: number, y: number, w: number, h: number];

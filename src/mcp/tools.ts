@@ -91,6 +91,7 @@ Snapshot format (indentation = containment):
   "..."         accessible name        ="..."  current value
   /path         link destination       hN      heading level N
   bare words    states: checked disabled required expanded selected modal
+                inert no-pointer — a human cannot act on these either
   [N options]   a NATIVE <select> with N options — and nothing else ever
                 emits this. Choose one with browser_act action:"select";
                 browser_read with its ref lists them all.
@@ -100,6 +101,9 @@ Snapshot format (indentation = containment):
   (unchanged …)  nothing visible changed; your model of the page is already current
 
 Diff ops: ~ changed  + added  - removed  > moved  ! subtree replaced
+  ~ eN "..."        the element's accessible name changed
+  ~ eN text "..."   its inner text changed; the name did NOT — do not update
+                    the label you hold for it
   ~ eN href=/path   this link now points somewhere else; the label may not have
                     changed, so re-read the target before trusting it
   ~ eN RxC:         this table's contents changed; the rows that follow REPLACE
@@ -1492,7 +1496,47 @@ export function registerBrowserTools(
         );
       }
 
-      if (r.obstructed) {
+      // REACHABILITY BEFORE OBSTRUCTION, and the ORDER is the point (tier6 §4).
+      //
+      // A `pointer-events: none` target cannot be its own hit-test result, so
+      // it ALWAYS reads as obstructed by whatever sits beneath it — measured:
+      // `e68 is covered by "DIV#decoy-button" … Dismiss it first`, naming an
+      // innocent bystander and sending the agent after an overlay that is not
+      // the problem. An addressable ANCESTOR of an open modal dialog goes the
+      // other way: the containment test in `resolveRef` excuses it and the act
+      // lands (measured, G36d). Neither is a question the hit-test can answer,
+      // so it is asked second.
+      //
+      // The matrix, verbatim from the ruling:
+      //   click / hover / clear / type   inert refuse · modal refuse · no-pointer refuse
+      //   select                         inert refuse · modal refuse · no-pointer ALLOW
+      //
+      // (`scroll` in this build is page-level and takes no ref, so the ruling's
+      // element-scroll row has no call site here.)
+      const blocked = r.blocked ?? null;
+      if (blocked && !(blocked === 'no-pointer' && action === 'select')) {
+        // Fixed strings, no page bytes — so they sit outside the envelope with
+        // no redaction needed, like every other preload-reason line.
+        return text(
+          'error: ' +
+            (blocked === 'inert'
+              ? `${ref} is inside an inert region — the page has disabled it; a human cannot interact with it either.`
+              : blocked === 'modal'
+                ? `${ref} is behind an open modal dialog — interact with the dialog first.`
+                : `${ref} does not receive pointer input (pointer-events: none) — a pointer action cannot reach it.`),
+        );
+      }
+
+      // THE ONE PLACE THE HIT-TEST IS DELIBERATELY IGNORED, and it is what
+      // makes the matrix's one `allow` cell reachable at all. A no-pointer
+      // element is obstructed BY CONSTRUCTION, so letting this branch have it
+      // would refuse every keyboard-reachable no-pointer select that has
+      // anything whatsoever beneath it — the pointer-only fact blocking the
+      // non-pointer path, which is the inverse failure the asymmetry exists to
+      // avoid. Nothing that genuinely blocks is lost: `dialog:modal` is caught
+      // above, and an advisory `aria-modal` overlay does not stop a human
+      // Tabbing to the control either.
+      if (r.obstructed && blocked !== 'no-pointer') {
         // `obstructor` is built from the obstructing element's own tagName and
         // id, so it is page-authored, and it is interpolated into harness
         // prose that deliberately sits OUTSIDE the envelope. `safeForAgent`
@@ -1606,6 +1650,20 @@ export function registerBrowserTools(
                 `error: ${ref} is disabled — either directly or by an enclosing ` +
                   '<fieldset disabled> — so a human could not change it either. ' +
                   'Nothing was written.',
+              );
+            // The preload's own belt-and-braces refusals. The resolve gate
+            // above already answers these, so reaching them means a caller
+            // skipped it — the prose is identical on purpose, because the
+            // agent must not be able to tell which layer refused.
+            case 'inert':
+              return text(
+                `error: ${ref} is inside an inert region — the page has disabled it; ` +
+                  'a human cannot interact with it either.',
+              );
+            case 'modal':
+              return text(
+                `error: ${ref} is behind an open modal dialog — interact with the ` +
+                  'dialog first.',
               );
             case 'blank-query':
               // Not the same fact as `empty`, and the remedy is different. The
